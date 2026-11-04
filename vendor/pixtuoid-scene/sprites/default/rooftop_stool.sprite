@@ -1,10 +1,10 @@
-# A red plastic stool at the end of the folding table.
+# A bistro chair at the end of the rooftop's table.
 # agent-office: drawn by tools/hk_art.py; edit the script, not this file.
 @frame 0
 . . . . . . .
-. . . . . . .
-. . . . . . .
-. Ǟ Ǟ ǟ Ǟ Ǟ .
-. Ǟ Ǟ . Ǟ Ǟ .
-. Ǟ ǟ ǟ ǟ Ǟ .
-n Ǟ n . n Ǟ n
+. E E E . . .
+. E ξ . . . .
+. E O O O O .
+. D D D D D .
+. E ξ n ξ E .
+n E ξ . ξ E n

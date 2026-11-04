@@ -198,6 +198,8 @@ pub enum FixtureKind {
     MeetingTable {
         /// Its room.
         room: usize,
+        /// agent-office: which of its tables ([`MeetingTrio::tables`]).
+        table: usize,
     },
     /// A head-of-table meeting chair.
     MeetingChair {
@@ -284,6 +286,7 @@ impl FixtureKind {
                 WallDecor::ExitSign => "Exit Sign",
                 WallDecor::MeetingScreen => "Meeting Screen",
                 WallDecor::WaterTank => "Water Tank",
+                WallDecor::OfficeShelf => "Bookshelf",
             },
             FixtureKind::MeetingRug { .. } | FixtureKind::LoungeRug => "Rug",
             FixtureKind::MeetingSofa { .. } => "Meeting Sofa",
@@ -488,7 +491,7 @@ impl SceneLayout {
                 style: _,
             } = r;
             let trio = trio.map(|t| {
-                let MeetingTrio { sofas, table } = t;
+                let MeetingTrio { sofas, table, .. } = t;
                 (t, sofas, table)
             });
             (room, r, trio)
@@ -574,8 +577,9 @@ impl SceneLayout {
                 })
             }))
             .chain(rooms.clone().flat_map(|(room, _, trio)| {
-                trio.into_iter().flat_map(move |(_, sofas, table)| {
-                    sofas.into_iter().enumerate().map(move |(seat, sofa)| {
+                // agent-office: the sofas that stand.
+                trio.into_iter().flat_map(move |(t, _, table)| {
+                    t.sofa_seats().map(move |(seat, sofa)| {
                         let faces_away = sofa.y >= table.y;
                         Fixture {
                             kind: FixtureKind::MeetingSofa {
@@ -597,13 +601,16 @@ impl SceneLayout {
                     })
                 })
             }))
-            .chain(rooms.clone().filter_map(|(room, _, trio)| {
-                let (_, _, table) = trio?;
-                Some(centred_row(
-                    FixtureKind::MeetingTable { room },
-                    table,
-                    Furniture::MeetingTable,
-                ))
+            .chain(rooms.clone().flat_map(|(room, _, trio)| {
+                trio.into_iter().flat_map(move |(t, _, _)| {
+                    t.tables().enumerate().map(move |(table, at)| {
+                        centred_row(
+                            FixtureKind::MeetingTable { room, table },
+                            at,
+                            Furniture::MeetingTable,
+                        )
+                    })
+                })
             }))
             .chain(
                 island.map(|at| {

@@ -200,6 +200,9 @@ struct FloorPlan {
 /// their sitters' chairs, before the corridor.
 const BENCH_SOUTH_CLEAR: u16 = 4;
 
+/// agent-office: floor kept between your office's furniture and its walls.
+const OFFICE_PROP_CLEAR: u16 = 3;
+
 /// agent-office: rows of floor a meeting room's trio spreads over past its
 /// fit height.
 const TRIO_SLACK: u16 = 20;
@@ -485,22 +488,44 @@ impl FloorPlan {
     }
 }
 
-/// agent-office: the rooftop's stools and folding table, gathered at its
-/// middle rather than spread over its full height as a room's sofas are, and
-/// none on a rooftop too small for them.
+/// agent-office: the rooftop's furniture, north to south: a bistro table
+/// with a stool at each end clear of the railing's planters, the one bench
+/// south of it looking north over it to the sea, and a second bistro table
+/// further south where the rooftop runs that far. None on a rooftop too
+/// small for the first table and the bench.
 fn rooftop_trio(roof: Bounds) -> Option<super::MeetingTrio> {
-    /// Rows of floor kept round the trio, over its fit height.
-    const ROOFTOP_TRIO_SLACK: u16 = 14;
-    let h = (MeetingRoom::trio_fit_h() + ROOFTOP_TRIO_SLACK).min(roof.height);
-    let gather = Bounds {
-        y: roof.y + (roof.height - h) / 2,
-        height: h,
-        ..roof
+    /// Rows from the rooftop's north edge to the first table: the railing's
+    /// planters stand in between.
+    const FIRST_TABLE: u16 = 14;
+    /// Rows from a table to the bench south of it.
+    const TABLE_TO_BENCH: u16 = 11;
+    /// Rows from the bench to the second table.
+    const BENCH_TO_TABLE: u16 = 18;
+    /// Rows kept south of the second table: its stools' sitters and a lane.
+    const SOUTH_CLEAR: u16 = 12;
+    let x = roof.x + roof.width / 2;
+    let table = Point {
+        x,
+        y: roof.y + FIRST_TABLE,
     };
-    // agent-office: open air on its west side, so a slot-wide rooftop still
-    // routes round its benches where a walled room that narrow would not.
-    (gather.width >= ROOFTOP_FURNITURE_MIN_W && gather.height >= MeetingRoom::trio_fit_h())
-        .then(|| MeetingRoom::place_trio(gather, false))
+    let bench = Point {
+        x,
+        y: table.y + TABLE_TO_BENCH,
+    };
+    let far = Point {
+        x,
+        y: bench.y + BENCH_TO_TABLE,
+    };
+    let floor_end = roof.y + roof.height;
+    if roof.width < ROOFTOP_FURNITURE_MIN_W || bench.y + SOUTH_CLEAR > floor_end {
+        return None;
+    }
+    Some(super::MeetingTrio {
+        sofas: [bench, bench],
+        table,
+        north_sofa: false,
+        far_table: (far.y + SOUTH_CLEAR <= floor_end).then_some(far),
+    })
 }
 
 pub(super) fn compute_with_seed(
@@ -522,7 +547,26 @@ pub(super) fn compute_with_seed(
         .chain(desk_chair_fixtures(&pod_desks))
         .map(|f| art_rect(f.visual))
         .collect();
-    let pod_decor = compute_pod_decor(plan.pod_grid, floor_seed, &desk_art);
+    let mut pod_decor = compute_pod_decor(plan.pod_grid, floor_seed, &desk_art);
+    // agent-office: your office's Hang Seng screen, south of its sofas.
+    let office = plan
+        .meeting_rooms
+        .iter()
+        .find(|r| r.style == super::RoomStyle::Boss);
+    if let Some((b, trio)) = office.and_then(|r| r.trio.map(|t| (r.bounds, t))) {
+        let tv = furniture_def(Furniture::Tv).visual;
+        let sofa_h = furniture_def(Furniture::MeetingSofaBody).visual.h;
+        let pos = Point {
+            x: trio.table.x,
+            y: trio.sofas[1].y + sofa_h / 2 + OBSTACLE_PAD_PX + tv.h / 2 + 1,
+        };
+        if pos.y + tv.h / 2 + OFFICE_PROP_CLEAR <= b.y + b.height {
+            pod_decor.push(PodDecorItem {
+                kind: PodDecor::Tv,
+                pos,
+            });
+        }
+    }
 
     // Dense's inter-meeting wall is deliberately solid (#557 door policy).
     let (room_walls, doorways) = super::rooms::walls::derive_room_walls(
@@ -715,6 +759,38 @@ pub(super) fn compute_with_seed(
     }
 
     let mut wall_decor = place_wall_decor(&plan, door, &desk_art, &pod_decor);
+    // agent-office: your office's bookshelf, against its north wall in the
+    // corner away from the door.
+    if let Some(b) = office.map(|r| r.bounds) {
+        let shelf = furniture_def(WallDecor::OfficeShelf.furniture()).visual;
+        let pos = Point {
+            x: (b.x + b.width).saturating_sub(shelf.w + OFFICE_PROP_CLEAR),
+            y: b.y + super::WALL_THICK_H + 1,
+        };
+        // Clear of the sofas and the chairs at the table's ends.
+        let clear = office.and_then(|r| r.trio).is_none_or(|t| {
+            let dx = super::rooms::meeting::MEETING_CHAIR_TABLE_DX;
+            t.sofa_seats()
+                .map(|(_, s)| (Furniture::MeetingSofaBody, s))
+                .chain(
+                    [t.table.x - dx, t.table.x + dx]
+                        .map(|x| (Furniture::MeetingChair, Point { x, y: t.table.y })),
+                )
+                .all(|(kind, at)| {
+                    let v = furniture_def(kind).visual;
+                    !super::placement::rects_overlap(
+                        (pos, shelf),
+                        (anchored_top_left(Pivot::Center, at, v.w, v.h), v),
+                    )
+                })
+        });
+        if clear && pos.x > b.x + b.width / 2 && pos.y + shelf.h < b.y + b.height {
+            wall_decor.push(WallDecorItem {
+                kind: WallDecor::OfficeShelf,
+                pos,
+            });
+        }
+    }
 
     // The island pushes its 4 slots BEFORE the shelf's — the push order the goldens pin.
     let kitchen_island = plan.pantry.and_then(|pr| {
@@ -776,8 +852,24 @@ pub(super) fn compute_with_seed(
             plants.push(settled);
         }
     }
+    // The rooftop's stools carry no ground of their own, so a pot keeps off
+    // their art too.
+    let chairs: Vec<(Point, Size)> = waypoints
+        .iter()
+        .filter(|w| w.kind == WaypointKind::MeetingChair)
+        .map(|w| {
+            let v = furniture_def(Furniture::MeetingChair).visual;
+            (anchored_top_left(Pivot::Center, w.pos, v.w, v.h), v)
+        })
+        .collect();
     for p in roof_plants {
-        if plant_spot_clear(p.kind, p.pos, &desk_art, &waypoints, &singleton_rects) {
+        let v = furniture_def(p.kind.furniture()).visual;
+        let pot = (anchored_top_left(Pivot::Center, p.pos, v.w, v.h), v);
+        if plant_spot_clear(p.kind, p.pos, &desk_art, &waypoints, &singleton_rects)
+            && chairs
+                .iter()
+                .all(|&c| !super::placement::rects_overlap(pot, c))
+        {
             plants.push(p);
         }
     }
@@ -1215,13 +1307,10 @@ pub(super) fn plant_obstacle_rects(
     .filter_map(|(kind, pos)| pos.and_then(|p| boxed(kind, p)))
     .chain(meeting_rooms.iter().flat_map(|room| {
         room.trio.iter().flat_map(|trio| {
-            [
-                (Furniture::MeetingSofaBody, trio.sofas[0]),
-                (Furniture::MeetingSofaBody, trio.sofas[1]),
-                (Furniture::MeetingTable, trio.table),
-            ]
-            .into_iter()
-            .filter_map(|(kind, pos)| boxed(kind, pos))
+            trio.sofa_seats()
+                .map(|(_, sofa)| (Furniture::MeetingSofaBody, sofa))
+                .chain(trio.tables().map(|t| (Furniture::MeetingTable, t)))
+                .filter_map(|(kind, pos)| boxed(kind, pos))
         })
     }))
     .collect()
@@ -1903,7 +1992,7 @@ fn compute_waypoints(
     for (room_id, room) in meeting_rooms.iter().enumerate() {
         let Some(trio) = room.trio else { continue };
         let table = trio.table;
-        for sofa in trio.sofas {
+        for (_, sofa) in trio.sofa_seats() {
             let facing = if sofa.y < table.y {
                 Facing::South
             } else {
@@ -1924,16 +2013,18 @@ fn compute_waypoints(
         // The offsets must MIRROR: the table blocks a span symmetric about t.x, and an asymmetric
         // pair puts one chair closer to the wood, swallowing the rug border its twin shows.
         let chair_dx = super::rooms::meeting::MEETING_CHAIR_TABLE_DX as i16;
-        for (dx, facing) in [(-chair_dx, Facing::East), (chair_dx, Facing::West)] {
-            waypoints.push(Waypoint {
-                pos: Point {
-                    x: table.x.saturating_add_signed(dx),
-                    y: table.y,
-                },
-                kind: WaypointKind::MeetingChair,
-                facing,
-                room_id: Some(room_id),
-            });
+        for table in trio.tables() {
+            for (dx, facing) in [(-chair_dx, Facing::East), (chair_dx, Facing::West)] {
+                waypoints.push(Waypoint {
+                    pos: Point {
+                        x: table.x.saturating_add_signed(dx),
+                        y: table.y,
+                    },
+                    kind: WaypointKind::MeetingChair,
+                    facing,
+                    room_id: Some(room_id),
+                });
+            }
         }
     }
 

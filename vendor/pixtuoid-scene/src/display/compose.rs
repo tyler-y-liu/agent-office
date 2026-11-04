@@ -796,7 +796,7 @@ fn push_fixture(
             }
             return;
         }
-        K::MeetingTable { room } => {
+        K::MeetingTable { room, .. } => {
             let table = crate::layout::furniture_def(crate::layout::Furniture::MeetingTable).visual;
             // agent-office: the rooftop's folding table.
             let sprite = if on_rooftop(layout, room) {

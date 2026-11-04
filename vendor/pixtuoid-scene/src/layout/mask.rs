@@ -189,11 +189,13 @@ pub(super) fn build_walkable_mask(obs: &MaskObstacles) -> WalkableMask {
         // The sofa's pad is what gives vertical sit clearance — see its
         // `furniture_def` row.
         let sofa_def = furniture_def(Furniture::MeetingSofaBody);
-        for sofa in trio.sofas {
+        for (_, sofa) in trio.sofa_seats() {
             stamp_ground(&mut mask, &sofa_def, Pivot::Center, sofa);
         }
         let table_def = furniture_def(Furniture::MeetingTable);
-        stamp_ground(&mut mask, &table_def, Pivot::Center, trio.table);
+        for table in trio.tables() {
+            stamp_ground(&mut mask, &table_def, Pivot::Center, table);
+        }
     }
 
     if let Some(island) = kitchen_island {

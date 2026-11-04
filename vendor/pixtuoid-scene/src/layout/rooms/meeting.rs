@@ -11,6 +11,12 @@ pub struct MeetingTrio {
     pub(crate) sofas: [Point; 2],
     /// The table centre, midway between the two sofas (pixel-space).
     pub table: Point,
+    /// agent-office: whether `sofas[0]` stands: the rooftop has the one
+    /// bench, facing the sea over its table.
+    pub(crate) north_sofa: bool,
+    /// agent-office: a second table, its chairs at its ends: the rooftop's
+    /// second bistro table.
+    pub(crate) far_table: Option<Point>,
 }
 
 /// A meeting rug's width.
@@ -19,6 +25,20 @@ const MEETING_RUG_W: u16 = 18;
 const MEETING_RUG_OVERHANG: u16 = 8;
 
 impl MeetingTrio {
+    /// agent-office: the sofas that stand, each with its index in `sofas`.
+    pub(crate) fn sofa_seats(&self) -> impl Iterator<Item = (usize, Point)> + use<> {
+        let north = self.north_sofa;
+        self.sofas
+            .into_iter()
+            .enumerate()
+            .filter(move |&(i, _)| i == 1 || north)
+    }
+
+    /// agent-office: its tables, the one between the sofas first.
+    pub(crate) fn tables(&self) -> impl Iterator<Item = Point> + use<> {
+        std::iter::once(self.table).chain(self.far_table)
+    }
+
     /// The rug under this trio's table, reaching from sofa to sofa but no
     /// further than the table's distance to `ground_end`, the row the ground ends
     /// at (plus the same overhang).
@@ -111,8 +131,12 @@ impl MeetingRoom {
         /// Rows from the room-centre row down to the rack's base.
         const BASE_BELOW_MID: u16 = 3;
         // agent-office: the rooftop keeps to its benches and table; no laundry
-        // pole. The waiting area has no door to hang coats by.
-        if matches!(self.style, RoomStyle::Rooftop | RoomStyle::Waiting) {
+        // pole. The waiting area has no door to hang coats by, and your
+        // office's east wall has its bookshelf.
+        if matches!(
+            self.style,
+            RoomStyle::Rooftop | RoomStyle::Waiting | RoomStyle::Boss
+        ) {
             return None;
         }
         let b = self.bounds;
@@ -183,6 +207,8 @@ impl MeetingRoom {
                 x: cx,
                 y: u16::midpoint(north_y, south_y),
             },
+            north_sofa: true,
+            far_table: None,
         }
     }
 
@@ -276,6 +302,8 @@ mod tests {
         let trio = MeetingTrio {
             sofas: [Point { x, y: 50 }, Point { x, y: 90 }],
             table: Point { x, y: 70 },
+            north_sofa: true,
+            far_table: None,
         };
         let ground_end = 96;
         assert_eq!(

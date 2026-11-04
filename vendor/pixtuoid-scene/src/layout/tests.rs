@@ -589,7 +589,7 @@ fn sofas_seat_three_people() {
         .meeting_rooms
         .iter()
         .filter_map(|r| r.trio.as_ref())
-        .map(|t| t.sofas.len())
+        .map(|t| t.sofa_seats().count())
         .sum();
     assert_eq!(sofa_seats, 3 * total_sofas, "each meeting sofa seats 3");
 }
@@ -1278,5 +1278,67 @@ fn the_rooftop_is_open_to_the_sky() {
     assert!(
         !l.glass_at(sky.x + 1, rows.end - 1),
         "no railing along the rooftop's foot"
+    );
+}
+
+/// agent-office: the rooftop is a place to sit out a long idle stretch
+/// looking at the harbour: one bench whose sitters face north to the sea,
+/// and two bistro tables with a chair at each end.
+#[test]
+fn the_rooftop_has_one_bench_facing_the_sea_and_two_bistro_tables() {
+    let l = SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+    let room = l
+        .meeting_rooms
+        .iter()
+        .position(|r| r.style == RoomStyle::Rooftop)
+        .expect("a rooftop");
+    let trio = l.meeting_rooms[room].trio.expect("its furniture");
+    assert_eq!(trio.sofa_seats().count(), 1, "one bench");
+    assert_eq!(trio.tables().count(), 2, "two tables");
+    let seats: Vec<_> = l
+        .waypoints
+        .iter()
+        .filter(|w| w.room_id == Some(room))
+        .collect();
+    let bench: Vec<_> = seats
+        .iter()
+        .filter(|w| w.kind == WaypointKind::MeetingSofa)
+        .collect();
+    assert_eq!(bench.len(), 3);
+    assert!(
+        bench.iter().all(|w| w.facing == Facing::North),
+        "facing the sea"
+    );
+    let chairs = seats
+        .iter()
+        .filter(|w| w.kind == WaypointKind::MeetingChair)
+        .count();
+    assert_eq!(chairs, 4, "a chair at each end of each table");
+}
+
+/// agent-office: your office reads as yours, not a third meeting room: a
+/// bookshelf against its north wall and the Hang Seng screen.
+#[test]
+fn your_office_has_its_bookshelf_and_quote_screen() {
+    let l = SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+    let b = l
+        .meeting_rooms
+        .iter()
+        .find(|r| r.style == RoomStyle::Boss)
+        .expect("your office")
+        .bounds;
+    let inside =
+        |p: Point| (b.x..b.x + b.width).contains(&p.x) && (b.y..b.y + b.height).contains(&p.y);
+    assert!(
+        l.wall_decor
+            .iter()
+            .any(|d| d.kind == WallDecor::OfficeShelf && inside(d.pos)),
+        "a bookshelf"
+    );
+    assert!(
+        l.pod_decor
+            .iter()
+            .any(|d| d.kind == PodDecor::Tv && inside(d.pos)),
+        "a quote screen"
     );
 }

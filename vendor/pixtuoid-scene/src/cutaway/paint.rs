@@ -4797,7 +4797,8 @@ mod tests {
             PackPiece::WaterCooler,
             PackPiece::VendingMachine,
             PackPiece::Printer,
-            PackPiece::RooftopBench,
+            // agent-office: no rooftop bench: its one bench faces the sea, so
+            // only its back view is drawn, in bands as a sofa's back is.
             PackPiece::RooftopStool,
         ]) {
             assert!(

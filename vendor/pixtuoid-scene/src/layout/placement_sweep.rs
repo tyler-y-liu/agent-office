@@ -179,12 +179,19 @@ fn pieces(l: &SceneLayout) -> Vec<Piece> {
                 None,
             )),
             FixtureKind::Pod { item, kind } => {
+                // agent-office: your office's Hang Seng screen stands in it.
+                let pos = l.pod_decor[item].pos;
+                let office = l
+                    .meeting_rooms
+                    .iter()
+                    .position(|r| r.style == super::RoomStyle::Boss)
+                    .filter(|&r| contains_point(l.meeting_rooms[r].bounds, pos));
                 let mut piece = Piece::table(
                     format!("pod_decor[{item}] {kind:?}"),
                     Pivot::Center,
-                    l.pod_decor[item].pos,
+                    pos,
                     kind.furniture(),
-                    Container::Band,
+                    office.map_or(Container::Band, Container::MeetingRoom),
                     None,
                 );
                 piece.visual_in_container = true;
@@ -236,6 +243,13 @@ fn pieces(l: &SceneLayout) -> Vec<Piece> {
                             .iter()
                             .position(|r| r.style == super::RoomStyle::Rooftop)
                             .expect("a water tank stands on the rooftop"),
+                    ),
+                    // agent-office: in your office.
+                    WallDecor::OfficeShelf => Container::MeetingRoom(
+                        l.meeting_rooms
+                            .iter()
+                            .position(|r| r.style == super::RoomStyle::Boss)
+                            .expect("your office's bookshelf stands in your office"),
                     ),
                 };
                 out.push(Piece::table(
@@ -314,12 +328,12 @@ fn pieces(l: &SceneLayout) -> Vec<Piece> {
                     ));
                 }
             }
-            FixtureKind::MeetingTable { room } => {
+            FixtureKind::MeetingTable { room, table } => {
                 if let Some(trio) = l.meeting_rooms[room].trio {
                     out.push(Piece::table(
-                        format!("meeting[{room}].table"),
+                        format!("meeting[{room}].table[{table}]"),
                         Pivot::Center,
-                        trio.table,
+                        trio.tables().nth(table).expect("its table"),
                         Furniture::MeetingTable,
                         Container::MeetingRoom(room),
                         None,
