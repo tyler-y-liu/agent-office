@@ -839,8 +839,9 @@ fn place_tags(
             let foot = (at.y + i64::from(at.h)) * i64::from(u);
             Tag {
                 agent: b.agent,
+                // Not off the window's west edge, by the rooftop.
                 badge: Area {
-                    x: cx - i64::from(w / 2),
+                    x: (cx - i64::from(w / 2)).max(0),
                     y: foot - i64::from(h),
                     w,
                     h,
@@ -879,7 +880,7 @@ fn place_tags(
         let b = t.badge;
         t.label = (1..=LABEL_TIERS)
             .map(|tier| Area {
-                x: b.x + i64::from(b.w / 2) - i64::from(w / 2),
+                x: (b.x + i64::from(b.w / 2) - i64::from(w / 2)).max(0),
                 y: b.y - step * tier,
                 w,
                 h,
