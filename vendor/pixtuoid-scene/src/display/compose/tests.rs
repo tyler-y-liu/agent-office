@@ -310,7 +310,9 @@ pub(crate) fn sit_down_as(
         .home_desks
         .iter()
         // agent-office: clear of the floor's west edge, as the first desk was
-        // before the benches spanned the floor.
+        // before the benches spanned the floor: at the westmost desk the
+        // sitter sorts rows below where its figure ends, so a pet a test
+        // stands on its sort row lies where the figure does not reach.
         .position(|d| d.facing == facing && d.at.x > 40)
         .expect("the office has a desk facing that way");
     let now0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
