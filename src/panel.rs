@@ -1,7 +1,9 @@
 //! The always-on task list beside the office: one card per agent, its
-//! subagents under it, whoever is waiting on you first.
+//! subagents under it, grouped by what each needs from you — waiting on you
+//! first — and each group named after where its agents are in the office.
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use pixtuoid_core::sprite::Rgb;
 use pixtuoid_core::{ActivityState, AgentId, AgentSlot, SceneState, ToolUse};
@@ -29,9 +31,60 @@ pub struct PanelState {
     pub expanded: bool,
 }
 
-/// The agents in display order: roots waiting on you first, then working,
-/// then idle (oldest first within each), each followed by its subagents.
-pub fn order(scene: &SceneState) -> Vec<(AgentId, u8)> {
+/// What a session needs from you, which is also where it is in the office.
+/// Declared in the order the panel lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// Waiting on a prompt or question: answer it.
+    Waiting,
+    /// Working but stuck: have a look.
+    Stuck,
+    /// Done a while ago at most, in the pantry: read what it did.
+    Done,
+    /// Working.
+    Working,
+    /// Idle long enough to have gone up to the rooftop.
+    Idle,
+}
+
+impl Group {
+    pub fn of(slot: &AgentSlot, view: Option<&TaskView>, now: SystemTime) -> Self {
+        if crate::tasks::stuck_at_work(slot, view).is_some() {
+            return Self::Stuck;
+        }
+        match slot.state {
+            ActivityState::RequiresAction { .. } => Self::Waiting,
+            ActivityState::Running { .. } => Self::Working,
+            // The office's own threshold, so the card and the figure agree.
+            ActivityState::Idle
+                if now
+                    .duration_since(slot.state_started_at)
+                    .unwrap_or_default()
+                    .as_millis()
+                    < u128::from(pixtuoid_scene::pose::IDLE_ROOFTOP_MS) =>
+            {
+                Self::Done
+            }
+            ActivityState::Idle => Self::Idle,
+        }
+    }
+
+    /// The group's header: what it needs from you, then where they are.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Waiting => "等你批 · 等候区",
+            Self::Stuck => "卡住 · 工位",
+            Self::Done => "做完待看 · 茶水间",
+            Self::Working => "干活 · 工位",
+            Self::Idle => "闲着 · 天台",
+        }
+    }
+}
+
+/// The agents in display order: roots grouped by [`Group`], those waiting on
+/// you in the order they started waiting (the office's waiting line), the
+/// rest oldest first; each followed by its subagents.
+pub fn order(scene: &SceneState, views: &TaskViews, now: SystemTime) -> Vec<(AgentId, u8)> {
     let cc: Vec<&AgentSlot> = scene
         .agents
         .values()
@@ -43,12 +96,15 @@ pub fn order(scene: &SceneState) -> Vec<(AgentId, u8)> {
         .copied()
         .filter(|s| !s.parent_id.as_ref().is_some_and(is_shown))
         .collect();
-    let rank = |s: &AgentSlot| match s.state {
-        ActivityState::RequiresAction { .. } => 0,
-        ActivityState::Running { .. } => 1,
-        ActivityState::Idle => 2,
-    };
-    roots.sort_by_key(|s| (rank(s), s.created_at));
+    roots.sort_by_key(|s| {
+        let g = Group::of(s, views.get(&s.agent_id), now);
+        let since = if g == Group::Waiting {
+            s.state_started_at
+        } else {
+            s.created_at
+        };
+        (g, since)
+    });
     let mut out = Vec::new();
     for r in roots {
         push_tree(&cc, r, 0, &mut out);
@@ -85,6 +141,16 @@ pub fn step(order: &[(AgentId, u8)], cur: Option<AgentId>, delta: isize) -> Opti
             (i as isize + delta).clamp(0, order.len() as isize - 1) as usize
         });
     Some(order[i].0)
+}
+
+fn group_color(g: Group) -> Color {
+    match g {
+        Group::Waiting => WAIT,
+        Group::Stuck => STUCK,
+        Group::Done => TASK,
+        Group::Working => WORK,
+        Group::Idle => DIM,
+    }
 }
 
 fn rgb(c: Rgb) -> Color {
@@ -291,7 +357,8 @@ pub fn render(
     inks: &HashMap<AgentId, Rgb>,
     state: &PanelState,
 ) -> Vec<(u16, AgentId)> {
-    let order = order(scene);
+    let now = SystemTime::now();
+    let order = order(scene, views, now);
     let waiting = order
         .iter()
         .filter(|(id, _)| {
@@ -346,9 +413,36 @@ pub fn render(
                 sel && state.expanded,
                 inner.width,
             );
-            // A blank line before each root group but the first.
-            if *depth == 0 && !std::ptr::eq(id, &order[0].0) {
-                lines.insert(0, Line::raw(""));
+            // A header over each group's first card, a blank line before
+            // every other root.
+            if *depth == 0 {
+                let group = Group::of(slot, views.get(id), now);
+                let first = order
+                    .iter()
+                    .take_while(|(o, _)| o != id)
+                    .filter(|(_, d)| *d == 0)
+                    .filter_map(|(o, _)| scene.agents.get(o))
+                    .all(|s| Group::of(s, views.get(&s.agent_id), now) != group);
+                if first {
+                    let n = order
+                        .iter()
+                        .filter(|(_, d)| *d == 0)
+                        .filter_map(|(o, _)| scene.agents.get(o))
+                        .filter(|s| Group::of(s, views.get(&s.agent_id), now) == group)
+                        .count();
+                    lines.insert(
+                        0,
+                        Line::from(Span::styled(
+                            format!("{} ({n})", group.title()),
+                            Style::default()
+                                .fg(group_color(group))
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                    );
+                }
+                if !std::ptr::eq(id, &order[0].0) {
+                    lines.insert(0, Line::raw(""));
+                }
             }
             Some(Card { id: *id, lines })
         })
@@ -460,7 +554,7 @@ mod tests {
             Some(a),
             t0 + Duration::from_secs(2),
         );
-        let o = order(&scene);
+        let o = order(&scene, &TaskViews::default(), t0 + Duration::from_secs(10));
         let ids: Vec<AgentId> = o.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, vec![a, a1, b]);
         assert_eq!(o[1].1, 1);
@@ -475,7 +569,7 @@ mod tests {
             Some(a1),
             t0 + Duration::from_secs(3),
         );
-        let o = order(&scene);
+        let o = order(&scene, &TaskViews::default(), t0 + Duration::from_secs(10));
         assert_eq!(
             o.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![a, a1, a11, b]
@@ -483,6 +577,84 @@ mod tests {
         assert_eq!(
             o[2].1, 2,
             "a subagent's own subagent is listed, one level deeper"
+        );
+    }
+
+    /// The panel lists sessions by what they need from you, most urgent
+    /// first, so the top of the panel is always the next thing to do; those
+    /// waiting on you keep the order they started waiting, the order they
+    /// stand in the office's waiting line.
+    #[test]
+    fn roots_group_by_what_they_need_from_you() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["idle", "work", "done", "stuck", "wait2", "wait1"]
+            .iter()
+            .enumerate()
+            .map(|(i, sid)| {
+                start(
+                    &mut scene,
+                    &mut r,
+                    sid,
+                    None,
+                    t0 + Duration::from_secs(i as u64),
+                )
+            })
+            .collect();
+        let [idle, work, done, stuck, wait2, wait1] = ids[..] else {
+            unreachable!()
+        };
+        let set = |scene: &mut SceneState, id, state, since: Duration| {
+            let s = scene.agents.get_mut(&id).unwrap();
+            s.state = state;
+            s.state_started_at = now - since;
+        };
+        let run = || ActivityState::Running { item: None };
+        let ask = || ActivityState::RequiresAction { reason: None };
+        set(
+            &mut scene,
+            idle,
+            ActivityState::Idle,
+            Duration::from_secs(20 * 60),
+        );
+        set(
+            &mut scene,
+            done,
+            ActivityState::Idle,
+            Duration::from_secs(5 * 60),
+        );
+        set(&mut scene, work, run(), Duration::from_secs(60));
+        set(&mut scene, stuck, run(), Duration::from_secs(60));
+        set(&mut scene, wait2, ask(), Duration::from_secs(30));
+        set(&mut scene, wait1, ask(), Duration::from_secs(90));
+        let views: TaskViews = std::sync::Arc::new(
+            [(
+                stuck,
+                TaskView {
+                    stuck: Some(crate::tasks::Stuck::Failing(3)),
+                    ..TaskView::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let o: Vec<AgentId> = order(&scene, &views, now)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(o, vec![wait1, wait2, stuck, done, work, idle]);
+        let group = |id| Group::of(&scene.agents[&id], views.get(&id), now);
+        assert_eq!(
+            group(done),
+            Group::Done,
+            "idle under 15 min sits in the pantry"
+        );
+        assert_eq!(
+            group(idle),
+            Group::Idle,
+            "idle 15 min+ is up on the rooftop"
         );
     }
 

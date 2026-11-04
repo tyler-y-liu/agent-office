@@ -95,7 +95,7 @@ impl Core {
     pub fn frame(&mut self) -> Frame {
         let scene = self.scene();
         let views = self.views_rx.borrow().clone();
-        let order = panel::order(&scene);
+        let order = panel::order(&scene, &views, SystemTime::now());
         if self
             .ui
             .selected
@@ -146,7 +146,8 @@ impl Core {
             Action::Back => self.ui.selected = None,
             Action::Down | Action::Up => {
                 let delta = if action == Action::Down { 1 } else { -1 };
-                let order = panel::order(&self.scene());
+                let views = self.views_rx.borrow().clone();
+                let order = panel::order(&self.scene(), &views, SystemTime::now());
                 self.ui.selected = panel::step(&order, self.ui.selected, delta);
                 self.follow(floors);
             }

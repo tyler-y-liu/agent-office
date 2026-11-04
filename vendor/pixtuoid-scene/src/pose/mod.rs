@@ -24,12 +24,14 @@ use pixtuoid_core::walkable::{OccupancyOverlay, WalkableMask};
     reason = "agent-office: the lounge never ends on a dwell; tests still use them"
 )]
 pub(crate) use pure::{
-    ENTRY_ANIMATION_MS, IDLE_LEAVE_DESK_MS, IDLE_ROOFTOP_MS, IdleStage, LOUNGE_CYCLE, STALE_RESUME_GAP_BASE_MS,
+    ENTRY_ANIMATION_MS, IDLE_LEAVE_DESK_MS, IdleStage, LOUNGE_CYCLE, STALE_RESUME_GAP_BASE_MS,
     WANDER_DWELL_EST_MS, derive, derive_state_only, dwell_ms, stale_resume_gap_ms,
 };
 pub(crate) use pure::{LegPose, Pose};
 #[cfg(test)]
 pub(crate) use pure::{aimless_wander_seed, pick_aimless_dest};
+/// agent-office: how long an idle agent sits in the pantry before the rooftop.
+pub use pure::IDLE_ROOFTOP_MS;
 pub use pure::{
     est_wander_cycle_ms, is_aimless_cycle, seated_dwell_ms, takes_trip, waypoint_index_for_cycle,
 };

@@ -45,7 +45,7 @@ pub(crate) const LOUNGE_CYCLE: u64 = 0;
 /// up waiting for a next turn and heads out to the rooftop. A just-finished
 /// session in the pantry reads as "done, have a look"; one on the rooftop as
 /// "nothing doing here".
-pub(crate) const IDLE_ROOFTOP_MS: u64 = 15 * 60 * 1000;
+pub const IDLE_ROOFTOP_MS: u64 = 15 * 60 * 1000;
 
 /// agent-office: which part of an idle stretch an agent is in, picking the
 /// kind of lounge it heads for.
