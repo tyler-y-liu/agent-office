@@ -394,6 +394,21 @@ impl Win {
             );
         } else if let Some(tags) = self.render_office(&frame.scene, fit, theme, &frame.labels, sf) {
             canvas.blit_scaled(&self.art, 0, 0, u32::from(fit.upscale()));
+            let stuck: Vec<AgentId> = frame
+                .scene
+                .agents
+                .values()
+                .filter(|s| crate::tasks::stuck_at_work(s, frame.views.get(&s.agent_id)).is_some())
+                .map(|s| s.agent_id)
+                .collect();
+            paint_stuck(
+                &mut canvas,
+                &mut self.faces,
+                &tags,
+                &stuck,
+                sf,
+                fit.upscale(),
+            );
             paint_tags(
                 &mut canvas,
                 &mut self.faces,
@@ -873,6 +888,56 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
         signs.push(rect);
         paint_run(art, run, rect);
     }
+}
+
+/// Red for a stuck agent, the panel's stuck colour.
+const STUCK_RED: u32 = 0x00f7_768e;
+
+/// Mark each stuck agent in `stuck` where it sits: a red ring round its
+/// figure and a red "?" by its badge, so it stands out from the agents
+/// working normally around it. `u` is window pixels an art pixel.
+fn paint_stuck(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    tags: &[Tag],
+    stuck: &[AgentId],
+    scale_factor: f64,
+    u: u16,
+) {
+    let u = i64::from(u.max(1));
+    let name_px = pt_px(NAME_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    for t in tags.iter().filter(|t| stuck.contains(&t.agent)) {
+        let b = t.badge;
+        let cx = b.x + i64::from(b.w / 2);
+        let top = b.y + i64::from(b.h) + i64::from(LABEL_GAP) * u;
+        let half_h = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * u / 2;
+        let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * u * 3 / 4;
+        let dot = (u / 2).max(1) as u32;
+        for (x, y) in ring(cx, top + half_h, half_w, half_h + u) {
+            canvas.fill(x, y, dot, dot, STUCK_RED);
+        }
+        let w = faces.cell_w(name_px) + 2 * pad;
+        let (x, y) = (b.x + i64::from(b.w + pad), b.y);
+        canvas.fill(x, y, w, b.h, STUCK_RED);
+        let base = y + i64::from(pad) + i64::from(faces.ascent(name_px));
+        faces.draw(canvas, x + i64::from(pad), base, "?", TEXT, name_px);
+    }
+}
+
+/// The outline of an ellipse centred on (`cx`, `cy`) with radii `rx`, `ry`,
+/// one point per window pixel of its rim.
+fn ring(cx: i64, cy: i64, rx: i64, ry: i64) -> Vec<(i64, i64)> {
+    let steps = (4 * (rx + ry)).max(8);
+    (0..steps)
+        .map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / steps as f64;
+            (
+                cx + (rx as f64 * a.cos()).round() as i64,
+                cy + (ry as f64 * a.sin()).round() as i64,
+            )
+        })
+        .collect()
 }
 
 /// Set the placed badges and task labels in the readable faces.

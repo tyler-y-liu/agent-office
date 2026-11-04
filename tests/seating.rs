@@ -59,8 +59,16 @@ fn a_second_repository_opens_its_own_bench_instead_of_squeezing_in() {
     let blog = o.start("a", "/src/blog");
     let api = o.start("b", "/src/api");
     let blog2 = o.start("c", "/src/blog");
-    assert_ne!(bench(blog), bench(api), "api must not take a seat on blog's bench");
-    assert_eq!(bench(blog), bench(blog2), "blog's second session joins its bench");
+    assert_ne!(
+        bench(blog),
+        bench(api),
+        "api must not take a seat on blog's bench"
+    );
+    assert_eq!(
+        bench(blog),
+        bench(blog2),
+        "blog's second session joins its bench"
+    );
 }
 
 #[test]
@@ -97,5 +105,9 @@ fn a_worktree_session_sits_and_is_named_with_its_repository() {
     o.start("b", "/src/api");
     let wt = o.start("c", "/src/blog/.claude/worktrees/fix-paging");
     assert_eq!(bench(wt), bench(main));
-    assert_eq!(o.label("c"), o.label("a"), "the bench plate and label read the repo name");
+    assert_eq!(
+        o.label("c"),
+        o.label("a"),
+        "the bench plate and label read the repo name"
+    );
 }

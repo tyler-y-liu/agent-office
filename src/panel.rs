@@ -96,9 +96,7 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>) -> (String, Color) {
         return ("离开中".into(), DIM);
     }
     // Waiting on the user says what to do; a stuck verdict is for one working.
-    if let Some(s) = view.and_then(|v| v.stuck)
-        && matches!(slot.state, ActivityState::Running { .. })
-    {
+    if let Some(s) = crate::tasks::stuck_at_work(slot, view) {
         return (format!("⚠ {}", s.describe()), STUCK);
     }
     match &slot.state {
@@ -422,6 +420,30 @@ mod tests {
             Transport::Hook,
         );
         id
+    }
+
+    /// The office marks a stuck agent at its desk, and the card says so, only
+    /// while it works: one waiting on you is waiting, not stuck, and saying
+    /// "stuck" there would hide that it needs an answer.
+    #[test]
+    fn only_a_working_agent_is_marked_stuck() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let view = TaskView {
+            stuck: Some(crate::tasks::Stuck::Failing(3)),
+            ..TaskView::default()
+        };
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Running { item: None };
+        assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_some());
+        assert_eq!(status(slot, Some(&view)).1, STUCK);
+        slot.state = ActivityState::RequiresAction { reason: None };
+        assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
+        assert_eq!(status(slot, Some(&view)).1, WAIT);
+        slot.state = ActivityState::Idle;
+        assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
     }
 
     #[test]

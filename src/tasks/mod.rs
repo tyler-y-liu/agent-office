@@ -76,6 +76,14 @@ fn stuck(t: &Transcript, working: bool, quiet: Duration) -> Option<Stuck> {
     (working && quiet >= limit).then(|| Stuck::Quiet(quiet.as_secs() / 60))
 }
 
+/// The stuck verdict that holds for `slot`: only a working agent can be stuck,
+/// since one waiting on you or idle is not trying anything.
+pub fn stuck_at_work(slot: &pixtuoid_core::AgentSlot, view: Option<&TaskView>) -> Option<Stuck> {
+    view.and_then(|v| v.stuck).filter(|_| {
+        slot.exiting_at.is_none() && matches!(slot.state, ActivityState::Running { .. })
+    })
+}
+
 pub type TaskViews = Arc<HashMap<AgentId, TaskView>>;
 
 #[derive(Debug)]
