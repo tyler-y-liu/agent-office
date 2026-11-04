@@ -360,7 +360,9 @@ pub(crate) fn sim_step(stores: &mut SimStores<'_>, inputs: SimInputs<'_>) -> Sim
     // resolution below looks the result up instead of re-deriving (a second
     // derive would double the A*). The `exiting_at` filter is INTENTIONALLY
     // absent — an exiting agent's pose is still needed to place its character.
-    let meetings = crate::team::meeting_seats(&agents, now, layout);
+    // agent-office: waiting on you outranks a meeting.
+    let mut meetings = crate::team::meeting_seats(&agents, now, layout);
+    meetings.extend(crate::waiting::waiting_line(&agents, now, layout));
     let poses: HashMap<AgentId, Option<Pose>> = agents
         .iter()
         .filter(|a| {

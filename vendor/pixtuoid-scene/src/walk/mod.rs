@@ -189,9 +189,9 @@ pub struct WalkState {
     /// the state's pose until it arrives.
     pub(crate) lifted: Option<Lifted>,
 
-    /// agent-office: out at (or walking to) its team's meeting, on the wander
-    /// timeline's `WalkingOut` / `AtWaypoint`.
-    pub(crate) in_meeting: bool,
+    /// agent-office: out at (or walking to) its team's meeting or its place in
+    /// the waiting line, on the wander timeline's `WalkingOut` / `AtWaypoint`.
+    pub(crate) summoned: bool,
 }
 
 /// An agent a pointer lifted.
@@ -228,7 +228,7 @@ impl Default for WalkState {
             },
             walk_path: None,
             lifted: None,
-            in_meeting: false,
+            summoned: false,
         }
     }
 }
@@ -441,9 +441,9 @@ pub(crate) fn advance_wander(
     }
 }
 
-/// agent-office: walk `slot` to its team's meeting seat `seat` and keep it
-/// there, whatever its state: the meeting outranks the desk and the lounges
-/// until the team breaks up. `from` is where it stands now, `None` at its desk.
+/// agent-office: walk `slot` to `seat`, its team's meeting seat or its place
+/// in the waiting line, and keep it there whatever its state: that outranks
+/// the desk and the lounges until the team breaks up or the wait ends. `from` is where it stands now, `None` at its desk.
 #[expect(clippy::too_many_arguments, reason = "mirrors advance_wander's stores")]
 pub(crate) fn advance_meeting(
     slot: &AgentSlot,
@@ -458,7 +458,7 @@ pub(crate) fn advance_meeting(
 ) -> WanderFrame {
     let id = slot.agent_id;
     let walk = walks.entry(id).or_default();
-    let heading = walk.in_meeting
+    let heading = walk.summoned
         && walk.wander.target == seat
         && matches!(
             walk.wander.phase,
@@ -477,7 +477,7 @@ pub(crate) fn advance_meeting(
             Some(o) => (o.dest, o.kind.seat()),
             None => desk_leg_endpoint(desk, layout),
         };
-        walk.in_meeting = true;
+        walk.summoned = true;
         walk.wander.from = origin;
         walk.wander.target = seat;
         walk.wander.phase = WanderPhase::WalkingOut(snapshot_leg_profile(

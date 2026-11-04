@@ -56,7 +56,9 @@ pub(crate) struct RouteCtx<'a> {
     /// Whether an idle agent wanders off its desk: an ambient loop, so not at
     /// [`Motion::Still`](crate::anim::Motion::Still).
     pub wanders: bool,
-    /// agent-office: this frame's team meeting seats ([`crate::team`]).
+    /// agent-office: where each agent called away from its desk goes this
+    /// frame: its team's meeting seat ([`crate::team`]) or its place in the
+    /// waiting line ([`crate::waiting`]).
     pub meetings: &'a HashMap<AgentId, WanderTarget>,
 }
 
@@ -411,9 +413,9 @@ pub(crate) fn derive_with_routing(
         // and causes a double-walk. Fall through to the state-driven pose.
     }
 
-    // agent-office: a team member goes to its meeting whatever its state; one
-    // whose team broke up walks home from the meeting seat, like an agent set
-    // down by a pointer, rather than popping back to its desk.
+    // agent-office: a team member goes to its meeting, a waiting agent to the
+    // waiting line; one whose team broke up or whose wait ended walks home from
+    // there, like an agent set down by a pointer, rather than popping back.
     if rctx.wanders
         && slot.exiting_at.is_none()
         && let Some(&seat) = rctx.meetings.get(&slot.agent_id)
@@ -437,7 +439,7 @@ pub(crate) fn derive_with_routing(
         return Some(wander_pose(slot, now, layout, desk, rctx, wf));
     }
     if let Some(walk) = rctx.walks.get_mut(&slot.agent_id)
-        && std::mem::take(&mut walk.in_meeting)
+        && std::mem::take(&mut walk.summoned)
     {
         let at = rctx
             .history
