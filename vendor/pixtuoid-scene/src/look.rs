@@ -571,14 +571,13 @@ pub fn render(
             classic.drew(drawn);
             dim.apply(&mut classic.buf);
             classic.dim = dim;
-            classic.signs =
-                crate::display::TextRun::signs(
-                    &board,
-                    &stepped.layout,
-                    &stepped.frame.agents,
-                    world.floor,
-                    theme,
-                );
+            classic.signs = crate::display::TextRun::signs(
+                &board,
+                &stepped.layout,
+                &stepped.frame.agents,
+                world.floor,
+                theme,
+            );
             (Dirty::All, flash)
         }
         Look::Cutaway { scale, text } => {
