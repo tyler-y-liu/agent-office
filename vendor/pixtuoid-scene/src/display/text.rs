@@ -348,16 +348,24 @@ impl TextRun {
     }
 
     /// The room's signs: `board`'s lines, the floor indicator naming
-    /// `floor` over the elevator, then agent-office's door signs.
+    /// `floor` over the elevator, then agent-office's door signs and the
+    /// benches' plates for `agents` on this floor.
     pub(crate) fn signs(
         board: &crate::neon_sign::BoardModel,
         layout: &crate::layout::SceneLayout,
+        agents: &[pixtuoid_core::AgentSlot],
         floor: crate::floor::FloorMeta,
         theme: &Theme,
     ) -> Vec<Self> {
         let mut runs = board.runs(theme);
         runs.push(Self::indicator(layout.door, floor, theme));
         runs.extend(Self::door_signs(layout));
+        let here: Vec<_> = agents
+            .iter()
+            .filter(|a| a.floor_idx == floor.floor_idx)
+            .cloned()
+            .collect();
+        runs.extend(Self::bench_plates(layout, &here));
         runs
     }
 
@@ -395,11 +403,12 @@ impl TextRun {
                             .is_some_and(|d| d.at.y == first.at.y && (x0..=x1).contains(&d.at.x))
                     })
                     .min_by_key(|a| (a.created_at, a.agent_id))?;
-                let repo = sitter
-                    .label
-                    .split_once('·')
-                    .map_or(&*sitter.label, |(_, r)| r)
-                    .to_owned();
+                // The repository's own name, as its directory has it (a
+                // worktree is its repository's).
+                let repo = pixtuoid_core::state::project_root(&sitter.cwd)
+                    .file_name()?
+                    .to_string_lossy()
+                    .into_owned();
                 let plate = crate::badge::repo_hue(sitter, &hues)?;
                 Some(Self {
                     // On the sitters' side of the screens: over a row facing

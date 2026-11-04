@@ -632,6 +632,7 @@ fn no_run_overprints_another_on_its_line() {
             &TextRun::signs(
                 quiet_board(),
                 &layout,
+                &[],
                 crate::floor::FloorMeta::ground(),
                 &crate::theme::NORMAL,
             ),
