@@ -363,7 +363,15 @@ pub(crate) fn derive_with_routing(
         Some(ReEnter::Live(p)) => p,
         _ => door,
     };
-    if walk.entry.is_none() && (since_spawn < ENTRY_ANIMATION_MS || re_enter.is_some()) {
+    // agent-office: a sub-agent is drawn only once it has run
+    // `TEAM_AFTER_MS` (`crate::team::is_brief_sub`), so it walks in from the
+    // door then rather than appearing at its desk.
+    let reveal = crate::team::TEAM_AFTER_MS;
+    let revealed = slot.parent_id.is_some()
+        && (reveal..reveal + ENTRY_ANIMATION_MS).contains(&since_spawn);
+    if walk.entry.is_none()
+        && (since_spawn < ENTRY_ANIMATION_MS || revealed || re_enter.is_some())
+    {
         let profile = snapshot_leg_profile(
             rctx.router,
             &layout.walkable,
@@ -379,6 +387,8 @@ pub(crate) fn derive_with_routing(
         walk.entry = Some(WalkLeg {
             started_at: if re_enter.is_some() {
                 now
+            } else if revealed {
+                slot.created_at + Duration::from_millis(reveal)
             } else {
                 slot.created_at
             },

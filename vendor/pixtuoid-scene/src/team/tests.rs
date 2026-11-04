@@ -219,3 +219,25 @@ fn the_parents_badge_counts_its_brief_sub_agents() {
     let names = crate::badge::Namesakes::of(&all).with_brief_subs(&all, t0());
     assert_eq!(names.text(&parent), "repo +2");
 }
+
+/// A sub-agent drawn for the first time once it has run 15 s walks in from
+/// the door, as every agent does on arriving, rather than popping up seated.
+#[test]
+fn a_sub_agent_walks_in_when_it_is_first_drawn() {
+    let l = office();
+    let parent = agent("lead", 0, 60_000, None);
+    let mut sub = agent("helper", 1, TEAM_AFTER_MS + 100, Some(parent.agent_id));
+    sub.state = ActivityState::Running { item: None };
+    let mut rig = RouteRig::new(crate::pathfind::AStarRouter::new());
+    let pose = derive_with_routing(&sub, t0(), &l, &mut rig.rctx());
+    assert!(matches!(pose, Some(Pose::Walking { .. })), "{pose:?}");
+    let at = rig
+        .history
+        .recent(sub.agent_id, 1_000, t0())
+        .expect("drawn walking");
+    let door = l.door_threshold;
+    let desk = l.home_desks[1].at;
+    let dist =
+        |p: crate::layout::Point, q: crate::layout::Point| p.x.abs_diff(q.x) + p.y.abs_diff(q.y);
+    assert!(dist(at, door) < dist(at, desk), "from the door: {at:?}");
+}
