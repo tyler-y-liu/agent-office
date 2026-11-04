@@ -112,43 +112,31 @@ pub(crate) fn rooftop_railing(dx: u16, dy: u16, size: Size) -> bool {
     dy + FRAME_W >= h || dy == rail || (dy > rail && dx % BALUSTER_EVERY == 1)
 }
 
-/// agent-office: how many window slots at the east end of a wall `buf_w`
-/// wide open onto the rooftop: none on a narrow office, which keeps its
-/// desks; two from 200 columns, three from 320, and never so many that fewer
-/// than three windows stay west of the door.
-pub(crate) fn rooftop_slots(buf_w: u16) -> u16 {
-    let slots = window_slots(buf_w).count() as u16;
-    let want = match buf_w {
-        320.. => 3,
-        200.. => 2,
-        _ => 0,
-    };
-    if slots < want + 4 { 0 } else { want }
-}
+/// agent-office: the narrowest rooftop worth opening, one that still seats
+/// its benches and table.
+const ROOFTOP_MIN_W: u16 = 30;
 
-/// agent-office: the door's slot on a wall `buf_w` wide whose `roof`
-/// easternmost slots are the rooftop: the last slot west of them.
-pub(crate) fn door_slot(buf_w: u16, roof: u16) -> Option<WindowBay> {
-    let slots: Vec<WindowBay> = window_slots(buf_w).collect();
-    let at = slots.len().checked_sub(1 + usize::from(roof))?;
-    Some(slots[at])
-}
-
-/// agent-office: the elevator door's left column with the rooftop's `roof`
-/// slots east of it, centred in its slot.
-pub(crate) fn door_x_on(buf_w: u16, roof: u16) -> u16 {
-    match door_slot(buf_w, roof).filter(|_| roof > 0) {
-        Some(slot) => slot.x + (slot.w - ELEVATOR_W) / 2,
-        None => door_x(buf_w),
+/// agent-office: how wide the rooftop at the WEST end of a wall `buf_w` wide
+/// is: about an eighth of the wall and no narrower than [`ROOFTOP_MIN_W`];
+/// none on an office under 200 columns, or where fewer than three whole
+/// windows would stay between it and the door. A narrow office drops the
+/// rooftop first, keeping its desks.
+pub(crate) fn rooftop_end(buf_w: u16) -> Option<u16> {
+    if buf_w < 200 {
+        return None;
     }
+    let end = (buf_w / 8).max(ROOFTOP_MIN_W);
+    let whole = window_slots(buf_w).filter(|s| s.x >= end).count();
+    (whole >= 4).then_some(end)
 }
 
-/// agent-office: the column the rooftop starts at, the post east of the
-/// door's slot, which stands as the building's last wall; `None` with none.
-pub(crate) fn rooftop_x(buf_w: u16, roof: u16) -> Option<u16> {
-    door_slot(buf_w, roof)
-        .filter(|_| roof > 0)
-        .map(|slot| slot.span().end)
+/// agent-office: how many window slots the rooftop of a wall `buf_w` wide
+/// takes, whole or in part: open sky over those columns, wall over the rest
+/// of a slot it cuts.
+pub(crate) fn rooftop_slots(buf_w: u16) -> u16 {
+    rooftop_end(buf_w).map_or(0, |end| {
+        window_slots(buf_w).filter(|s| s.x < end).count() as u16
+    })
 }
 
 /// The door's slot's left edge on a wall `buf_w` wide: flush with the east
@@ -259,28 +247,32 @@ impl SceneLayout {
         let door = self.door_rect();
         let mut bays: Vec<WindowBay> =
             window_bays(self.buf_w, door.x..door.x + door.width).collect();
-        // agent-office: over the rooftop, one stretch of open sky.
-        if let Some(roof) = self.rooftop().map(|r| r.bounds.x) {
-            let open: Vec<WindowBay> = bays.iter().copied().filter(|b| b.x >= roof).collect();
-            bays.retain(|b| b.x < roof);
-            if let (Some(first), Some(last)) = (open.first(), open.last()) {
-                bays.push(WindowBay {
-                    x: first.x,
-                    w: last.span().end - first.x,
-                    idx: first.idx,
-                    open: true,
-                });
+        // agent-office: over the rooftop, one stretch of open sky from the
+        // building's west edge.
+        if let Some(roof) = self.rooftop().map(|r| r.bounds.x + r.bounds.width) {
+            let open: Vec<WindowBay> = bays.iter().copied().filter(|b| b.x < roof).collect();
+            bays.retain(|b| b.x >= roof);
+            if let Some(first) = open.first() {
+                bays.insert(
+                    0,
+                    WindowBay {
+                        x: 0,
+                        w: roof,
+                        idx: first.idx,
+                        open: true,
+                    },
+                );
             }
         }
         bays.into_iter()
     }
 
     /// agent-office: the frame posts this office's north wall stands: every
-    /// one between two slots but those out over the rooftop, its first, the
-    /// building's last wall, kept.
+    /// one between two slots but those out over the rooftop, the one east of
+    /// it, the building's last wall, kept.
     pub(crate) fn window_posts(&self) -> impl Iterator<Item = Range<u16>> + use<> {
-        let roof = self.rooftop().map_or(u16::MAX, |r| r.bounds.x);
-        window_posts(self.buf_w).filter(move |p| p.start <= roof)
+        let roof = self.rooftop().map_or(0, |r| r.bounds.x + r.bounds.width);
+        window_posts(self.buf_w).filter(move |p| p.start >= roof)
     }
 
     /// The box the elevator door's art covers.
@@ -300,9 +292,9 @@ impl SceneLayout {
         let rows = window_rows(self.wall_band_h());
         let h = rows.end - rows.start;
         rows.contains(&y)
-            && self.window_bays().any(|b| {
-                b.span().contains(&x) && !b.frame(x - b.x, y - rows.start, h)
-            })
+            && self
+                .window_bays()
+                .any(|b| b.span().contains(&x) && !b.frame(x - b.x, y - rows.start, h))
     }
 }
 

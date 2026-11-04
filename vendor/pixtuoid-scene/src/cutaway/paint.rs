@@ -2651,8 +2651,10 @@ mod tests {
         let theme = crate::theme::theme_by_name("normal").expect("theme");
         let pack = test_office();
         let now = crate::localclock::at_hour(12);
-        let layouts = [0, 1]
-            .map(|seed| SceneLayout::compute_with_seed(160, 96, None, seed).expect("lays out"));
+        // agent-office: every floor shares one plan now, so two widths give
+        // the two backdrops.
+        let layouts =
+            [160, 168].map(|w| SceneLayout::compute_with_seed(w, 96, None, 0).expect("lays out"));
         assert_ne!(
             Backdrop::of(&layouts[0], theme),
             Backdrop::of(&layouts[1], theme),
@@ -3283,7 +3285,8 @@ mod tests {
     fn the_tables_span_ends_where_it_paints() {
         let pack = test_office();
         let theme = crate::theme::theme_by_name("normal").expect("theme");
-        let layout = SceneLayout::compute_with_seed(160, 96, None, 0).expect("lays out");
+        // agent-office: a size whose south row seats a meeting trio.
+        let layout = SceneLayout::compute_with_seed(240, 160, None, 0).expect("lays out");
         for s in [1, pack.max_density_variant().get()] {
             let scale = RenderScale::new(s).expect("nonzero");
             let order = queued(&layout, &pack, scale, &[], |k| {
@@ -3688,9 +3691,13 @@ mod tests {
                 }
             }
         }
+        // agent-office: no notice board: the meeting rooms are under no window.
         assert_eq!(
             met,
-            crate::layout::roster::tests::every_kind_key(),
+            crate::layout::roster::tests::every_kind_key()
+                .into_iter()
+                .filter(|k| *k != "NoticeBoard")
+                .collect(),
             "a fixture kind was never met"
         );
     }
@@ -4597,7 +4604,9 @@ mod tests {
         // agent-office: 196x144 for the vending machine, whose aisle the
         // rooftop takes at 240; 240x144 for the rooftop's own pieces.
         let pack = test_office();
-        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60)] {
+        // agent-office: 148x120 for the compact counter of a pantry the south
+        // row squeezed.
+        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60), (148, 120)] {
             let stepped = FloorSession::new(std::sync::Arc::new(pack.clone()))
                 .step(
                     crate::floor::FloorInputs {
@@ -4652,7 +4661,6 @@ mod tests {
             PackPiece::Printer,
             PackPiece::RooftopBench,
             PackPiece::RooftopStool,
-            PackPiece::LaundryPole,
         ]) {
             assert!(
                 props.contains(&sprite),

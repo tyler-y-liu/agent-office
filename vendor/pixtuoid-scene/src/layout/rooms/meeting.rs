@@ -1,7 +1,7 @@
 //! The meeting room aggregate: bounds + the sofa/table trio.
 
 use super::walls::WALL_H;
-use crate::layout::{Bounds, Furniture, Pivot, Point, anchored_top_left, furniture_def, pct};
+use crate::layout::{Bounds, Furniture, Pivot, Point, Size, anchored_top_left, furniture_def, pct};
 
 /// One meeting room's furniture trio. The fixed-size array encodes the
 /// invariant that a fitted room produces exactly 2 sofas + 1 table.
@@ -104,6 +104,11 @@ impl MeetingRoom {
     pub(crate) fn coat_rack_pos(&self) -> Option<Point> {
         /// Rows from the room-centre row down to the rack's base.
         const BASE_BELOW_MID: u16 = 3;
+        // agent-office: the rooftop keeps to its benches and table; no laundry
+        // pole.
+        if self.style == RoomStyle::Rooftop {
+            return None;
+        }
         let b = self.bounds;
         if b.width <= 20 {
             return None;
@@ -184,12 +189,14 @@ impl MeetingRoom {
             return None;
         }
         let b = self.bounds;
-        // Lazy `.then`: `b.height / 2 - 2` must not run for a sub-gate room.
+        // agent-office: just inside the door in the room's north wall, one
+        // floor row south of the wall's face, as the pantry's entry mat lies.
+        const MAT: Size = Size { w: 8, h: 4 };
         (b.width > 10).then(|| Bounds {
-            x: b.x + b.width + 1,
-            y: b.y + b.height / 2 - 2,
-            width: 4,
-            height: 5,
+            x: b.x + b.width / 2 - MAT.w / 2,
+            y: b.y + WALL_H.thickness + 1,
+            width: MAT.w,
+            height: MAT.h,
         })
     }
 
@@ -228,13 +235,19 @@ mod tests {
                 else {
                     continue;
                 };
-                let ground_end = layout.corridor.y;
                 for f in layout.fixtures() {
                     let crate::layout::FixtureKind::MeetingRug { room } = f.kind else {
                         continue;
                     };
                     let room = layout.meeting_rooms[room].bounds;
-                    south_rooms += usize::from(room.y + room.height > ground_end);
+                    // agent-office: a room south of the corridor runs to the
+                    // floor's edge.
+                    let ground_end = if room.y >= layout.corridor.y {
+                        layout.buf_h
+                    } else {
+                        layout.corridor.y
+                    };
+                    south_rooms += usize::from(room.y + room.height >= ground_end);
                     let rug = f.visual;
                     assert!(
                         rug.y + rug.height <= ground_end,

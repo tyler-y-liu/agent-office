@@ -56,11 +56,11 @@ pub(crate) use windows::{
     window_rows, window_run,
 };
 #[cfg(test)]
-pub(crate) use windows::{door_x, window_frame};
-// agent-office: the rooftop's slots and the door west of them.
-pub(crate) use windows::{door_x_on, rooftop_slots, rooftop_x};
+pub(crate) use windows::window_frame;
 #[cfg(test)]
 pub(crate) use windows::{WINDOW_W, window_bays, window_slots};
+// agent-office: the rooftop's slots at the west end, the door at the east.
+pub(crate) use windows::{door_x, rooftop_end, rooftop_slots};
 // `crate::pathfind`'s A* and `reach`'s BFS both ride these ONE definitions.
 pub(crate) use coarse::{
     COARSE_CELL_SIZE, CoarseGrid, cell_anchor, cell_center, cell_walkable, snap, snap_where,
@@ -316,7 +316,7 @@ pub struct SceneLayout {
     /// waypoint and painter joins on.
     pub meeting_rooms: Vec<MeetingRoom>,
     /// The pantry aggregate (bounds + counter size + island) — `None`
-    /// on floors without a pantry (Dense dual-meeting).
+    /// on a south row too narrow or short for one.
     pub pantry: Option<PantryRoom>,
     /// Interior room-wall segments the painter draws and the mask blocks.
     pub room_walls: Vec<WallSegment>,
@@ -465,7 +465,6 @@ pub(crate) const DESK_GAP_Y: u16 = 14;
 /// Floor (px) for the layout's `top_margin` — `compute::top_margin`'s
 /// percent-of-buffer derivation never shrinks the north wall band below this.
 pub(crate) const MIN_TOP_MARGIN: u16 = 20;
-const MIN_DUAL_MEETING_H: u16 = 80;
 
 /// Desks side by side in a pod's row, and the pod's rows facing each other
 /// (`POD_COLS * POD_ROWS` desks in all). agent-office: a Hong Kong office's

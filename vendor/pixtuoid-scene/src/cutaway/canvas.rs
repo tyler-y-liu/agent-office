@@ -1374,8 +1374,11 @@ mod tests {
             crate::outside::OutsideCache::default(),
         );
         let mut canvas = CutawayCanvas::new(Arc::clone(&pack));
-        let stepped = |seed| {
-            let layout = SceneLayout::compute_with_seed(160, 96, None, seed).expect("lays out");
+        // agent-office: every floor shares one plan now, so a new layout is a
+        // new width rather than a new floor's seed.
+        let stepped = |step: u16| {
+            let layout =
+                SceneLayout::compute_with_seed(160 + 8 * step, 96, None, 0).expect("lays out");
             SteppedFloor {
                 frame: empty_frame(&layout),
                 layout: Arc::new(layout),

@@ -374,6 +374,9 @@ pub(crate) struct Doorway {
     pub(crate) end: Point,
 }
 
+/// agent-office: where along your office's north wall its door stands.
+const OFFICE_DOOR_PCT: u16 = 25;
+
 /// Doorway width in ABSOLUTE pixels — NOT a percentage, which shrinks to nothing
 /// on a small terminal and disconnects the room. The cuts are endpoint-inclusive,
 /// so the opening is one narrower.
@@ -401,75 +404,77 @@ struct WallRequest {
 /// Derive every interior wall from the rooms themselves. `pantry` is only the
 /// pantry's BOUNDS: the wall pass runs before the island is placed, so the full
 /// `PantryRoom` doesn't exist yet.
+///
+/// agent-office: the rooms stand in the south row, west to east, under the
+/// corridor. Each walled room (a meeting room, the pantry, your office) opens
+/// a centred door in its north wall onto the corridor; the waiting area is
+/// open to it. A wall stands between each room and the next. The rooftop's
+/// east side is the office's west wall, its door at the corridor's rows.
 pub(crate) fn derive_room_walls(
     meeting_rooms: &[MeetingRoom],
     pantry: Option<Bounds>,
+    waiting: Option<Bounds>,
+    office: Option<Bounds>,
+    corridor: Bounds,
 ) -> (Vec<WallSegment>, Vec<Doorway>) {
     let mut requests: Vec<WallRequest> = Vec::new();
 
-    for (i, room) in meeting_rooms.iter().enumerate() {
-        // agent-office: the rooftop is open air, no glass round it; never
-        // stacked under an office room, it walls none of theirs either.
-        if room.style == super::RoomStyle::Rooftop {
-            continue;
-        }
-        let b = room.bounds;
+    if let Some(roof) = meeting_rooms
+        .iter()
+        .find(|r| r.style == super::RoomStyle::Rooftop)
+    {
+        let b = roof.bounds;
+        let door_row = corridor.y + corridor.height / 2;
+        let p = (door_row.saturating_sub(b.y) as u32 * 100 / u32::from(b.height.max(1))) as u16;
         requests.push(WallRequest {
             run: Run::V {
                 x: b.x + b.width,
                 y0: b.y,
                 y1: b.y + b.height,
             },
-            doors: vec![DoorAt::Centered],
+            doors: vec![DoorAt::Pct(p)],
         });
-        let south = Run::H {
-            y: b.y + b.height,
-            x0: b.x,
-            x1: b.x + b.width,
-        };
-        let below_meeting = meeting_rooms
-            .get(i + 1)
-            .is_some_and(|r| stacked(b, r.bounds));
-        let below_pantry = pantry.is_some_and(|p| stacked(b, p));
-        if below_meeting || below_pantry {
-            requests.push(WallRequest {
-                run: south,
-                doors: vec![],
-            });
-        }
-        if i > 0 && stacked(meeting_rooms[i - 1].bounds, b) {
+    }
+
+    // Your office's door is by the waiting area at its west end, where those
+    // waiting on you sit.
+    let mut south: Vec<(Bounds, Option<DoorAt>)> = meeting_rooms
+        .iter()
+        .filter(|r| r.style != super::RoomStyle::Rooftop)
+        .map(|r| (r.bounds, Some(DoorAt::Centered)))
+        .chain(pantry.map(|p| (p, Some(DoorAt::Centered))))
+        .chain(waiting.map(|w| (w, None)))
+        .chain(office.map(|o| (o, Some(DoorAt::Pct(OFFICE_DOOR_PCT)))))
+        .collect();
+    south.sort_by_key(|(b, _)| b.x);
+    let east_of: Vec<Option<u16>> = (0..south.len())
+        .map(|i| south.get(i + 1).map(|(n, _)| n.x))
+        .collect();
+    for ((b, door), east) in south.into_iter().zip(east_of) {
+        if let Some(door) = door {
             requests.push(WallRequest {
                 run: Run::H {
                     y: b.y,
                     x0: b.x,
-                    x1: b.x + b.width,
+                    // Over its own east wall's columns too, so the corner closes.
+                    x1: east.unwrap_or(b.x + b.width),
                 },
-                doors: vec![], // meeting↔meeting: solid (no door)
+                doors: vec![door],
             });
         }
-    }
-    if let Some(p) = pantry {
-        let above_meeting = meeting_rooms.iter().any(|r| stacked(r.bounds, p));
-        if above_meeting {
+        if east.is_some() {
             requests.push(WallRequest {
-                run: Run::H {
-                    y: p.y,
-                    x0: p.x,
-                    x1: p.x + p.width,
+                run: Run::V {
+                    x: b.x + b.width,
+                    y0: b.y,
+                    y1: b.y + b.height,
                 },
-                doors: vec![DoorAt::Pct(60)],
+                doors: vec![],
             });
         }
-        // No east wall request AT ALL — "the counter is the boundary" is the
-        // pantry's honest shape.
     }
 
     resolve(requests)
-}
-
-/// `below` sits directly under `above` (same column, touching edges).
-fn stacked(above: Bounds, below: Bounds) -> bool {
-    below.y == above.y + above.height && below.x == above.x && below.width == above.width
 }
 
 fn resolve(requests: Vec<WallRequest>) -> (Vec<WallSegment>, Vec<Doorway>) {
@@ -802,115 +807,132 @@ mod tests {
             .collect()
     }
 
+    const CORRIDOR: Bounds = Bounds {
+        x: 0,
+        y: 10,
+        width: 200,
+        height: 10,
+    };
+
+    fn bounds(x: u16, y: u16, w: u16, h: u16) -> Bounds {
+        room(x, y, w, h).bounds
+    }
+
+    /// agent-office: every walled south-row room opens onto the corridor by
+    /// a door in its north wall, and a wall stands between neighbours, so
+    /// each room is reachable and none opens into the next.
     #[test]
-    fn dense_shared_wall_resolves_once_and_solid() {
-        let rooms = [room(0, 20, 40, 30), room(0, 50, 40, 30)];
-        let (walls, _) = derive_room_walls(&rooms, None);
-        let h = h_runs(&walls);
-        assert_eq!(h.len(), 1, "one horizontal wall, not two: {h:?}");
+    fn each_south_room_opens_north_and_is_walled_from_the_next() {
+        let rooms = [room(0, 20, 40, 30), room(44, 20, 40, 30)];
+        let pantry = Some(bounds(88, 20, 40, 30));
+        let (walls, doorways) = derive_room_walls(&rooms, pantry, None, None, CORRIDOR);
+        let north: Vec<_> = doorways.iter().filter(|d| d.start.y == d.end.y).collect();
+        assert_eq!(north.len(), 3, "a north door each: {doorways:?}");
+        assert!(north.iter().all(|d| d.start.y == 20));
+        let v: Vec<u16> = walls
+            .iter()
+            .filter_map(|w| match *w {
+                WallSegment::Vertical { x, .. } => Some(x),
+                WallSegment::Horizontal { .. } => None,
+            })
+            .collect();
         assert_eq!(
-            h[0],
-            (0, 40),
-            "solid across the full span — no inter-meeting door"
+            v,
+            vec![40, 84],
+            "a wall between each pair, none past the last"
+        );
+        assert_eq!(
+            doorways.len(),
+            3,
+            "no door between rooms: each is entered from the corridor"
         );
     }
 
+    /// agent-office: the waiting area is open to the corridor, so a waiting
+    /// agent walks straight in; your office east of it still has its wall.
     #[test]
-    fn pantry_door_survives_and_every_enclosed_room_has_a_door() {
-        let rooms = [room(0, 20, 40, 30)];
-        let pantry = Some(Bounds {
-            x: 0,
-            y: 50,
-            width: 40,
-            height: 30,
-        });
-        let (walls, doorways) = derive_room_walls(&rooms, pantry);
-        let h = h_runs(&walls);
-        assert_eq!(h.len(), 2, "the 60% door splits the shared wall: {h:?}");
-        let gap = (h[0].1, h[1].0);
-        let door_center = pct(40, 60);
-        assert_eq!(
-            gap,
-            (door_center - DOOR_GAP / 2, door_center + DOOR_GAP / 2)
-        );
-        let v = v_runs(&walls);
-        assert_eq!(v.len(), 2, "east wall split by the centered door");
+    fn the_waiting_area_has_no_north_wall() {
+        let waiting = Some(bounds(0, 20, 30, 30));
+        let office = Some(bounds(34, 20, 44, 30));
+        let (walls, doorways) = derive_room_walls(&[], None, waiting, office, CORRIDOR);
         assert!(
-            v[0].1 < v[1].0,
-            "a real gap exists — the meeting room is never sealed"
+            h_runs(&walls).iter().all(|&(x0, _)| x0 >= 34 || x0 > 0),
+            "{walls:?}"
         );
-        assert_eq!(doorways.len(), 2, "one Doorway per cut opening");
-        let v_door = doorways
-            .iter()
-            .find(|d| d.start.x == d.end.x)
-            .expect("east door");
-        assert_eq!((v_door.start.y, v_door.end.y), (v[0].1, v[1].0));
-        let h_door = doorways
-            .iter()
-            .find(|d| d.start.y == d.end.y)
-            .expect("60% door");
-        assert_eq!((h_door.start.x, h_door.end.x), gap);
+        assert_eq!(doorways.len(), 1, "only your office has a door");
+        assert!(doorways[0].start.x >= 34);
+        assert_eq!(v_runs(&walls), vec![(20, 50)], "the wall between them");
+    }
+
+    /// agent-office: the rooftop's door is at the corridor, so it opens onto
+    /// the corridor rather than into a bench or a meeting room.
+    #[test]
+    fn the_rooftop_door_opens_onto_the_corridor() {
+        let roof = MeetingRoom {
+            style: crate::layout::RoomStyle::Rooftop,
+            ..room(0, 0, 30, 100)
+        };
+        let corridor = Bounds {
+            x: 34,
+            y: 40,
+            width: 100,
+            height: 12,
+        };
+        let (_, doorways) = derive_room_walls(&[roof], None, None, None, corridor);
+        let [d] = doorways[..] else {
+            panic!("{doorways:?}")
+        };
+        assert_eq!(d.start.x, 30, "in the rooftop's east wall");
+        let mid = u16::midpoint(d.start.y, d.end.y);
+        assert!(
+            (corridor.y..corridor.y + corridor.height).contains(&mid),
+            "door centred at {mid}, corridor {corridor:?}"
+        );
     }
 
     #[test]
     fn a_door_as_wide_as_its_run_leaves_a_post_at_each_end_on_its_axis() {
-        let (walls, doorways) = derive_room_walls(&[room(0, 20, 22, DOOR_GAP - 1)], None);
-        let end = 20 + DOOR_GAP - 1;
+        let (walls, doorways) =
+            derive_room_walls(&[room(0, 20, DOOR_GAP - 1, 30)], None, None, None, CORRIDOR);
+        let end = DOOR_GAP - 1;
         assert_eq!(
             walls,
             [
-                WallSegment::Vertical {
-                    x: 22,
-                    y0: 20,
-                    y1: 20
+                WallSegment::Horizontal {
+                    y: 20,
+                    x0: 0,
+                    x1: 0
                 },
-                WallSegment::Vertical {
-                    x: 22,
-                    y0: end,
-                    y1: end
+                WallSegment::Horizontal {
+                    y: 20,
+                    x0: end,
+                    x1: end
                 },
             ]
         );
         assert_eq!(
             doorways,
             [Doorway {
-                start: Point { x: 22, y: 20 },
-                end: Point { x: 22, y: end },
+                start: Point { x: 0, y: 20 },
+                end: Point { x: end, y: 20 },
             }]
         );
     }
 
     #[test]
     fn vertical_run_trims_below_crossing_horizontal_wall() {
-        let rooms = [room(0, 20, 40, 30), room(0, 50, 40, 30)];
-        let (walls, _) = derive_room_walls(&rooms, None);
-        let v = v_runs(&walls);
-        // room 0's pair spans [20, 50]; room 1's pair starts BELOW the wall.
-        assert_eq!(v[0].0, 20);
-        assert_eq!(v[1].1, 50);
-        let trimmed_top = 50 + WALL_THICK_H;
-        assert_eq!(v[2].0, trimmed_top, "trimmed below the shared wall");
-        assert_eq!(v[3].1, 80);
-        let c = trimmed_top + (80 - trimmed_top) / 2;
+        let rooms = [room(0, 20, 40, 30), room(44, 20, 40, 30)];
+        let (walls, _) = derive_room_walls(&rooms, None, None, None, CORRIDOR);
         assert_eq!(
-            (v[2].1, v[3].0),
-            (c - DOOR_GAP / 2, c + DOOR_GAP / 2),
-            "door centers on the trimmed run (legacy v2_center)"
+            v_runs(&walls),
+            vec![(20 + WALL_THICK_H, 50)],
+            "the shared wall starts below the north wall it meets"
         );
     }
 
     #[test]
-    fn open_plan_requests_nothing() {
-        assert!(derive_room_walls(&[], None).0.is_empty());
-        let (w, d) = derive_room_walls(
-            &[],
-            Some(Bounds {
-                x: 0,
-                y: 20,
-                width: 40,
-                height: 60,
-            }),
-        );
+    fn no_rooms_request_nothing() {
+        let (w, d) = derive_room_walls(&[], None, None, None, CORRIDOR);
         assert!(w.is_empty() && d.is_empty());
     }
 

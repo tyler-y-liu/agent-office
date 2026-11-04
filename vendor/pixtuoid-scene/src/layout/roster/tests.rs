@@ -107,6 +107,9 @@ fn every_fixture_kind_is_placed_on_some_office() {
         Vec::<&&str>::new(),
         "kinds placed but missing from this census's list: add them to it"
     );
+    // agent-office: the meeting rooms stand in the south row, under no
+    // window to hang a notice board on.
+    let all: BTreeSet<&str> = all.into_iter().filter(|k| *k != "NoticeBoard").collect();
     assert_eq!(
         all.difference(&seen).collect::<Vec<_>>(),
         Vec::<&&str>::new(),
@@ -262,31 +265,6 @@ fn the_coffee_machine_follows_the_counter_size() {
     assert_eq!(l.coffee_machine(), None);
 }
 
-/// A meeting room's notice board hangs on the band, the north wall the viewer
-/// sees: inside its room's columns, under the band's last row.
-#[test]
-fn a_notice_board_hangs_on_the_band_inside_its_room() {
-    let mut hung = 0;
-    for l in offices() {
-        for room in 0..l.meeting_rooms.len() {
-            let Some(board) = l.notice_board_rect(room) else {
-                continue;
-            };
-            hung += 1;
-            let r = l.meeting_rooms[room].bounds;
-            assert!(
-                board.x > r.x && board.x + board.width < r.x + r.width,
-                "{board:?} in {r:?}"
-            );
-            assert!(
-                board.y + board.height <= l.wall_band_h(),
-                "{board:?} leaves the band"
-            );
-        }
-    }
-    assert!(hung > 0, "no office hangs a notice board");
-}
-
 /// Hover orders fixtures on [`Tie`], and a painter on the [`Layer`] it maps
 /// to: the two orders must agree, with a figure between the two ties.
 #[test]
@@ -419,18 +397,13 @@ fn the_door_is_centred_in_the_last_window_slot() {
         let roster = l.fixtures().find(|f| f.kind == FixtureKind::Door);
         assert_eq!(roster.map(|f| f.visual), Some(door), "{at}");
         let slots: Vec<_> = super::super::window_slots(l.buf_w).collect();
-        // agent-office: the last slot west of the rooftop's, when there is
-        // one, and the door wholly west of the open air: an elevator opening
-        // onto the roof's edge reads as a hazard, not a lobby.
-        let roof = if l.rooftop().is_some() {
-            usize::from(super::super::rooftop_slots(l.buf_w))
-        } else {
-            0
-        };
-        let Some(&slot) = slots.len().checked_sub(1 + roof).map(|i| &slots[i]) else {
+        // agent-office: the last slot, the rooftop being at the west end.
+        let Some(&slot) = slots.last() else {
             assert_eq!(door.x, super::super::door_x(l.buf_w), "{at}");
             continue;
         };
+        let roof =
+            usize::from(super::super::rooftop_slots(l.buf_w)) * usize::from(l.rooftop().is_some());
         assert!(
             slot.x < door.x && door.x + door.width < slot.span().end,
             "{at}"
@@ -440,7 +413,10 @@ fn the_door_is_centred_in_the_last_window_slot() {
             "{at}: centred in its slot"
         );
         if let Some(r) = l.rooftop() {
-            assert!(door.x + door.width <= r.bounds.x, "{at}: the door on the roof");
+            assert!(
+                door.x >= r.bounds.x + r.bounds.width,
+                "{at}: the door on the roof"
+            );
         }
         // The open sky over the rooftop's slots is one bay.
         assert_eq!(
@@ -484,43 +460,6 @@ fn the_exit_sign_hangs_centred_over_the_door_indicator_below_the_window_head() {
         );
     }
     assert!(met > 0, "the sweep met an exit sign");
-}
-
-#[test]
-fn a_notice_board_hangs_within_one_pane() {
-    let mut met = 0;
-    for l in census().chain(offices()) {
-        for f in l.fixtures() {
-            let FixtureKind::NoticeBoard { .. } = f.kind else {
-                continue;
-            };
-            met += 1;
-            let b = f.visual;
-            assert!(
-                l.window_bays()
-                    .flat_map(|bay| bay.panes())
-                    .any(|p| p.start <= b.x && b.x + b.width <= p.end),
-                "{}x{}: {b:?} straddles a frame",
-                l.buf_w,
-                l.buf_h
-            );
-        }
-    }
-    assert!(met > 0, "the sweep met a notice board");
-}
-
-/// The sizes whose meeting room hung a board before it snapped to a pane, but
-/// 140x80, whose room's north wall has no free pane.
-#[test]
-fn snapping_to_a_pane_keeps_the_notice_board() {
-    for (w, h) in [(160, 96), (192, 108), (200, 120), (240, 144), (320, 180)] {
-        let l = SceneLayout::compute_with_seed(w, h, None, 0).expect("lays out");
-        assert!(
-            l.fixtures()
-                .any(|f| matches!(f.kind, FixtureKind::NoticeBoard { .. })),
-            "{w}x{h}"
-        );
-    }
 }
 
 #[test]

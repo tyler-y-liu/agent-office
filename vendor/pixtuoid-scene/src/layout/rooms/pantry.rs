@@ -54,9 +54,9 @@ pub struct PantryRoom {
 }
 
 /// Vertical position of the pantry counter as a percent of the room height.
-/// SINGLE SOURCE: the island clamp, the counter's own waypoint placement, and
-/// [`PantryRoom::content_fit_h`]'s inverse all read it — were they to drift, a
-/// clamp would guard a phantom counter position.
+/// SINGLE SOURCE: the island clamp and the counter's own waypoint placement
+/// both read it — were they to drift, a clamp would guard a phantom counter
+/// position.
 pub(crate) fn pantry_counter_y_pct(counter_w: u16) -> u16 {
     if counter_w >= PANTRY_COUNTER_LARGE_W {
         65
@@ -119,19 +119,6 @@ impl PantryRoom {
             (b.x + b.width - east_end >= r.width).then_some(east_end)
         };
         x.map(|x| Bounds { x, ..r })
-    }
-
-    /// The room height at which the pantry can actually HOST its content — the
-    /// inverse of the island's y-clamps, where `div_ceil` is the exact inverse of
-    /// the truncating `pct()`. An associated fn, not a method: the split
-    /// negotiation needs the answer BEFORE any bounds exist.
-    pub(crate) fn content_fit_h(counter: Size) -> u16 {
-        let clr = WALL_THICK_H + OBSTACLE_PAD_PX;
-        let island = furniture_def(Furniture::KitchenIsland);
-        let island_half_h = island.visual.h / 2;
-        let island_need =
-            clr + 2 * (island_half_h + island.pad) + 1 + counter.h / 2 + OBSTACLE_PAD_PX;
-        (u32::from(island_need) * 100).div_ceil(u32::from(pantry_counter_y_pct(counter.w))) as u16
     }
 
     /// The water cooler's sprite box against the pantry's east side, clear of
@@ -285,7 +272,6 @@ pub(crate) fn place_snack_shelf(pr: Bounds, counter: Size, waypoints: &mut Vec<W
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::SceneLayout;
 
     fn bx(x: u16, y: u16, width: u16, height: u16) -> Bounds {
         Bounds {
@@ -296,38 +282,49 @@ mod tests {
         }
     }
 
-    /// Every way `off_the_counter` resolves, each on an office whose cooler or
-    /// bin takes it, the slides on both sides of the fit.
+    /// Every way `off_the_counter` resolves: a piece the counter's art would
+    /// cover slides past its nearer end when the floor there takes it, and
+    /// stays put when the counter is clear of it or absent. agent-office: on
+    /// pantries built here, the south row's pantry no longer being a size an
+    /// office width picks.
     #[test]
     fn off_the_counter_resolves_each_way() {
-        let counter = |x, y| Some(bx(x, y, COMPACT_COUNTER.w, COMPACT_COUNTER.h));
-        let cooler = |x, y| bx(x, y, WATER_COOLER.w, WATER_COOLER.h);
-        let bin = |x, y| bx(x, y, 4, 5);
-        // (office w, h, seed; its counter; the piece's own box; the x it ends at)
-        let rows = [
-            // A room narrower than the counter has none.
-            (55, 72, 0, None, cooler(8, 52), Some(8)),
-            // Clear of it, its base on the row above the counter's top.
-            (60, 89, 2, counter(0, 72), cooler(14, 63), Some(14)),
-            // West of its centre, the floor west of it exactly the bin's width.
-            (72, 61, 2, counter(4, 48), bin(3, 47), Some(0)),
-            // One column short.
-            (69, 61, 2, counter(3, 48), bin(3, 47), None),
-            // East of it, the floor east of it exactly the cooler's width.
-            (95, 72, 2, counter(9, 57), cooler(26, 52), Some(29)),
-            // One column short.
-            (89, 72, 2, counter(8, 57), cooler(24, 52), None),
-        ];
-        for (w, h, seed, counter, r, x) in rows {
-            let p = SceneLayout::compute_with_seed(w, h, None, seed)
-                .and_then(|l| l.pantry)
-                .expect("a pantry");
-            assert_eq!(p.counter_rect(), counter, "{w}x{h} seed {seed}");
-            assert_eq!(
-                p.off_the_counter(r),
-                x.map(|x| Bounds { x, ..r }),
-                "{w}x{h} seed {seed}"
-            );
+        let pantry = |width| PantryRoom {
+            bounds: bx(10, 20, width, 40),
+            counter_size: COMPACT_COUNTER,
+            kitchen_island: None,
+        };
+        let piece = Size { w: 4, h: 5 };
+        // A room narrower than the counter has none, so nothing moves.
+        let narrow = pantry(COMPACT_COUNTER.w - 1);
+        assert_eq!(narrow.counter_rect(), None);
+        let r = bx(12, 50, piece.w, piece.h);
+        assert_eq!(narrow.off_the_counter(r), Some(r));
+        let p = pantry(COMPACT_COUNTER.w + 12);
+        let c = p.counter_rect().expect("a counter");
+        let b = p.bounds;
+        for (side, fits) in [(-1i8, true), (-1, false), (1, true), (1, false)] {
+            // The floor on that side of the counter exactly the piece's
+            // width, or one column short.
+            let free = if side < 0 {
+                c.x - b.x
+            } else {
+                b.x + b.width - (c.x + c.width)
+            };
+            let w = if fits { free } else { free + 1 };
+            let at = if side < 0 { c.x } else { c.x + c.width - w };
+            let r = bx(at, c.y, w, piece.h);
+            let want = fits.then(|| Bounds {
+                x: if side < 0 { c.x - w } else { c.x + c.width },
+                ..r
+            });
+            assert_eq!(p.off_the_counter(r), want, "side {side} fits {fits}: {c:?}");
+            // Clear of it, it stays.
+            let clear = Bounds {
+                y: c.y + c.height,
+                ..r
+            };
+            assert_eq!(p.off_the_counter(clear), Some(clear));
         }
     }
 

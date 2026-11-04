@@ -557,7 +557,14 @@ impl SceneLayout {
                     return None;
                 }
                 // Off the corridor runner a south room's floor runs into.
-                let rug = trio?.0.rug(corridor.y);
+                // agent-office: a room south of the corridor runs to the
+                // floor's south edge.
+                let end = if r.bounds.y >= corridor.y {
+                    *buf_h
+                } else {
+                    corridor.y
+                };
+                let rug = trio?.0.rug(end);
                 Some(Fixture {
                     kind: FixtureKind::MeetingRug { room },
                     at: top_left(rug),
@@ -828,7 +835,13 @@ impl SceneLayout {
         let dw = self
             .doorways
             .iter()
-            .find(|d| d.start.y == d.end.y && d.start.y == p.bounds.y)?;
+            // agent-office: the south row's doors share a row, so the pantry's
+            // is the one in its own columns.
+            .find(|d| {
+                d.start.y == d.end.y
+                    && d.start.y == p.bounds.y
+                    && (p.bounds.x..p.bounds.x + p.bounds.width).contains(&d.start.x)
+            })?;
         let mut mat = centred(
             Point {
                 x: u16::midpoint(dw.start.x, dw.end.x),

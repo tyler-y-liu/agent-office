@@ -3858,7 +3858,11 @@ fn pantry_doorway_gets_a_centered_entry_mat() {
     let dw = l
         .doorways
         .iter()
-        .find(|d| d.start.y == d.end.y && d.start.y == p.bounds.y)
+        .find(|d| {
+            d.start.y == d.end.y
+                && d.start.y == p.bounds.y
+                && (p.bounds.x..p.bounds.x + p.bounds.width).contains(&d.start.x)
+        })
         .expect("the pantry north door");
     let theme = crate::theme::theme_by_name("normal").expect("theme");
     let floor = Rgb {
@@ -5943,7 +5947,8 @@ fn the_outside_reaches_only_the_glass() {
         },
         covered,
     );
-    for kind in ["neon sign", "notice board"] {
+    // agent-office: no notice board: the meeting rooms are under no window.
+    for kind in ["neon sign"] {
         let over_glass = layout.fixtures().any(|f| {
             let named = match f.kind {
                 FixtureKind::NeonSign => "neon sign",
