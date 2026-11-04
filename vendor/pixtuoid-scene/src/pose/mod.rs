@@ -19,6 +19,8 @@ use crate::walk::{
 };
 use pixtuoid_core::walkable::{OccupancyOverlay, WalkableMask};
 
+/// agent-office: how long an idle agent sits in the pantry before the rooftop.
+pub use pure::IDLE_ROOFTOP_MS;
 #[allow(
     unused_imports,
     reason = "agent-office: the lounge never ends on a dwell; tests still use them"
@@ -30,8 +32,6 @@ pub(crate) use pure::{
 pub(crate) use pure::{LegPose, Pose};
 #[cfg(test)]
 pub(crate) use pure::{aimless_wander_seed, pick_aimless_dest};
-/// agent-office: how long an idle agent sits in the pantry before the rooftop.
-pub use pure::IDLE_ROOFTOP_MS;
 pub use pure::{
     est_wander_cycle_ms, is_aimless_cycle, seated_dwell_ms, takes_trip, waypoint_index_for_cycle,
 };
@@ -367,10 +367,9 @@ pub(crate) fn derive_with_routing(
     // `TEAM_AFTER_MS` (`crate::team::is_brief_sub`), so it walks in from the
     // door then rather than appearing at its desk.
     let reveal = crate::team::TEAM_AFTER_MS;
-    let revealed = slot.parent_id.is_some()
-        && (reveal..reveal + ENTRY_ANIMATION_MS).contains(&since_spawn);
-    if walk.entry.is_none()
-        && (since_spawn < ENTRY_ANIMATION_MS || revealed || re_enter.is_some())
+    let revealed =
+        slot.parent_id.is_some() && (reveal..reveal + ENTRY_ANIMATION_MS).contains(&since_spawn);
+    if walk.entry.is_none() && (since_spawn < ENTRY_ANIMATION_MS || revealed || re_enter.is_some())
     {
         let profile = snapshot_leg_profile(
             rctx.router,
@@ -456,7 +455,13 @@ pub(crate) fn derive_with_routing(
         let at = rctx
             .history
             .recent(slot.agent_id, HISTORY_RECENT_MS, now)
-            .unwrap_or_else(|| walk.wander.target.kind.seat().unwrap_or(walk.wander.target.dest));
+            .unwrap_or_else(|| {
+                walk.wander
+                    .target
+                    .kind
+                    .seat()
+                    .unwrap_or(walk.wander.target.dest)
+            });
         walk.set_down(at);
         walk.wander.target.kind = WanderKind::Aimless;
         if let Some(pose) = lifted_pose(slot, now, layout, desk, rctx) {
