@@ -81,10 +81,10 @@ mod tests {
 
     #[test]
     fn a_desktop_session_opens_by_its_host_id() {
-        let e = json!({"entrypoint": "claude-desktop", "hostSessionId": "local_54b1ddf3-ca2b"});
+        let e = json!({"entrypoint": "claude-desktop", "hostSessionId": "local_demo"});
         assert_eq!(
             url_for(&e).unwrap(),
-            "claude://code/continue?session=local_54b1ddf3-ca2b"
+            "claude://code/continue?session=local_demo"
         );
     }
 
