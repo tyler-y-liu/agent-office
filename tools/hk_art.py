@@ -6,9 +6,8 @@ Each piece is drawn at @4x with flat fills, outlined in the pack's `κ` round
 its silhouette as the upstream art is, then shrunk to its 1x base. A redrawn
 slot keeps the slot's size (the layout and the hover boxes key off it), so
 only the look changes. A new piece (rooftop_*, laundry_pole, water_tank,
-office_shelf) also
-needs its `Piece` in pixtuoid-core and its `[animations]` entries in pack.toml,
-written by hand. Writes into vendor/pixtuoid-scene/sprites/default; the palette
+office_shelf) also needs its `Piece` in pixtuoid-core and its `[animations]`
+entries in pack.toml, written by hand. Writes into vendor/pixtuoid-scene/sprites/default; the palette
 keys it uses beyond pixtuoid's are under "agent-office: Hong Kong" in
 pack.toml.
 
