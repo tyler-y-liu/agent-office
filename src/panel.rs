@@ -31,6 +31,18 @@ const CHIP_INK: Color = Color::Rgb(0x16, 0x18, 0x1d);
 pub struct PanelState {
     pub selected: Option<AgentId>,
     pub expanded: bool,
+    /// When you last opened each session from here: what it had done by
+    /// then is read.
+    pub seen: HashMap<AgentId, SystemTime>,
+}
+
+/// Whether `slot` is idle and was opened since it went idle: its result is
+/// read, so it no longer waits in the pantry to be looked at.
+pub fn read_since_idle(slot: &AgentSlot, seen: &HashMap<AgentId, SystemTime>) -> bool {
+    matches!(slot.state, ActivityState::Idle)
+        && seen
+            .get(&slot.agent_id)
+            .is_some_and(|&at| at >= slot.state_started_at)
 }
 
 /// What a session needs from you, which is also where it is in the office.
@@ -50,9 +62,13 @@ pub enum Group {
 }
 
 impl Group {
-    pub fn of(slot: &AgentSlot, view: Option<&TaskView>, now: SystemTime) -> Self {
+    /// `read` says it was opened since it went idle ([`read_since_idle`]).
+    pub fn of(slot: &AgentSlot, view: Option<&TaskView>, now: SystemTime, read: bool) -> Self {
         if crate::tasks::stuck_at_work(slot, view).is_some() {
             return Self::Stuck;
+        }
+        if read {
+            return Self::Idle;
         }
         match slot.state {
             ActivityState::RequiresAction { .. } => Self::Waiting,
@@ -86,7 +102,12 @@ impl Group {
 /// The agents in display order: roots grouped by [`Group`], those waiting on
 /// you in the order they started waiting (the office's waiting line), the
 /// rest oldest first; each followed by its subagents.
-pub fn order(scene: &SceneState, views: &TaskViews, now: SystemTime) -> Vec<(AgentId, u8)> {
+pub fn order(
+    scene: &SceneState,
+    views: &TaskViews,
+    now: SystemTime,
+    seen: &HashMap<AgentId, SystemTime>,
+) -> Vec<(AgentId, u8)> {
     let cc: Vec<&AgentSlot> = scene
         .agents
         .values()
@@ -99,7 +120,7 @@ pub fn order(scene: &SceneState, views: &TaskViews, now: SystemTime) -> Vec<(Age
         .filter(|s| !s.parent_id.as_ref().is_some_and(is_shown))
         .collect();
     roots.sort_by_key(|s| {
-        let g = Group::of(s, views.get(&s.agent_id), now);
+        let g = Group::of(s, views.get(&s.agent_id), now, read_since_idle(s, seen));
         let since = if g == Group::Waiting {
             s.state_started_at
         } else {
@@ -384,7 +405,15 @@ pub fn render(
     state: &PanelState,
 ) -> Vec<(u16, AgentId)> {
     let now = SystemTime::now();
-    let order = order(scene, views, now);
+    let order = order(scene, views, now, &state.seen);
+    let group_of = |s: &AgentSlot| {
+        Group::of(
+            s,
+            views.get(&s.agent_id),
+            now,
+            read_since_idle(s, &state.seen),
+        )
+    };
     let hues = pixtuoid_scene::badge::repo_hues(scene.agents.values());
     let waiting = order
         .iter()
@@ -445,19 +474,19 @@ pub fn render(
             // A header over each group's first card, a blank line before
             // every other root.
             if *depth == 0 {
-                let group = Group::of(slot, views.get(id), now);
+                let group = group_of(slot);
                 let first = order
                     .iter()
                     .take_while(|(o, _)| o != id)
                     .filter(|(_, d)| *d == 0)
                     .filter_map(|(o, _)| scene.agents.get(o))
-                    .all(|s| Group::of(s, views.get(&s.agent_id), now) != group);
+                    .all(|s| group_of(s) != group);
                 if first {
                     let n = order
                         .iter()
                         .filter(|(_, d)| *d == 0)
                         .filter_map(|(o, _)| scene.agents.get(o))
-                        .filter(|s| Group::of(s, views.get(&s.agent_id), now) == group)
+                        .filter(|s| group_of(s) == group)
                         .count();
                     lines.insert(
                         0,
@@ -583,7 +612,12 @@ mod tests {
             Some(a),
             t0 + Duration::from_secs(2),
         );
-        let o = order(&scene, &TaskViews::default(), t0 + Duration::from_secs(10));
+        let o = order(
+            &scene,
+            &TaskViews::default(),
+            t0 + Duration::from_secs(10),
+            &HashMap::new(),
+        );
         let ids: Vec<AgentId> = o.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, vec![a, a1, b]);
         assert_eq!(o[1].1, 1);
@@ -598,7 +632,12 @@ mod tests {
             Some(a1),
             t0 + Duration::from_secs(3),
         );
-        let o = order(&scene, &TaskViews::default(), t0 + Duration::from_secs(10));
+        let o = order(
+            &scene,
+            &TaskViews::default(),
+            t0 + Duration::from_secs(10),
+            &HashMap::new(),
+        );
         assert_eq!(
             o.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![a, a1, a11, b]
@@ -669,12 +708,12 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        let o: Vec<AgentId> = order(&scene, &views, now)
+        let o: Vec<AgentId> = order(&scene, &views, now, &HashMap::new())
             .into_iter()
             .map(|(id, _)| id)
             .collect();
         assert_eq!(o, vec![wait1, wait2, stuck, done, work, idle]);
-        let group = |id| Group::of(&scene.agents[&id], views.get(&id), now);
+        let group = |id| Group::of(&scene.agents[&id], views.get(&id), now, false);
         assert_eq!(
             group(done),
             Group::Done,
@@ -716,6 +755,34 @@ mod tests {
         let chip = first.last().expect("a chip");
         assert_eq!(chip.style.bg, Some(WAIT), "the status on its colour");
         assert!(chip.content.contains("等你确认"));
+    }
+
+    /// A finished session waits in the pantry, under 做完待看, until you open
+    /// it; opened, its result is read and it is simply idle. Opened while it
+    /// still worked, what it went on to finish is unread.
+    #[test]
+    fn opening_a_finished_session_reads_it() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Idle;
+        slot.state_started_at = now - Duration::from_secs(60);
+        let slot = scene.agents[&a].clone();
+        let group = |seen: &HashMap<AgentId, SystemTime>| {
+            Group::of(&slot, None, now, read_since_idle(&slot, seen))
+        };
+        assert_eq!(group(&HashMap::new()), Group::Done);
+        let opened = HashMap::from([(a, now - Duration::from_secs(10))]);
+        assert_eq!(group(&opened), Group::Idle, "read");
+        let while_working = HashMap::from([(a, now - Duration::from_secs(120))]);
+        assert_eq!(
+            group(&while_working),
+            Group::Done,
+            "finished after it was opened"
+        );
     }
 
     #[test]

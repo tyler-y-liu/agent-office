@@ -57,9 +57,42 @@ pub struct Core {
 /// One frame's worth of state.
 pub struct Frame {
     pub scene: Arc<SceneState>,
+    /// `scene` as the office draws it ([`as_seen`]).
+    pub office: Arc<SceneState>,
     pub views: tasks::TaskViews,
     /// The head label per agent; empty while they are hidden.
     pub labels: HashMap<AgentId, String>,
+}
+
+/// `scene` as the office draws it: a session you opened since it went idle
+/// ([`panel::read_since_idle`]) has had its result read, so it idles as one
+/// past the pantry, out on the rooftop; its idle stretch is drawn as starting
+/// [`IDLE_ROOFTOP_MS`](pixtuoid_scene::pose::IDLE_ROOFTOP_MS) ago at least.
+/// The panel keeps the real start for its "空闲 Xm".
+pub fn as_seen(
+    scene: &Arc<SceneState>,
+    seen: &HashMap<AgentId, SystemTime>,
+    now: SystemTime,
+) -> Arc<SceneState> {
+    let read: Vec<AgentId> = scene
+        .agents
+        .values()
+        .filter(|s| panel::read_since_idle(s, seen))
+        .map(|s| s.agent_id)
+        .collect();
+    if read.is_empty() {
+        return Arc::clone(scene);
+    }
+    let past_pantry = now
+        .checked_sub(Duration::from_millis(pixtuoid_scene::pose::IDLE_ROOFTOP_MS))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut drawn = (**scene).clone();
+    for id in read {
+        if let Some(s) = drawn.agents.get_mut(&id) {
+            s.state_started_at = s.state_started_at.min(past_pantry);
+        }
+    }
+    Arc::new(drawn)
 }
 
 impl Core {
@@ -95,7 +128,8 @@ impl Core {
     pub fn frame(&mut self) -> Frame {
         let scene = self.scene();
         let views = self.views_rx.borrow().clone();
-        let order = panel::order(&scene, &views, SystemTime::now());
+        let now = SystemTime::now();
+        let order = panel::order(&scene, &views, now, &self.ui.seen);
         if self
             .ui
             .selected
@@ -112,7 +146,9 @@ impl Core {
         } else {
             HashMap::new()
         };
+        self.ui.seen.retain(|id, _| scene.agents.contains_key(id));
         Frame {
+            office: as_seen(&scene, &self.ui.seen, now),
             scene,
             views,
             labels,
@@ -147,7 +183,7 @@ impl Core {
             Action::Down | Action::Up => {
                 let delta = if action == Action::Down { 1 } else { -1 };
                 let views = self.views_rx.borrow().clone();
-                let order = panel::order(&self.scene(), &views, SystemTime::now());
+                let order = panel::order(&self.scene(), &views, SystemTime::now(), &self.ui.seen);
                 self.ui.selected = panel::step(&order, self.ui.selected, delta);
                 self.follow(floors);
             }
@@ -169,8 +205,19 @@ impl Core {
                 floors.navigate(prev, SystemTime::now());
             }
             Action::Open => {
+                let scene = self.scene();
                 let done = match self.ui.selected {
-                    Some(id) => jump::open_agent(&self.scene(), id),
+                    Some(id) => jump::open_agent(&scene, id).inspect(|()| {
+                        // The session opened is the root's: all of it is read.
+                        let now = SystemTime::now();
+                        let mut at = Some(id);
+                        // Bounded: a parent cycle in corrupt state must not spin.
+                        for _ in 0..8 {
+                            let Some(a) = at else { break };
+                            self.ui.seen.insert(a, now);
+                            at = scene.agents.get(&a).and_then(|s| s.parent_id);
+                        }
+                    }),
                     None => Err("先选中一个 agent".to_owned()),
                 };
                 self.note_result(done);
@@ -239,6 +286,69 @@ pub fn footer(
             area.y,
             &Line::from(Span::styled(right, dim)),
             w,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixtuoid_core::Reducer;
+    use pixtuoid_core::source::{AgentEvent, Transport};
+
+    /// The office walks a session you opened since it went idle out of the
+    /// pantry: it draws that one's idle stretch as past the pantry's, and
+    /// leaves every other session, and the scene the panel reads, alone.
+    #[test]
+    fn the_office_draws_a_read_session_past_the_pantry() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["a", "b"]
+            .iter()
+            .map(|sid| {
+                let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+                r.apply(
+                    &mut scene,
+                    AgentEvent::SessionStart {
+                        agent_id: id,
+                        source: pipeline::CC_SOURCE.into(),
+                        session_id: (*sid).into(),
+                        cwd: "/repo".into(),
+                        parent_id: None,
+                    },
+                    t0,
+                    Transport::Hook,
+                );
+                id
+            })
+            .collect();
+        for id in &ids {
+            let s = scene.agents.get_mut(id).unwrap();
+            s.state = pixtuoid_core::ActivityState::Idle;
+            s.state_started_at = now - Duration::from_secs(60);
+        }
+        let scene = Arc::new(scene);
+        assert!(Arc::ptr_eq(&as_seen(&scene, &HashMap::new(), now), &scene));
+        let seen = HashMap::from([(ids[0], now - Duration::from_secs(5))]);
+        let drawn = as_seen(&scene, &seen, now);
+        let idle_for =
+            |s: &SceneState, id| now.duration_since(s.agents[id].state_started_at).unwrap();
+        assert!(
+            idle_for(&drawn, &ids[0]).as_millis()
+                >= u128::from(pixtuoid_scene::pose::IDLE_ROOFTOP_MS),
+            "past the pantry"
+        );
+        assert_eq!(
+            idle_for(&drawn, &ids[1]),
+            Duration::from_secs(60),
+            "unread left alone"
+        );
+        assert_eq!(
+            idle_for(&scene, &ids[0]),
+            Duration::from_secs(60),
+            "the panel's scene untouched"
         );
     }
 }

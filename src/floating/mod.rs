@@ -393,7 +393,7 @@ impl Win {
                 g.px,
             );
         } else if let Some((tags, signs)) =
-            self.render_office(&frame.scene, fit, theme, &frame.labels, sf)
+            self.render_office(&frame.office, fit, theme, &frame.labels, sf)
         {
             canvas.blit_scaled(&self.art, 0, 0, u32::from(fit.upscale()));
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
