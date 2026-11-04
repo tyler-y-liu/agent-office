@@ -293,6 +293,8 @@ pub enum TextRole {
     Indicator,
     /// An agent's chitchat bubble.
     Bubble(AgentId),
+    /// agent-office: a zone's sign by its door.
+    DoorSign,
 }
 
 impl TextRun {
@@ -342,17 +344,108 @@ impl TextRun {
         }
     }
 
-    /// The room's signs: `board`'s lines, then the floor indicator naming
-    /// `floor` over the elevator at `door`.
+    /// The room's signs: `board`'s lines, the floor indicator naming
+    /// `floor` over the elevator, then agent-office's door signs.
     pub(crate) fn signs(
         board: &crate::neon_sign::BoardModel,
-        door: Point,
+        layout: &crate::layout::SceneLayout,
         floor: crate::floor::FloorMeta,
         theme: &Theme,
     ) -> Vec<Self> {
         let mut runs = board.runs(theme);
-        runs.push(Self::indicator(door, floor, theme));
+        runs.push(Self::indicator(layout.door, floor, theme));
+        runs.extend(Self::door_signs(layout));
         runs
+    }
+
+    /// agent-office: a sign on each zone's north wall over its door, in the
+    /// zone's colour, so the plan reads at a glance: the meeting rooms, the
+    /// pantry, the waiting area, your office, and the rooftop's door out.
+    pub(crate) fn door_signs(layout: &crate::layout::SceneLayout) -> Vec<Self> {
+        use crate::layout::RoomStyle;
+        const INK: Rgb = Rgb {
+            r: 0xf6,
+            g: 0xf2,
+            b: 0xe8,
+        };
+        let sign = |x: u16, y: u16, text: String, plate: Rgb| Self {
+            at: Point { x, y },
+            align: Align::Centre,
+            spans: vec![TextSpan::new(text, INK)],
+            plate: Some(plate),
+            strip: None,
+            role: TextRole::DoorSign,
+        };
+        let door_x = |b: crate::layout::Bounds, pct: u16| b.x + crate::layout::pct(b.width, pct);
+        let mut meeting = 0u8;
+        let mut out: Vec<Self> = layout
+            .meeting_rooms
+            .iter()
+            .filter_map(|r| {
+                let b = r.bounds;
+                let (x, text, plate) = match r.style {
+                    RoomStyle::Office => {
+                        meeting += 1;
+                        (
+                            door_x(b, 50),
+                            format!("MTG {}", char::from(b'@' + meeting)),
+                            Rgb {
+                                r: 0x2f,
+                                g: 0x5f,
+                                b: 0xa8,
+                            },
+                        )
+                    }
+                    RoomStyle::Waiting => (
+                        door_x(b, 50),
+                        "WAIT".to_owned(),
+                        Rgb {
+                            r: 0xb3,
+                            g: 0x78,
+                            b: 0x1e,
+                        },
+                    ),
+                    RoomStyle::Boss => (
+                        door_x(b, crate::layout::OFFICE_DOOR_PCT),
+                        "OFFICE".to_owned(),
+                        Rgb {
+                            r: 0x86,
+                            g: 0x2c,
+                            b: 0x22,
+                        },
+                    ),
+                    RoomStyle::Rooftop => return None,
+                };
+                Some(sign(x, b.y.saturating_sub(SIGN_LIFT), text, plate))
+            })
+            .collect();
+        if let Some(p) = layout.pantry {
+            let b = p.bounds;
+            out.push(sign(
+                door_x(b, 50),
+                b.y.saturating_sub(SIGN_LIFT),
+                "PANTRY".to_owned(),
+                Rgb {
+                    r: 0x24,
+                    g: 0x75,
+                    b: 0x52,
+                },
+            ));
+        }
+        if let Some(roof) = layout.rooftop() {
+            let b = roof.bounds;
+            out.push(sign(
+                b.x + b.width / 2,
+                layout.corridor.y.saturating_sub(SIGN_LIFT),
+                "ROOF".to_owned(),
+                Rgb {
+                    r: 0x1f,
+                    g: 0x7f,
+                    b: 0x77,
+                },
+            ));
+        }
+        out
     }
 
     /// `bubble` over its speaker's badge, which hangs over `badge_at`, in
@@ -388,6 +481,10 @@ impl TextRun {
     }
 }
 
+/// agent-office: rows a door sign stands above its wall's line, on the
+/// corridor side.
+const SIGN_LIFT: u16 = 3;
+
 /// The cells of `map` a line `w` cells wide takes, placed by `at` as `align`
 /// says: the row `at`'s cell lies in, `LABEL_GAP` rows up for
 /// [`Align::Over`].
@@ -410,6 +507,40 @@ fn line_at(at: Point, align: Align, w: u16, map: CellMap) -> CellRect {
 
 #[cfg(test)]
 mod tests {
+
+    /// agent-office: every zone is named by a sign over its door, in a colour
+    /// of its own, so the plan reads at a glance; a zone the window has no
+    /// room for has no sign.
+    #[test]
+    fn each_zone_is_signed_once_in_its_own_colour() {
+        let wide = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+        let signs = super::TextRun::door_signs(&wide);
+        let names: Vec<String> = signs.iter().map(super::TextRun::text).collect();
+        for name in ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"] {
+            assert_eq!(
+                names.iter().filter(|n| *n == name).count(),
+                1,
+                "{name} in {names:?}"
+            );
+        }
+        let mut plates: Vec<_> = signs
+            .iter()
+            .filter(|s| s.text() != "MTG B")
+            .map(|s| s.plate)
+            .collect();
+        plates.dedup();
+        assert_eq!(plates.len(), 5, "a colour per kind of zone");
+        let narrow =
+            crate::layout::SceneLayout::compute_with_seed(160, 120, None, 0).expect("fits");
+        let names: Vec<String> = super::TextRun::door_signs(&narrow)
+            .iter()
+            .map(super::TextRun::text)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "ROOF" || n == "MTG B"),
+            "no sign for a zone that is not there: {names:?}"
+        );
+    }
     use super::*;
 
     /// The indicator's arrow is hollow and dim where no floor is its way:

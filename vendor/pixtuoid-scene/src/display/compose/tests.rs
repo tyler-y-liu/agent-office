@@ -631,7 +631,7 @@ fn no_run_overprints_another_on_its_line() {
             office,
             &TextRun::signs(
                 quiet_board(),
-                layout.door,
+                &layout,
                 crate::floor::FloorMeta::ground(),
                 &crate::theme::NORMAL,
             ),

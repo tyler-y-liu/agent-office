@@ -36,7 +36,7 @@ pub(crate) use rooms::pantry::{
     COMPACT_COUNTER, LARGE_COUNTER, PANTRY_COUNTER_ANIMS, pantry_counter_anim,
 };
 pub(crate) use rooms::walls::Doorway;
-pub(crate) use rooms::walls::{WALL_THICK_H, WALL_THICK_V, WallPiece};
+pub(crate) use rooms::walls::{OFFICE_DOOR_PCT, WALL_THICK_H, WALL_THICK_V, WallPiece};
 pub use rooms::{MeetingRoom, MeetingTrio, PantryRoom, RoomStyle};
 pub use roster::Station;
 pub(crate) use roster::StationArt;
