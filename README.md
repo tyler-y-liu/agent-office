@@ -63,8 +63,8 @@ agent-office --shot out.png    # 跑 20 秒后把画面存成 PNG 并退出
 
 ## 致谢
 
-办公室的渲染器、动画和数据源来自 [pixtuoid](https://github.com/pixtuoid/pixtuoid)，MIT License，Copyright (c) pixtuoid authors；许可证全文见 `LICENSE`。
+办公室的渲染器、动画和数据源来自 [pixtuoid](https://github.com/pixtuoid/pixtuoid)，MIT License，Copyright (c) 2026 Ivan Wang；许可证全文见 `LICENSE`。
 
 `assets/` 里的 Fusion Pixel 8px 字体随 pixtuoid-scene 发布，SIL OFL 1.1（见 `assets/OFL-Fusion-Pixel.txt` 和 `assets/LICENSES-Fusion-Pixel/`）。
 
-`src/floating/mod.rs` 的缩放倍数、名牌版式按 pixtuoid 悬浮窗和 pixtuoid-scene 的 `display/compose.rs` 复刻；`src/pipeline.rs` 的接线改写自 pixtuoid（`crates/pixtuoid/src/runtime/`），MIT License，Copyright (c) pixtuoid authors。
+`src/floating/mod.rs` 的缩放倍数、名牌版式按 pixtuoid 悬浮窗和 pixtuoid-scene 的 `display/compose.rs` 复刻；`src/pipeline.rs` 的接线改写自 pixtuoid（`crates/pixtuoid/src/runtime/`），MIT License，Copyright (c) 2026 Ivan Wang。
