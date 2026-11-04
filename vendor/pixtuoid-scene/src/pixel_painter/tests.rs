@@ -4481,7 +4481,9 @@ fn a_running_agent_releases_the_seat_it_snapped_back_from() {
     let id = pixtuoid_core::AgentId::from_transcript_path("/p/claim-release.jsonl");
     let mut slot = make_slot(id, ActivityState::Idle);
     slot.created_at = now0;
-    slot.state_started_at = now0;
+    // agent-office: long idle, so it heads for a sofa rather than standing at
+    // the pantry counter.
+    slot.state_started_at = now0 - Duration::from_millis(crate::pose::IDLE_ROOFTOP_MS);
     slot.last_event_at = now0;
     let mut scene = SceneState::uniform(16);
     scene.agents.insert(id, slot);

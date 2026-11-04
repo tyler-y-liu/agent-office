@@ -843,7 +843,7 @@ fn pick_wander_dest_falls_back_to_aimless_when_boxed_in() {
         .expect("should find a directed-trip agent");
 
     let origin = l.home_desks[0];
-    let target = pick_wander_dest(id, 0, &l, origin, &SpotClaims::default());
+    let target = pick_wander_dest(id, 0, &l, origin, &SpotClaims::default(), IdleStage::Pantry);
 
     assert!(
         matches!(target.kind, WanderKind::Aimless),
@@ -867,8 +867,10 @@ fn wander_named_seat_is_some_iff_the_destination_is_sat_on() {
         if !takes_trip(id, 0) || is_aimless_cycle(id, 0) {
             continue;
         }
+        // agent-office: the pantry stands, the rooftop sits, so sweep both.
+        let stage = [IdleStage::Pantry, IdleStage::Rooftop][(i % 2) as usize];
         if let WanderKind::Named { kind, seat, .. } =
-            pick_wander_dest(id, 0, &l, origin, &SpotClaims::default()).kind
+            pick_wander_dest(id, 0, &l, origin, &SpotClaims::default(), stage).kind
         {
             assert_eq!(
                 seat.is_some(),
@@ -964,7 +966,16 @@ fn a_claimed_seat_sends_the_agent_to_the_next_seat_of_the_same_venue() {
             if !takes_trip(id, 0) || is_aimless_cycle(id, 0) {
                 return None;
             }
-            match pick_wander_dest(id, 0, &l, origin, &SpotClaims::default()).kind {
+            match pick_wander_dest(
+                id,
+                0,
+                &l,
+                origin,
+                &SpotClaims::default(),
+                IdleStage::Rooftop,
+            )
+            .kind
+            {
                 WanderKind::Named {
                     wp_idx,
                     kind: WaypointKind::MeetingSofa | WaypointKind::MeetingChair,
@@ -985,7 +996,7 @@ fn a_claimed_seat_sends_the_agent_to_the_next_seat_of_the_same_venue() {
 
     let mut claims = SpotClaims::default();
     claims.claim(taken);
-    let target = pick_wander_dest(id, 0, &l, origin, &claims);
+    let target = pick_wander_dest(id, 0, &l, origin, &claims, IdleStage::Rooftop);
     let WanderKind::Named { wp_idx, kind, .. } = target.kind else {
         panic!("a claimed seat must not strand the agent into an aimless amble");
     };
@@ -1000,28 +1011,56 @@ fn a_claimed_seat_sends_the_agent_to_the_next_seat_of_the_same_venue() {
     );
 }
 
-/// agent-office: the desk is for work. An idle agent leaves it once and sits a
-/// lounge out for as long as the stretch lasts — walking around or sitting back
-/// down would read as busy.
+/// agent-office: the desk is for work. An idle agent leaves it once for the
+/// pantry, moves to the rooftop once the stretch passes 15 minutes, and sits
+/// that out — walking around or sitting back down would read as busy, and a
+/// long-idle agent still in the pantry would read as a fresh result to look at.
 #[test]
-fn an_idle_agent_lounges_until_its_next_turn() {
+fn an_idle_agent_lounges_in_the_pantry_then_on_the_rooftop() {
     let now = t0();
     let mut rig = WanderRig::new(idle_slot("/p/lounger.jsonl", now), Straight);
     rig.advance(now);
     let now = rig.advance_until_leaves(now, PhaseKind::Seated, IDLE_LEAVE_DESK_MS + POLL_STEP_MS);
     let mut now = rig.advance_until_leaves(now, PhaseKind::WalkingOut, 60_000);
-    let lounge = rig.state().wander.target;
+    let pantry = rig.state().wander.target;
     assert_eq!(phase_kind(rig.state().wander.phase), PhaseKind::AtWaypoint);
+    let WanderKind::Named { kind, .. } = pantry.kind else {
+        panic!("it sits at a lounge, not mid-aisle: {pantry:?}");
+    };
     assert!(
-        matches!(lounge.kind, WanderKind::Named { .. }),
-        "it sits at a lounge, not mid-aisle: {lounge:?}"
+        IdleStage::Pantry.hosts(kind),
+        "fresh idle goes to the pantry: {kind:?}"
+    );
+    while now < t0() + Duration::from_millis(crate::pose::IDLE_ROOFTOP_MS - POLL_STEP_MS) {
+        now += Duration::from_millis(POLL_STEP_MS);
+        rig.advance(now);
+    }
+    assert_eq!(phase_kind(rig.state().wander.phase), PhaseKind::AtWaypoint);
+    assert_eq!(rig.state().wander.target, pantry, "under 15 min, same seat");
+
+    now += Duration::from_millis(2 * POLL_STEP_MS);
+    rig.advance(now);
+    assert_eq!(phase_kind(rig.state().wander.phase), PhaseKind::WalkingOut);
+    assert_eq!(
+        rig.state().wander.from,
+        Some(pantry),
+        "it walks from the pantry, not the desk"
+    );
+    let mut now = rig.advance_until_leaves(now, PhaseKind::WalkingOut, 60_000);
+    let rooftop = rig.state().wander.target;
+    let WanderKind::Named { kind, .. } = rooftop.kind else {
+        panic!("it sits at a lounge, not mid-aisle: {rooftop:?}");
+    };
+    assert!(
+        IdleStage::Rooftop.hosts(kind),
+        "long idle goes to the rooftop: {kind:?}"
     );
     for _ in 0..3_600 {
         now += Duration::from_millis(POLL_STEP_MS);
         rig.advance(now);
     }
     assert_eq!(phase_kind(rig.state().wander.phase), PhaseKind::AtWaypoint);
-    assert_eq!(rig.state().wander.target, lounge, "an hour on, same seat");
+    assert_eq!(rig.state().wander.target, rooftop, "an hour on, same seat");
 }
 
 /// agent-office: a window that stops painting for a while (hidden, asleep) must

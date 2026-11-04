@@ -13,7 +13,7 @@ use pixtuoid_core::walkable::{OccupancyOverlay, WalkableMask};
 
 use crate::layout::{HomeDesk, Point, SceneLayout, WaypointKind};
 use crate::pathfind::Router;
-use crate::pose::{IDLE_LEAVE_DESK_MS, LOUNGE_CYCLE, SpotClaims, stale_resume_gap_ms};
+use crate::pose::{IDLE_LEAVE_DESK_MS, IdleStage, LOUNGE_CYCLE, SpotClaims, stale_resume_gap_ms};
 use crate::pose::{desk_leg_endpoint, route_jittered};
 
 /// Frozen A* polyline for one in-flight walk leg. Snapshotted when the leg's
@@ -59,6 +59,9 @@ pub(crate) struct WanderFrame {
     /// The current trip's kind — the seat cell + waypoint identity the walk /
     /// at-waypoint arms need.
     pub kind: WanderKind,
+    /// agent-office: the lounge a `WalkingOut` leg leaves instead of the desk
+    /// (pantry → rooftop); `None` for a walk out from the desk.
+    pub from: Option<WanderTarget>,
 }
 
 /// A one-shot walk leg (entry / exit / snap-back / walk home).
@@ -145,6 +148,11 @@ pub struct WanderState {
     /// The current trip's resolved destination. Set on each new `WalkingOut`;
     /// its `kind` resets to `Aimless` when a cycle completes.
     pub(crate) target: WanderTarget,
+    /// agent-office: the idle stage `target` was picked for.
+    pub(crate) stage: IdleStage,
+    /// agent-office: the lounge the current `WalkingOut` leaves, when it is a
+    /// move between lounges rather than a walk out from the desk.
+    pub(crate) from: Option<WanderTarget>,
     /// Last `now` at which `advance_wander` performed a transition — idempotency:
     /// `now <= last_advanced_at` ⇒ a no-op on mutable state. Sentinel
     /// `UNIX_EPOCH` ⇒ never advanced.
@@ -210,6 +218,8 @@ impl Default for WalkState {
                     dest: Point { x: 0, y: 0 },
                     kind: WanderKind::Aimless,
                 },
+                stage: IdleStage::Pantry,
+                from: None,
                 last_advanced_at: SystemTime::UNIX_EPOCH,
             },
             walk_path: None,
@@ -315,6 +325,7 @@ pub(crate) fn advance_wander(
     let may_transition = now > walk.wander.last_advanced_at;
 
     let elapsed_phase = crate::anim::elapsed_ms(now, walk.wander.phase_started_at);
+    let stage = IdleStage::at(crate::anim::elapsed_ms(now, slot.state_started_at));
 
     let result = match walk.wander.phase {
         WanderPhase::Seated => {
@@ -324,8 +335,11 @@ pub(crate) fn advance_wander(
                 } else {
                     // The origin must match pose::pure::idle_pose's `desk` so the
                     // stateless/stateful destinations stay in lockstep.
-                    let target = pick_wander_dest(id, walk.wander.cycle_n, layout, desk, &claimed);
+                    let target =
+                        pick_wander_dest(id, walk.wander.cycle_n, layout, desk, &claimed, stage);
                     walk.wander.target = target;
+                    walk.wander.stage = stage;
+                    walk.wander.from = None;
                     let dest = target.dest;
                     let seat = target.kind.seat();
 
@@ -363,7 +377,31 @@ pub(crate) fn advance_wander(
         }
 
         // agent-office: no dwell timer — it stays until the stretch ends, and a
-        // turn starting walks it back to the desk via the snap-back.
+        // turn starting walks it back to the desk via the snap-back. The one
+        // move it makes is pantry → rooftop once the stretch grows long.
+        WanderPhase::AtWaypoint(_) if may_transition && walk.wander.stage != stage => {
+            walk.wander.stage = stage;
+            let from = walk.wander.target;
+            let to = pick_wander_dest(id, walk.wander.cycle_n, layout, desk, &claimed, stage);
+            if to != from {
+                walk.wander.from = Some(from);
+                walk.wander.target = to;
+                walk.wander.phase = WanderPhase::WalkingOut(snapshot_leg_profile(
+                    router,
+                    &layout.walkable,
+                    overlay,
+                    id,
+                    LegPlan {
+                        from: from.dest,
+                        to: to.dest,
+                        settle: Settle::from_pair(from.kind.seat(), to.kind.seat()),
+                        intent: WalkIntent::WanderOut,
+                    },
+                ));
+                walk.wander.phase_started_at = now;
+            }
+            (walk.wander.phase, LegProgress::ZERO)
+        }
         WanderPhase::AtWaypoint(_) => (walk.wander.phase, LegProgress::ZERO),
 
         WanderPhase::WalkingBack(profile) => {
@@ -394,6 +432,7 @@ pub(crate) fn advance_wander(
         progress,
         dest: walk.wander.target.dest,
         kind: walk.wander.target.kind,
+        from: walk.wander.from,
     }
 }
 
@@ -434,8 +473,9 @@ fn pick_wander_dest(
     layout: &SceneLayout,
     origin: HomeDesk,
     claimed: &SpotClaims,
+    stage: IdleStage,
 ) -> WanderTarget {
-    crate::pose::resolve_wander_target(id, cycle_n, layout, origin, claimed)
+    crate::pose::resolve_wander_target(id, cycle_n, layout, origin, claimed, stage)
 }
 
 /// The exclusive-spot waypoints every OTHER agent on this floor is out on a trip

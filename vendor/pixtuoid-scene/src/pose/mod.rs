@@ -24,7 +24,7 @@ use pixtuoid_core::walkable::{OccupancyOverlay, WalkableMask};
     reason = "agent-office: the lounge never ends on a dwell; tests still use them"
 )]
 pub(crate) use pure::{
-    ENTRY_ANIMATION_MS, IDLE_LEAVE_DESK_MS, LOUNGE_CYCLE, STALE_RESUME_GAP_BASE_MS,
+    ENTRY_ANIMATION_MS, IDLE_LEAVE_DESK_MS, IDLE_ROOFTOP_MS, IdleStage, LOUNGE_CYCLE, STALE_RESUME_GAP_BASE_MS,
     WANDER_DWELL_EST_MS, derive, derive_state_only, dwell_ms, stale_resume_gap_ms,
 };
 pub(crate) use pure::{LegPose, Pose};
@@ -429,7 +429,11 @@ pub(crate) fn derive_with_routing(
             WanderPhase::WalkingOut(_) => {
                 let dest = wf.dest;
                 let seat = wf.kind.seat();
-                let (from, chair_settle) = desk_leg_endpoint(desk, layout);
+                // agent-office: a pantry → rooftop move leaves the pantry seat.
+                let (from, chair_settle) = match wf.from {
+                    Some(lounge) => (lounge.dest, lounge.kind.seat()),
+                    None => desk_leg_endpoint(desk, layout),
+                };
                 let settle = Settle::from_pair(chair_settle, seat);
                 return Some(route_walking_pose(
                     slot,
