@@ -37,7 +37,7 @@ pub(crate) use rooms::pantry::{
 };
 pub(crate) use rooms::walls::Doorway;
 pub(crate) use rooms::walls::{WALL_THICK_H, WALL_THICK_V, WallPiece};
-pub use rooms::{MeetingRoom, MeetingTrio, PantryRoom};
+pub use rooms::{MeetingRoom, MeetingTrio, PantryRoom, RoomStyle};
 pub use roster::Station;
 pub(crate) use roster::StationArt;
 pub(crate) use roster::{
@@ -52,9 +52,13 @@ pub use roster::{
 pub(crate) use roster::{NEON_PANEL_H, coffee_machine_cols};
 // Painter tests tile walls no `SceneLayout` has.
 pub(crate) use windows::{
-    NEON_DOOR_WALL_W, WINDOW_TOP, WindowBay, door_x, glass_rows, wall_trim_row, window_frame,
-    window_posts, window_rows, window_run,
+    NEON_DOOR_WALL_W, WINDOW_TOP, WindowBay, glass_rows, wall_trim_row, window_posts,
+    window_rows, window_run,
 };
+#[cfg(test)]
+pub(crate) use windows::{door_x, window_frame};
+// agent-office: the rooftop's slots and the door west of them.
+pub(crate) use windows::{door_x_on, rooftop_slots, rooftop_x};
 #[cfg(test)]
 pub(crate) use windows::{WINDOW_W, window_bays, window_slots};
 // `crate::pathfind`'s A* and `reach`'s BFS both ride these ONE definitions.
@@ -465,9 +469,10 @@ const MIN_DUAL_MEETING_H: u16 = 80;
 
 /// Desks side by side in a pod's row, and the pod's rows facing each other
 /// (`POD_COLS * POD_ROWS` desks in all). agent-office: a Hong Kong office's
-/// benches, two side by side at a shared top, rows split from columns so a
-/// bench can grow without the rows following.
-pub(crate) const POD_COLS: u16 = 2;
+/// benches, four side by side at a shared top, as a Central trading floor
+/// packs them; rows split from columns so a bench can grow without the rows
+/// following.
+pub(crate) const POD_COLS: u16 = 4;
 pub(crate) const POD_ROWS: u16 = 2;
 /// Gap between two desks side by side in a pod. agent-office: tight, as a
 /// Hong Kong office's benches are, where pixtuoid left 12.
@@ -579,6 +584,14 @@ impl SceneLayout {
     /// layout's margin, for the render sites that only hold the layout.
     pub(crate) fn wall_band_h(&self) -> u16 {
         wall_band_h(self.top_margin)
+    }
+
+    /// agent-office: the open-air rooftop at the east end, when the office is
+    /// wide enough for one.
+    pub fn rooftop(&self) -> Option<&MeetingRoom> {
+        self.meeting_rooms
+            .iter()
+            .find(|r| r.style == RoomStyle::Rooftop)
     }
 
     /// The bounds of meeting room `room_id` — the id IS the

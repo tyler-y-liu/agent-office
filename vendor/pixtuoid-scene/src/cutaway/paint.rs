@@ -210,6 +210,7 @@ fn paint_backdrop(
                 paint_runner(at, [base, stripe, edge], pen, buf);
             }
             Covering::Mosaic => paint_mosaic(at, pen, buf),
+            Covering::RooftopPaint => paint_rooftop(at, pen, buf),
         }
     }
     paint_wall(backdrop, scale, pen, buf);
@@ -651,7 +652,7 @@ fn paint_piece(
         PieceKind::PropBand { at, sprite, rows } => {
             paint_prop_band(at, sprite, rows, pack, scale, buf);
         }
-        PieceKind::Table { at } => paint_table(at, pack, scale, buf),
+        PieceKind::Table { at, sprite } => paint_table(at, sprite, pack, scale, buf),
         PieceKind::Door { at, frame } => paint_door(at, frame, pack, scale, buf),
         PieceKind::Neon {
             at,
@@ -991,6 +992,79 @@ fn paint_mosaic(at: crate::layout::Bounds, pen: Pen, buf: &mut RgbBuffer) {
     }
 }
 
+/// agent-office: a Hong Kong rooftop's green waterproof paint, the same under
+/// every theme.
+const ROOF_PAINT: pixtuoid_core::sprite::Rgb = pixtuoid_core::sprite::Rgb {
+    r: 0x5a,
+    g: 0x8c,
+    b: 0x6c,
+};
+const ROOF_PAINT_WORN: pixtuoid_core::sprite::Rgb = pixtuoid_core::sprite::Rgb {
+    r: 0x6e,
+    g: 0x9a,
+    b: 0x7c,
+};
+const ROOF_SEAM: pixtuoid_core::sprite::Rgb = pixtuoid_core::sprite::Rgb {
+    r: 0x48,
+    g: 0x74,
+    b: 0x58,
+};
+const ROOF_DRAIN: pixtuoid_core::sprite::Rgb = pixtuoid_core::sprite::Rgb {
+    r: 0x6b,
+    g: 0x6f,
+    b: 0x6c,
+};
+
+/// The rooftop's floor: green paint laid in slabs, seams between, worn pale
+/// in patches, with a drain channel along its south edge and a parapet's
+/// shadow under the railing: at 1x, the paint and the drain.
+fn paint_rooftop(at: crate::layout::Bounds, pen: Pen, buf: &mut RgbBuffer) {
+    /// Art pixels from one slab seam to the next.
+    const SLAB: u16 = 12;
+    let d = pen.density().get();
+    let (x0, y0, w, h) = (
+        pen.art(at.x).0,
+        pen.art(at.y).0,
+        pen.art(at.width).0,
+        pen.art(at.height).0,
+    );
+    let rect = |x: u16, y: u16, w: u16, h: u16| ArtRect {
+        x: ArtPx(x),
+        y: ArtPx(y),
+        w: ArtPx(w),
+        h: ArtPx(h),
+    };
+    pen.fill(buf, rect(x0, y0, w, h), ROOF_PAINT);
+    let drain = d.max(1);
+    pen.fill(buf, rect(x0, (y0 + h).saturating_sub(drain), w, drain), ROOF_DRAIN);
+    if d == 1 {
+        return;
+    }
+    let (art_xs, art_ys) = pen.writable_art(buf);
+    let foot = (y0 + h).saturating_sub(drain);
+    for y in y0.max(art_ys.start)..foot.min(art_ys.end) {
+        for x in x0.max(art_xs.start)..(x0 + w).min(art_xs.end) {
+            let (dx, dy) = (x - x0, y - y0);
+            let colour = if dy < d / 2 {
+                // The parapet's shadow along the north edge.
+                ROOF_SEAM
+            } else if dx % SLAB == 0 || dy % SLAB == 0 {
+                ROOF_SEAM
+            } else {
+                // Worn in blotches a slab across, the same every frame.
+                let slab = u32::from(dx / SLAB) * 31 + u32::from(dy / SLAB) * 17;
+                let speck = (u32::from(dx) * 7 + u32::from(dy) * 13 + slab) % 23;
+                if slab % 5 == 0 && speck < 9 {
+                    ROOF_PAINT_WORN
+                } else {
+                    continue;
+                }
+            };
+            pen.fill(buf, rect(x, y, 1, 1), colour);
+        }
+    }
+}
+
 fn paint_rug(
     rug: crate::layout::Bounds,
     [rug_trim, rug_accent, rug_field]: [pixtuoid_core::sprite::Rgb; 3],
@@ -1296,17 +1370,18 @@ fn paint_figure(
 /// [`face_rows`] derives under a base-density drawing.
 fn paint_table(
     at: crate::layout::Point,
+    sprite: PackPiece,
     pack: &OfficeArt,
     scale: RenderScale,
     buf: &mut RgbBuffer,
 ) {
-    let table = crate::pack::densest_frame(pack, PackPiece::MeetingTable, 0, scale);
+    let table = crate::pack::densest_frame(pack, sprite, 0, scale);
     let (x, y) = centred_top_left(at, table.logical, scale);
     blit_frame_scaled(table.frame, x, y, table.blit_at, buf);
     paint_derived_face(
         &table,
         (x, y),
-        face_rows(pack, PackPiece::MeetingTable, scale),
+        face_rows(pack, sprite, scale),
         scale,
         buf,
     );
@@ -2823,8 +2898,9 @@ mod tests {
             }
         }
         // Only the density art draws bulbs.
+        // agent-office: the shrine's lamps glow as it animates.
         let want: &[&str] = if cfg!(feature = "cutaway-assets") {
-            &["desk", "door", "hung decor", "prop"]
+            &["animated", "desk", "door", "hung decor", "prop"]
         } else {
             &["desk"]
         };
@@ -4518,8 +4594,10 @@ mod tests {
             check("uneven", &uneven, frame, &layout, true);
         }
         // ...and offices whose sizes gate in the pieces 160x96 lacks, empty.
+        // agent-office: 196x144 for the vending machine, whose aisle the
+        // rooftop takes at 240; 240x144 for the rooftop's own pieces.
         let pack = test_office();
-        for (w, h) in [(240u16, 144u16), (100, 60)] {
+        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60)] {
             let stepped = FloorSession::new(std::sync::Arc::new(pack.clone()))
                 .step(
                     crate::floor::FloorInputs {
@@ -4572,6 +4650,9 @@ mod tests {
             PackPiece::WaterCooler,
             PackPiece::VendingMachine,
             PackPiece::Printer,
+            PackPiece::RooftopBench,
+            PackPiece::RooftopStool,
+            PackPiece::LaundryPole,
         ]) {
             assert!(
                 props.contains(&sprite),
@@ -5542,6 +5623,7 @@ mod tests {
             x: desk.x,
             w: 4,
             idx: 0,
+            open: false,
         };
         let view = WindowView::new(bay, desk.y..desk.y + 4, pen.density(), |cell| {
             let (x, y) = at(cell.at);

@@ -9,5 +9,5 @@ pub(crate) mod meeting;
 pub(crate) mod pantry;
 pub(crate) mod walls;
 
-pub use meeting::{MeetingRoom, MeetingTrio};
+pub use meeting::{MeetingRoom, MeetingTrio, RoomStyle};
 pub use pantry::PantryRoom;

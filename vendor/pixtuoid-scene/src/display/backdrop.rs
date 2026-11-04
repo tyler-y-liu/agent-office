@@ -46,6 +46,8 @@ pub(crate) enum Covering {
     Runner { base: Rgb, stripe: Rgb, edge: Rgb },
     /// agent-office: a cha chaan teng's mosaic floor, its colours its own.
     Mosaic,
+    /// agent-office: a Hong Kong rooftop's green waterproof paint.
+    RooftopPaint,
 }
 
 impl Covering {
@@ -104,12 +106,20 @@ impl Backdrop {
                 h: layout.buf_h,
             },
             wall_band_h: band_h,
-            posts: crate::layout::window_posts(layout.buf_w).collect(),
+            // agent-office: none out over the rooftop.
+            posts: layout.window_posts().collect(),
             window_rows: crate::layout::window_rows(band_h),
             trim_row: crate::layout::wall_trim_row(band_h),
+            // agent-office: the rooftop's paint first, under everything.
             coverings: layout
-                .fixtures()
-                .filter_map(|f| Covering::of(f.kind, theme).map(|c| (f.visual, c)))
+                .rooftop()
+                .map(|r| (r.bounds, Covering::RooftopPaint))
+                .into_iter()
+                .chain(
+                    layout
+                        .fixtures()
+                        .filter_map(|f| Covering::of(f.kind, theme).map(|c| (f.visual, c))),
+                )
                 .collect(),
             tones: BackdropTones {
                 bg: s.bg_fallback,

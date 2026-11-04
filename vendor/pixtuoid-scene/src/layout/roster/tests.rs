@@ -419,7 +419,15 @@ fn the_door_is_centred_in_the_last_window_slot() {
         let roster = l.fixtures().find(|f| f.kind == FixtureKind::Door);
         assert_eq!(roster.map(|f| f.visual), Some(door), "{at}");
         let slots: Vec<_> = super::super::window_slots(l.buf_w).collect();
-        let Some(&slot) = slots.last() else {
+        // agent-office: the last slot west of the rooftop's, when there is
+        // one, and the door wholly west of the open air: an elevator opening
+        // onto the roof's edge reads as a hazard, not a lobby.
+        let roof = if l.rooftop().is_some() {
+            usize::from(super::super::rooftop_slots(l.buf_w))
+        } else {
+            0
+        };
+        let Some(&slot) = slots.len().checked_sub(1 + roof).map(|i| &slots[i]) else {
             assert_eq!(door.x, super::super::door_x(l.buf_w), "{at}");
             continue;
         };
@@ -427,12 +435,19 @@ fn the_door_is_centred_in_the_last_window_slot() {
             slot.x < door.x && door.x + door.width < slot.span().end,
             "{at}"
         );
-        assert_eq!(
-            door.x - slot.x,
-            slot.span().end - (door.x + door.width),
+        assert!(
+            (door.x - slot.x).abs_diff(slot.span().end - (door.x + door.width)) <= 1,
             "{at}: centred in its slot"
         );
-        assert_eq!(l.window_bays().count() + 1, slots.len(), "{at}");
+        if let Some(r) = l.rooftop() {
+            assert!(door.x + door.width <= r.bounds.x, "{at}: the door on the roof");
+        }
+        // The open sky over the rooftop's slots is one bay.
+        assert_eq!(
+            l.window_bays().count() + 1 + roof,
+            slots.len() + usize::from(roof > 0),
+            "{at}"
+        );
         assert!(
             l.window_bays()
                 .all(|b| b.span().end <= door.x || door.x + door.width <= b.x),

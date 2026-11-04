@@ -1,0 +1,19 @@
+# A rooftop water tank on its steel stand.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
+@frame 0
+. . . . ξ ξ . E E . . .
+. ¤ ¤ ¤ ξ ξ ¤ ¤ ¤ ¤ ¤ ǒ
+! w w w w w w w w ! ! ǒ
+! w w w w w w w ǔ ! ! ǒ
+! w w w w w w w w ! ! ǒ
+! w w w w w w w w ! ! ǒ
+! w w w w w w w ǔ ! ! ǒ
+! w w w w w w w w ! ! ǒ
+! w w w w w w w w ! ! ǒ
+E w w w w w w w E ! ! ǒ
+E ξ E E E ǔ ǔ E ξ E E ǒ
+. ξ E ǒ ξ ǔ ǔ . ξ E ǒ ǒ
+. ξ . ǒ ξ ǔ ǔ . ξ . ǒ ǒ
+. ξ . ǒ ξ ǔ ǔ E ξ . ǒ ǒ
+. ξ . ǒ ξ ǔ ǔ n ξ . ǒ ǒ
+n ξ . ǒ ξ ǔ ǔ E ξ . ǒ ǒ

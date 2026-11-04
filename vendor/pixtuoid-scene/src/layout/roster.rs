@@ -283,6 +283,7 @@ impl FixtureKind {
                 WallDecor::BulletinBoard => "Bulletin Board",
                 WallDecor::ExitSign => "Exit Sign",
                 WallDecor::MeetingScreen => "Meeting Screen",
+                WallDecor::WaterTank => "Water Tank",
             },
             FixtureKind::MeetingRug { .. } | FixtureKind::LoungeRug => "Rug",
             FixtureKind::MeetingSofa { .. } => "Meeting Sofa",
@@ -480,7 +481,12 @@ impl SceneLayout {
         } = self;
         let rooms = meeting_rooms.iter().enumerate().map(|(room, r)| {
             // Its bounds place its pieces through the rect methods.
-            let MeetingRoom { bounds: _, trio } = r;
+            // agent-office: its style picks its art, and spares the rooftop a rug.
+            let MeetingRoom {
+                bounds: _,
+                trio,
+                style: _,
+            } = r;
             let trio = trio.map(|t| {
                 let MeetingTrio { sofas, table } = t;
                 (t, sofas, table)
@@ -544,7 +550,12 @@ impl SceneLayout {
                     .map(|b| backdrop(FixtureKind::IslandMat, b)),
             )
             .chain(desk_fixtures(home_desks.iter().map(|d| d.at), *buf_h))
-            .chain(rooms.clone().filter_map(move |(room, _, trio)| {
+            .chain(rooms.clone().filter_map(move |(room, r, trio)| {
+                // agent-office: the rooftop's stools stand on its painted
+                // concrete, not a rug.
+                if r.style == super::RoomStyle::Rooftop {
+                    return None;
+                }
                 // Off the corridor runner a south room's floor runs into.
                 let rug = trio?.0.rug(corridor.y);
                 Some(Fixture {
@@ -727,7 +738,12 @@ impl SceneLayout {
     /// nearest the pane's centre — `None` for a room whose north wall is not
     /// the band, or with none free.
     pub(crate) fn notice_board_rect(&self, room: usize) -> Option<Bounds> {
-        let b = self.meeting_rooms.get(room)?.bounds;
+        let r = self.meeting_rooms.get(room)?;
+        // agent-office: the rooftop's north side is sky, nothing to hang on.
+        if r.style == super::RoomStyle::Rooftop {
+            return None;
+        }
+        let b = r.bounds;
         if b.y > self.top_margin {
             return None;
         }
@@ -772,7 +788,8 @@ impl SceneLayout {
     /// with none.
     pub(crate) fn clock_pos(&self) -> Option<Point> {
         let middle = self.buf_w / 2;
-        super::window_posts(self.buf_w)
+        // agent-office: on a post the rooftop's open sky has left standing.
+        self.window_posts()
             .map(|post| u16::midpoint(post.start, post.end))
             .filter(|&centre| centre - CLOCK.w / 2 >= NEON_PANEL.x + NEON_PANEL.width)
             .min_by_key(|centre| centre.abs_diff(middle))

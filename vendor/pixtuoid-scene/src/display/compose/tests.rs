@@ -972,7 +972,7 @@ fn a_back_view_sofa_seats_its_sitter_between_its_seat_and_its_backrest() {
     let pack = test_office();
     let sofa = crate::layout::Point { x: 40, y: 30 };
     let mut order = Vec::new();
-    push_sofa(&mut order, &pack, sofa, true, Tie::FixtureOver);
+    push_sofa(&mut order, &pack, sofa, true, Tie::FixtureOver, SofaArt::of(false));
     let [
         (seat, PieceKind::PropBand { rows: under, .. }),
         (back, PieceKind::PropBand { rows: over, .. }),
@@ -1280,7 +1280,7 @@ fn a_front_view_sofa_ties_its_sitters() {
     let pack = test_office();
     let sofa = crate::layout::Point { x: 40, y: 30 };
     let mut order = Vec::new();
-    push_sofa(&mut order, &pack, sofa, false, Tie::FigureOver);
+    push_sofa(&mut order, &pack, sofa, false, Tie::FigureOver, SofaArt::of(false));
     let [
         (
             span,
@@ -1426,8 +1426,9 @@ fn no_piece_is_queued_twice() {
         for d in &layout.pod_decor {
             let queued = order
                 .iter()
+                // agent-office: or animated, as the quote screen is.
                 .filter(|(_, k)| {
-                    matches!(k, PieceKind::Prop { at, art }
+                    matches!(k, PieceKind::Prop { at, art } | PieceKind::Animated { at, art }
                         if *at == d.pos && art.sprite == d.kind.piece())
                 })
                 .count();
@@ -1450,8 +1451,10 @@ fn ground_standing_wall_decor_sorts_with_the_ground() {
             matches!(k, FixtureKind::Wall { .. })
         });
         for item in &layout.wall_decor {
+            // agent-office: or animated, as the shrine is.
             let queued = order.iter().any(|(_, k)| {
-                matches!(k, PieceKind::Prop { art, .. } if art.sprite == item.kind.piece())
+                matches!(k, PieceKind::Prop { art, .. } | PieceKind::Animated { art, .. }
+                    if art.sprite == item.kind.piece())
             });
             assert_eq!(queued, item.kind.stands_on_floor(), "{:?}", item.kind);
             standing += usize::from(queued);

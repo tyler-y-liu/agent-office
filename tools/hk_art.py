@@ -1,10 +1,13 @@
 """agent-office's Hong Kong pieces: pixtuoid's furniture slots redrawn as a
-cha chaan teng and the things a Hong Kong office keeps for luck.
+cha chaan teng, a Central office and the things it keeps for luck, and the
+rooftop's own pieces.
 
 Each piece is drawn at @4x with flat fills, outlined in the pack's `κ` round
-its silhouette as the upstream art is, then shrunk to its 1x base. Sizes are
-the slots' own (the layout and the hover boxes key off them), so only the
-look changes. Writes into vendor/pixtuoid-scene/sprites/default; the palette
+its silhouette as the upstream art is, then shrunk to its 1x base. A redrawn
+slot keeps the slot's size (the layout and the hover boxes key off it), so
+only the look changes. A new piece (rooftop_*, laundry_pole, water_tank) also
+needs its `Piece` in pixtuoid-core and its `[animations]` entries in pack.toml,
+written by hand. Writes into vendor/pixtuoid-scene/sprites/default; the palette
 keys it uses beyond pixtuoid's are under "agent-office: Hong Kong" in
 pack.toml.
 
@@ -28,6 +31,17 @@ MINT, DINER_GREEN, TILE, GROUT = "ǆ", "Ǉ", "ǈ", "ǉ"
 BUN, BUN_TOP, TART, MILK_TEA = "Ǌ", "ǋ", "ǌ", "Ǎ"
 LUCKY_RED, GOLD, KUMQUAT, FORMICA = "ǎ", "Ǐ", "ǐ", "Ǒ"
 STEEL_LIT, BAMBOO, PORCELAIN_BLUE, CAT_WHITE, BOARD = "ǒ", "Ǔ", "ǔ", "Ǖ", "ǖ"
+# agent-office: the rooftop
+STOOL, STOOL_DARK, STOOL_LIT, LEMON_TEA = "Ǟ", "ǟ", "Ǡ", "ǡ"
+SHIRT, PANTS, TOWEL, BEER = "Ǣ", "ǣ", "Ǥ", "ǥ"
+# agent-office: the boss's room and the lobby
+LEATHER, LEATHER_LIT, LEATHER_DARK, LEATHER_SEAM = "Ǧ", "ǧ", "Ǫ", "ǫ"
+ROSEWOOD, ROSEWOOD_LIT, ROSEWOOD_DARK, CLAY = "Ǭ", "ǭ", "Ǯ", "ǯ"
+GOLD_LIT, GOLD_DARK, TANK_BACK = "Ǳ", "ǲ", "ǳ"
+# agent-office: the trading floor and the shrine
+UP_GREEN, DOWN_RED, SCREEN, SMOKE, GUAN_FACE = "Ǵ", "ǵ", "Ƕ", "Ƿ", "Ǹ"
+LAMP = "9"  # the pack's bulb key: it glows after dark
+DARK_RED = "N"
 
 PALETTE = {
     MINT: ("#8fd3b6", "cha chaan teng wall panel, mint"),
@@ -53,6 +67,30 @@ PALETTE = {
     "ǚ": ("#f7f5ef", "desk laminate's lit edge"),
     "Ǜ": ("#6f6b62", "desk laminate, darkest: legs and seams"),
     "ǜ": ("#f2dfb8", "the desk lamp's pool on laminate"),
+    STOOL: ("#d8382e", "plastic stool, red"),
+    STOOL_DARK: ("#9a2219", "plastic stool, shaded"),
+    STOOL_LIT: ("#f0675a", "plastic stool, lit rim"),
+    LEMON_TEA: ("#d9902a", "iced lemon tea"),
+    SHIRT: ("#8ec1ea", "a shirt on the line, sky blue"),
+    PANTS: ("#2e4672", "trousers on the line, navy"),
+    TOWEL: ("#f1a1b5", "a towel on the line, pink"),
+    BEER: ("#2f8a3a", "a beer bottle, green"),
+    LEATHER: ("#7a3a24", "the boss's leather, oxblood"),
+    LEATHER_LIT: ("#a2573a", "leather, lit"),
+    LEATHER_DARK: ("#552516", "leather, shaded"),
+    LEATHER_SEAM: ("#36150c", "leather's seams and tufting"),
+    ROSEWOOD: ("#5c2a1c", "rosewood"),
+    ROSEWOOD_LIT: ("#83402a", "rosewood, lit edge"),
+    ROSEWOOD_DARK: ("#3d1a11", "rosewood, shaded"),
+    CLAY: ("#7a4a3e", "a Yixing clay teapot"),
+    GOLD_LIT: ("#fde58a", "gold, catching the light"),
+    GOLD_DARK: ("#b8862a", "gold, shaded"),
+    TANK_BACK: ("#1c2d4a", "an arowana tank's dark backdrop"),
+    UP_GREEN: ("#3fd46a", "a quote up: Hong Kong prints gains green"),
+    DOWN_RED: ("#f0483c", "a quote down, in red"),
+    SCREEN: ("#0c1626", "a quote screen's black"),
+    SMOKE: ("#cfcac0", "incense smoke"),
+    GUAN_FACE: ("#b8322a", "Guan Gong's red face"),
 }
 
 # Desks: pixtuoid's wood as a Hong Kong office's pale laminate, the drawer
@@ -127,14 +165,21 @@ class Art:
 
 
 def write(name, art, comment):
-    art.outline()
-    for suffix, grid in (("@4x", art.px), ("", art.base())):
+    write_frames(name, [art], comment)
+
+
+def write_frames(name, arts, comment):
+    """`arts` as `name`'s frames, each outlined and shrunk to its 1x base."""
+    for art in arts:
+        art.outline()
+    for suffix, grids in (("@4x", [a.px for a in arts]), ("", [a.base() for a in arts])):
         lines = [
             f"# {comment}",
             "# agent-office: drawn by tools/hk_art.py; edit the script, not this file.",
-            "@frame 0",
         ]
-        lines += [" ".join(row) for row in grid]
+        for i, grid in enumerate(grids):
+            lines.append(f"@frame {i}")
+            lines += [" ".join(row) for row in grid]
         with open(os.path.join(OUT, f"{name}{suffix}.sprite"), "w") as f:
             f.write("\n".join(lines) + "\n")
 
@@ -334,7 +379,14 @@ def kumquat():
 
 
 def lucky_cat():
-    """A lucky cat waving its paw, a gold coin at its chest."""
+    """A lucky cat waving its paw, a gold coin at its chest: up, then down."""
+    frames = []
+    for up in (True, False):
+        frames.append(lucky_cat_frame(up))
+    write_frames("plant_succulent", frames, "A lucky cat waving its paw.")
+
+
+def lucky_cat_frame(up):
     a = Art(20, 16)
     a.rect(5, 6, 10, 9, CAT_WHITE)
     a.rect(6, 1, 8, 6, CAT_WHITE)
@@ -348,10 +400,15 @@ def lucky_cat():
     a.hline(6, 7, 8, LUCKY_RED)
     a.put(9, 8, GOLD)
     a.rect(8, 10, 4, 3, GOLD)
-    a.rect(15, 2, 2, 6, CAT_WHITE)
-    a.put(15, 2, LUCKY_RED)
+    if up:
+        a.rect(15, 2, 2, 6, CAT_WHITE)
+        a.put(15, 2, LUCKY_RED)
+    else:
+        a.rect(15, 5, 2, 3, CAT_WHITE)
+        a.rect(16, 4, 2, 2, CAT_WHITE)
+        a.put(17, 4, LUCKY_RED)
     a.rect(3, 14, 14, 2, LUCKY_RED)
-    write("plant_succulent", a, "A lucky cat waving its paw.")
+    return a
 
 
 def fu():
@@ -381,6 +438,361 @@ def couplets():
             a.rect(x + 2, y, 2, 2, GOLD)
     menu(a, 9, 2, 22, 20)
     write("bulletin_board", a, "The day's specials between two spring couplets.")
+
+
+# --- the rooftop -------------------------------------------------------------
+
+
+def stool(a, x, top, w, base):
+    """A red plastic stool seen from the side: a rim with its handle slot,
+    splayed legs with the arch cut between them."""
+    a.rect(x, top, w, 3, STOOL)
+    a.hline(x, top, w, STOOL_LIT)
+    a.rect(x + w // 2 - 2, top + 1, 4, 1, STOOL_DARK)
+    a.hline(x + 1, top + 3, w - 2, STOOL_DARK)
+    legs = base - top - 4
+    for i in range(legs):
+        y = top + 4 + i
+        spread = i * 2 // legs
+        a.rect(x + 1 - spread, y, 4, 1, STOOL)
+        a.rect(x + w - 5 + spread, y, 4, 1, STOOL)
+        a.put(x + w - 2 + spread, y, STOOL_DARK)
+    # The stretcher half way down.
+    a.hline(x + 4, top + 4 + legs // 2, w - 8, STOOL_DARK)
+
+
+def rooftop_bench(name, comment):
+    """Three plastic stools in a row, where a meeting room has its sofa: the
+    same from either side."""
+    a = Art(80, 28)
+    for x in (2, 29, 56):
+        stool(a, x, 11, 22, 27)
+    write(name, a, comment)
+
+
+def rooftop_table():
+    """A folding table: a pale top on crossed legs, iced lemon teas and a
+    bottle of beer."""
+    a = Art(44, 20)
+    a.rect(1, 3, 42, 7, FORMICA)
+    a.hline(1, 3, 42, WHITE)
+    a.rect(1, 10, 42, 2, STEEL)
+    for i in range(7):
+        a.put(6 + i * 2, 12 + i, STEEL_LIT)
+        a.put(18 - i * 2, 12 + i, STEEL_LIT)
+        a.put(26 + i * 2, 12 + i, STEEL_LIT)
+        a.put(38 - i * 2, 12 + i, STEEL_LIT)
+    for gx in (5, 30):
+        a.rect(gx, 1, 4, 6, LEMON_TEA)
+        a.hline(gx, 1, 4, WHITE)
+        a.rect(gx + 1, 3, 2, 1, TART)
+        a.vline(gx + 3, 0, 3, WHITE)
+    a.rect(19, 2, 3, 6, BEER)
+    a.rect(20, 0, 1, 2, BEER)
+    a.rect(13, 5, 4, 2, BUN)
+    write("rooftop_table", a, "A folding table on the rooftop: lemon teas and a beer.")
+
+
+def rooftop_stool():
+    a = Art(28, 28)
+    stool(a, 4, 12, 20, 27)
+    write("rooftop_stool", a, "A red plastic stool at the end of the folding table.")
+
+
+def laundry_pole():
+    """A drying rack: two posts under a bamboo pole, a shirt, trousers and a
+    towel pegged on, swaying a little."""
+    frames = []
+    for sway in (0, 1):
+        a = Art(20, 48)
+        a.rect(1, 6, 2, 41, STEEL)
+        a.rect(17, 6, 2, 41, STEEL)
+        a.rect(0, 46, 6, 2, STEEL_DARK)
+        a.rect(14, 46, 6, 2, STEEL_DARK)
+        a.rect(0, 4, 20, 2, BAMBOO)
+        # The shirt: shoulders on the pole, sleeves out, its hem swinging.
+        a.rect(3, 6, 7, 3, SHIRT)
+        a.rect(4, 9, 5, 9, SHIRT)
+        a.rect(4 + sway, 18, 5, 2, SHIRT)
+        a.vline(6, 7, 6, WHITE)
+        # The trousers, two legs.
+        a.rect(11, 6, 5, 4, PANTS)
+        a.rect(11, 10, 2, 14, PANTS)
+        a.rect(14, 10, 2, 14, PANTS)
+        a.rect(11 + sway, 24, 2, 2, PANTS)
+        a.rect(14 + sway, 24, 2, 2, PANTS)
+        # A towel over the pole's middle.
+        a.rect(8, 2, 4, 2, TOWEL)
+        frames.append(a)
+    write_frames("laundry_pole", frames, "Laundry drying on the rooftop, swaying.")
+
+
+# --- the boss's room and the lobby ---------------------------------------------
+
+SOFA_KEYS = {"C": LEATHER, "G": LEATHER_LIT, "Λ": LEATHER_DARK, "Ω": LEATHER_SEAM}
+LAMP_KEYS = {"¤": LUCKY_RED, "!": DARK_RED, "Θ": GOLD, "7": GOLD_DARK, "6": GOLD_DARK}
+
+
+def leather():
+    """The sofas, the lobby's couch with them, and the chairs: oxblood
+    leather, the sofas tufted."""
+    remap("meeting_chair", lambda k, *_: SOFA_KEYS.get(k, k))
+    for name in ("meeting_sofa", "meeting_sofa_north"):
+        def pick(k, x, y, w, h, scale):
+            k = SOFA_KEYS.get(k, k)
+            # Buttons tufting the back, at @4x.
+            if scale == 4 and k == LEATHER and y < h // 2 and x % 8 == 4 and y % 6 == 3:
+                return LEATHER_SEAM
+            return k
+        remap(name, pick)
+
+
+def tea_table():
+    """The boss's rosewood tea table: a tray, a clay pot and four cups."""
+    a = Art(44, 20)
+    a.rect(1, 1, 42, 18, ROSEWOOD)
+    a.hline(1, 1, 42, ROSEWOOD_LIT)
+    a.hline(1, 15, 42, ROSEWOOD_LIT)
+    a.rect(1, 16, 42, 3, ROSEWOOD_DARK)
+    # Carved edge.
+    for x in range(3, 41, 4):
+        a.put(x, 2, ROSEWOOD_DARK)
+    # The bamboo tray with its slats.
+    a.rect(9, 4, 26, 10, BAMBOO)
+    for x in range(10, 34, 3):
+        a.vline(x, 5, 8, LEAF_DARK)
+    # The pot, its lid and spout.
+    a.rect(14, 6, 6, 5, CLAY)
+    a.rect(16, 5, 2, 1, CLAY)
+    a.put(20, 7, CLAY)
+    a.put(21, 6, CLAY)
+    a.rect(12, 7, 2, 2, CLAY)
+    # Four cups and the fairness pitcher.
+    for cx in (24, 28):
+        for cy in (6, 10):
+            a.rect(cx, cy, 2, 2, WHITE)
+            a.put(cx, cy, MILK_TEA)
+    a.rect(31, 7, 2, 3, PORCELAIN_BLUE)
+    write("meeting_table", a, "The boss's rosewood tea table, a gongfu tea set on its tray.")
+
+
+def gold_lamp():
+    """The lobby's lamp: a red silk shade on a gold stand."""
+    remap("floor_lamp", lambda k, *_: LAMP_KEYS.get(k, k))
+
+
+def arowana(a, x, y, east):
+    """A golden arowana 22 long, `x` its tail end's column, facing east or
+    west: the fish a Hong Kong boss keeps for luck."""
+    def put(dx, dy, k):
+        a.put(x + dx if east else x + 21 - dx, y + dy, k)
+
+    for dx in range(3, 20):
+        for dy in (1, 2, 3):
+            put(dx, dy, GOLD)
+        put(dx, 1, GOLD_LIT if dx % 2 else GOLD)
+        put(dx, 4 if 5 <= dx <= 17 else 3, GOLD_DARK if dx >= 5 else GOLD)
+    for dx in range(4, 18, 3):
+        put(dx, 2, GOLD_LIT)
+    # Head, upturned mouth, barbels, eye.
+    for dx, dy in ((20, 1), (20, 2), (21, 1), (20, 3), (22, 0)):
+        put(dx, dy, GOLD)
+    put(18, 2, INK)
+    # Fins and tail, red.
+    for dx, dy in ((14, 0), (15, 0), (16, 0), (13, 4), (14, 5), (15, 5)):
+        put(dx, dy, LUCKY_RED)
+    for dy in range(0, 5):
+        put(0, dy, LUCKY_RED)
+        put(1, dy, LUCKY_RED)
+    put(2, 1, LUCKY_RED)
+    put(2, 3, LUCKY_RED)
+
+
+def arowana_tank():
+    """The lobby's feng shui tank: a golden arowana patrolling a dark tank
+    over gold pebbles, bubbles rising, on a rosewood cabinet."""
+    frames = []
+    n = 16
+    for f in range(n):
+        a = Art(56, 44)
+        a.rect(1, 1, 54, 3, "ж")
+        a.hline(1, 1, 54, "ν")
+        a.rect(1, 4, 3, 28, "ж")
+        a.rect(52, 4, 3, 28, "ж")
+        a.rect(4, 4, 48, 24, TANK_BACK)
+        a.hline(4, 4, 48, "З")
+        a.rect(4, 5, 48, 10, "Д")
+        a.rect(4, 15, 48, 14, "д")
+        # A red glow along the lid, for luck.
+        a.hline(4, 5, 48, LUCKY_RED)
+        for x in range(4, 52):
+            a.put(x, 28 + (x % 3 == 0), GOLD_DARK)
+            for y in range(29, 32):
+                a.put(x, y, (GOLD, GOLD_DARK, "z")[(x + y) % 3])
+        # Bubbles from the stone at the east end, rising a row a frame.
+        a.rect(45, 26, 4, 2, "z")
+        for i in range(3):
+            by = 26 - ((f * 2 + i * 7) % 21)
+            a.put(46 + (i % 2), by, "З")
+        # The fish: east across the tank, then back.
+        half = n // 2
+        step = f % half
+        east = f < half
+        x = 6 + step * 3 if east else 27 - step * 3
+        y = 12 + (1 if f % 4 in (1, 2) else 0)
+        arowana(a, x, y, east)
+        # The cabinet, rosewood with gold pulls.
+        a.rect(1, 32, 54, 1, ROSEWOOD_LIT)
+        a.rect(1, 33, 54, 10, ROSEWOOD)
+        a.rect(1, 40, 54, 3, ROSEWOOD_DARK)
+        a.vline(27, 33, 9, ROSEWOOD_DARK)
+        a.rect(23, 36, 2, 2, GOLD)
+        a.rect(30, 36, 2, 2, GOLD)
+        frames.append(a)
+    write_frames("fish_tank", frames, "A feng shui tank: a golden arowana on patrol.")
+
+
+# --- the trading floor and the shrine ------------------------------------------
+
+
+def upstream(name):
+    """`name`'s upstream @4x art, first frame, as an Art to draw over."""
+    import glob
+
+    src = glob.glob(UPSTREAM)[0]
+    lines = open(os.path.join(src, f"{name}@4x.sprite")).read().splitlines()
+    grid, on = [], False
+    for l in lines:
+        if l.startswith("@frame"):
+            if on:
+                break
+            on = True
+        elif on and l and not l.startswith(("#", "@")):
+            grid.append(l.split(" "))
+    a = Art(len(grid[0]), len(grid))
+    a.px = grid
+    return a
+
+
+def quote_screen():
+    """The aisle's TV cart as a quote screen: the Hang Seng's line running
+    green up and red down, a ticker crawling under it."""
+    # A walk of the index, long enough to scroll through: deterministic.
+    walk, v = [], 10
+    for i in range(64):
+        v += (1, -1, 1, 0, -1, 1, -1, -1, 1, 1, 0, -1)[(i * 7) % 12]
+        v = max(4, min(14, v))
+        walk.append(v)
+    frames = []
+    for f in range(8):
+        a = upstream("tv_stand")
+        a.rect(3, 3, 34, 19, SCREEN)
+        # Header: a red band, the index's gold tag.
+        a.hline(3, 3, 34, LUCKY_RED)
+        a.rect(4, 4, 6, 2, GOLD)
+        a.rect(28, 4, 8, 2, UP_GREEN if (f // 2) % 2 == 0 else DOWN_RED)
+        # The line, scrolling a column a frame.
+        prev = None
+        for x in range(4, 36):
+            y = 7 + (18 - walk[(x - 4 + f * 2) % len(walk)]) * 10 // 18
+            col = UP_GREEN if prev is None or y <= prev else DOWN_RED
+            lo, hi = (y, y) if prev is None else (min(y, prev), max(y, prev))
+            for yy in range(lo, hi + 1):
+                a.put(x, yy, col)
+            prev = y
+        # The ticker: blocks of quotes crawling west.
+        for x in range(3, 37):
+            k = (x + f * 3) % 9
+            if k < 6:
+                a.put(x, 20, UP_GREEN if (x + f * 3) // 9 % 3 else DOWN_RED)
+        frames.append(a)
+    write_frames("tv_stand", frames, "A Hang Seng quote screen on a cart, quotes crawling.")
+
+
+def shrine():
+    """Guan Gong's shrine where the bookshelf stood: red lacquer and gold,
+    the general red-faced in green, his lamps lit, incense smoking."""
+    frames = []
+    for f in range(4):
+        a = Art(32, 48)
+        # The roof, its ends turned up.
+        a.rect(2, 3, 28, 3, LUCKY_RED)
+        a.hline(1, 2, 30, GOLD)
+        a.put(0, 1, GOLD)
+        a.put(31, 1, GOLD)
+        # The cabinet and its dark niche.
+        a.rect(3, 6, 26, 41, LUCKY_RED)
+        a.rect(6, 8, 20, 21, DARK_RED)
+        a.vline(3, 6, 41, GOLD)
+        a.vline(28, 6, 41, GOLD)
+        # Guan Gong: red face, black beard, green robe, gold belt.
+        a.rect(14, 11, 4, 4, GUAN_FACE)
+        a.rect(13, 10, 6, 1, INK)
+        a.rect(15, 15, 2, 4, INK)
+        a.rect(11, 15, 10, 13, LEAF)
+        a.rect(11, 15, 2, 13, LEAF_DARK)
+        a.hline(11, 21, 10, GOLD)
+        # His guandao, gold.
+        a.vline(23, 9, 19, GOLD)
+        a.rect(22, 9, 3, 3, GOLD_LIT)
+        # The two red lamps, lit.
+        for lx in (7, 23):
+            a.rect(lx, 23, 3, 4, LUCKY_RED)
+            a.put(lx + 1, 24, LAMP)
+            a.put(lx + 1, 25, LAMP)
+        # The altar shelf: the burner, three sticks, their embers.
+        a.rect(4, 30, 24, 2, GOLD)
+        a.rect(12, 32, 8, 3, GOLD_DARK)
+        a.hline(11, 32, 10, GOLD)
+        for sx in (14, 16, 18):
+            a.vline(sx, 26, 6, WOOD)
+            a.put(sx, 26, LAMP)
+        # Smoke, curling up a row each frame.
+        for i, sx in enumerate((14, 16, 18)):
+            for k in range(3):
+                y = 25 - ((f + i + k * 3) % 9)
+                x = sx + (1 if (y + i) % 4 < 2 else 0)
+                if y > 8:
+                    a.put(x, y, SMOKE)
+        # The doors below, gold pulls and a gold 'fu' square.
+        a.vline(16, 36, 10, DARK_RED)
+        a.rect(13, 40, 2, 2, GOLD)
+        a.rect(18, 40, 2, 2, GOLD)
+        a.rect(14, 37, 4, 2, GOLD_LIT)
+        frames.append(a)
+    write_frames("bookshelf", frames, "Guan Gong's shrine: lamps lit, incense smoking.")
+
+
+def water_tank():
+    """A Hong Kong rooftop's water tank: a pale fibreglass box banded in
+    blue, a ladder up its side, on a steel stand, its pipe down to the roof."""
+    a = Art(48, 64)
+    # The stand: four legs and a cross brace.
+    for lx in (4, 14, 32, 42):
+        a.rect(lx, 40, 3, 23, STEEL)
+        a.vline(lx, 40, 23, STEEL_LIT)
+    for i in range(18):
+        a.put(7 + i * 25 // 18, 44 + i, STEEL_DARK)
+        a.put(41 - i * 25 // 18, 44 + i, STEEL_DARK)
+    a.rect(2, 38, 44, 3, STEEL_DARK)
+    # The tank.
+    a.rect(3, 6, 42, 32, WHITE)
+    a.rect(3, 6, 42, 3, "¤")
+    a.vline(3, 6, 32, "!")
+    a.rect(35, 9, 10, 29, "!")
+    for by in (14, 26):
+        a.rect(3, by, 42, 2, PORCELAIN_BLUE)
+    # The manhole on top, a vent pipe.
+    a.rect(14, 3, 12, 3, STEEL)
+    a.rect(30, 0, 3, 6, STEEL_DARK)
+    # The ladder up its east side.
+    a.vline(45, 4, 58, STEEL_LIT)
+    a.vline(47, 4, 58, STEEL_LIT)
+    for ry in range(6, 62, 5):
+        a.hline(45, ry, 3, STEEL_LIT)
+    # The outlet pipe down to the roof.
+    a.rect(22, 38, 3, 25, PORCELAIN_BLUE)
+    write("water_tank", a, "A rooftop water tank on its steel stand.")
 
 
 def remap(name, pick):
@@ -455,6 +867,18 @@ def main():
         fu,
         couplets,
         desks,
+        lambda: rooftop_bench("rooftop_bench", "Plastic stools in a row on the rooftop."),
+        lambda: rooftop_bench("rooftop_bench_north", "Plastic stools in a row, from behind."),
+        rooftop_table,
+        rooftop_stool,
+        laundry_pole,
+        leather,
+        tea_table,
+        gold_lamp,
+        arowana_tank,
+        quote_screen,
+        shrine,
+        water_tank,
     ):
         draw()
     print("drew the Hong Kong pieces")

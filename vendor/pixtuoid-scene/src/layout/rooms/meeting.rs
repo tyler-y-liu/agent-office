@@ -55,6 +55,21 @@ pub struct MeetingRoom {
     /// The sofa/table trio, or `None` when the room is too small to fit it
     /// (bare floor — the room still exists to hold its `room_id`).
     pub trio: Option<MeetingTrio>,
+    /// agent-office: an office room west of the divider, or the open-air
+    /// rooftop east of the desks.
+    pub style: RoomStyle,
+}
+
+/// agent-office: what a [`MeetingRoom`] is. A rooftop is a meeting room in
+/// all but its looks and its walls: its trio is the stools and folding table
+/// idle agents sit out at, under the open sky, with no glass round it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RoomStyle {
+    /// A glass-walled room west of the divider.
+    #[default]
+    Office,
+    /// The open-air rooftop at the east end, past the elevator.
+    Rooftop,
 }
 
 /// Horizontal offset of each head-of-table chair from the table centre —
@@ -164,6 +179,10 @@ impl MeetingRoom {
     /// clear column east of the room's east wall) — `None` on a room too narrow.
     /// The roster's mat also gives way to what stands over it.
     pub(crate) fn doormat_rect(&self) -> Option<Bounds> {
+        // agent-office: the rooftop has no door to lay one by.
+        if self.style == RoomStyle::Rooftop {
+            return None;
+        }
         let b = self.bounds;
         // Lazy `.then`: `b.height / 2 - 2` must not run for a sub-gate room.
         (b.width > 10).then(|| Bounds {

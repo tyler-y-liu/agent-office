@@ -263,6 +263,12 @@ fn looped_animations() -> Vec<(Piece, usize)> {
         .filter(|p| p.kind() == pixtuoid_core::sprite::format::PieceKind::Creature);
     [
         Piece::FishTank,
+        // agent-office: the rooftop's laundry, the lucky cat, the quote
+        // screen, the shrine.
+        Piece::LaundryPole,
+        Piece::PlantSucculent,
+        Piece::TvStand,
+        Piece::Bookshelf,
         Piece::WaterCooler,
         Piece::Typing,
         Piece::TypingBack,

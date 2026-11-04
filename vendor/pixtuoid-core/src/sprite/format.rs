@@ -1658,6 +1658,13 @@ pub enum Piece {
     DogSleep,
     LobsterWalk,
     LobsterRest,
+    // agent-office: the rooftop's furniture, in the meeting trio's slots.
+    RooftopBench,
+    RooftopBenchNorth,
+    RooftopTable,
+    RooftopStool,
+    LaundryPole,
+    WaterTank,
 }
 
 /// What a [`Piece`] is.
@@ -1706,6 +1713,8 @@ impl Piece {
     pub fn min_frames(self) -> usize {
         match self {
             Piece::Door => 3,
+            // agent-office: the laundry sways.
+            Piece::LaundryPole => 2,
             Piece::Typing
             | Piece::Walking
             | Piece::WalkingBack

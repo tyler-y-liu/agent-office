@@ -775,6 +775,7 @@ mod tests {
             x: 2,
             w: WINDOW_W,
             idx: 0,
+            open: false,
         };
         let corner = bay.glass_box(rows.clone());
         assert!(

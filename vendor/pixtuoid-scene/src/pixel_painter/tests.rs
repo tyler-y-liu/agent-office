@@ -2444,6 +2444,7 @@ fn furniture_painters_fill_exactly_their_rect_authority() {
     let meeting = crate::layout::MeetingRoom {
         bounds: big,
         trio: None,
+        style: crate::layout::RoomStyle::Office,
     };
     let painted_bbox = |f: &dyn Fn(&mut RgbBuffer)| -> Option<crate::layout::Bounds> {
         let mut buf = RgbBuffer::filled(120, 80, bg);

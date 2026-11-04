@@ -328,6 +328,9 @@ pub enum Furniture {
     BulletinBoard,
     /// An exit sign (wall-hung, like [`Furniture::BulletinBoard`]).
     ExitSign,
+    /// agent-office: the rooftop's water tank on its stand, against the
+    /// railing in the north-east corner.
+    WaterTank,
     /// A meeting-room presentation screen on a soundbar base (bookshelf-class):
     /// the floor base blocks, the panel above overhangs it inside the
     /// already-blocked window band.
@@ -406,6 +409,7 @@ impl Furniture {
         Furniture::Bookshelf,
         Furniture::BulletinBoard,
         Furniture::ExitSign,
+        Furniture::WaterTank,
         Furniture::MeetingScreen,
         Furniture::MeetingSofaBody,
         Furniture::MeetingTable,
@@ -454,6 +458,7 @@ pub(crate) const fn repels_plants(kind: Furniture) -> bool {
         | Furniture::Bookshelf
         | Furniture::BulletinBoard
         | Furniture::ExitSign
+        | Furniture::WaterTank
         | Furniture::MeetingScreen
         | Furniture::IslandStand
         | Furniture::SnackShelf
@@ -636,6 +641,12 @@ pub const fn furniture_def(kind: Furniture) -> FurnitureDef {
         },
         Furniture::ExitSign => FurnitureDef {
             visual: Size { w: 5, h: 3 },
+            ..DECOR
+        },
+        // agent-office: its stand's legs on the roof, the tank over them.
+        Furniture::WaterTank => FurnitureDef {
+            footprint: Some(Size { w: 12, h: 4 }),
+            visual: Size { w: 12, h: 16 },
             ..DECOR
         },
         Furniture::DeskChair => FurnitureDef {
@@ -929,6 +940,8 @@ pub enum WallDecor {
     ExitSign,
     /// Wall-mounted meeting-room display.
     MeetingScreen,
+    /// agent-office: the rooftop's water tank.
+    WaterTank,
 }
 
 impl WallDecor {
@@ -940,6 +953,7 @@ impl WallDecor {
         WallDecor::BulletinBoard,
         WallDecor::ExitSign,
         WallDecor::MeetingScreen,
+        WallDecor::WaterTank,
     ];
 
     /// Geometry kind in the unified [`Furniture`] table.
@@ -950,6 +964,7 @@ impl WallDecor {
             WallDecor::BulletinBoard => Furniture::BulletinBoard,
             WallDecor::ExitSign => Furniture::ExitSign,
             WallDecor::MeetingScreen => Furniture::MeetingScreen,
+            WallDecor::WaterTank => Furniture::WaterTank,
         }
     }
 
@@ -968,6 +983,7 @@ impl WallDecor {
             WallDecor::BulletinBoard => Piece::BulletinBoard,
             WallDecor::ExitSign => Piece::ExitSign,
             WallDecor::MeetingScreen => Piece::MeetingScreen,
+            WallDecor::WaterTank => Piece::WaterTank,
         }
     }
 }
@@ -1207,7 +1223,7 @@ mod tests {
     fn furniture_def_invariants_hold_for_every_row() {
         assert_eq!(
             Furniture::ALL.len(),
-            29,
+            30,
             "Furniture variant added/removed — update ALL (and this count)"
         );
         for &f in Furniture::ALL {

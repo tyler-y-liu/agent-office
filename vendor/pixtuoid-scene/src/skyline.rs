@@ -583,7 +583,13 @@ impl CityStrip {
         harbour.beams(&mut strip);
         harbour.ridge(&mut strip);
         harbour.water(&mut strip);
+        // agent-office: the traffic, farthest first, each after the beams
+        // (they find a roof as the first thing down a column).
+        harbour.junk(&mut strip);
         harbour.ferry(&mut strip);
+        harbour.turbojet(&mut strip);
+        harbour.kites(&mut strip);
+        harbour.aircraft(&mut strip);
         strip
     }
 
@@ -676,6 +682,7 @@ mod tests {
             x: run_x0 + 25,
             w: crate::layout::WINDOW_W,
             idx: 1,
+            open: false,
         };
         for d in [1, 4] {
             let density = test_density(d);
@@ -919,6 +926,18 @@ mod tests {
         let theme = crate::theme::theme_by_name("normal").expect("theme");
         let (run_w, glass_h) = (400, 24);
         let night = crate::localclock::at_hour(23);
+        // agent-office: a plane crosses the harbour's night sky by its own
+        // lights; read the beacons while it is off the run.
+        let ms = night
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis() as u64;
+        let into = ms % harbour::PLANE_PERIOD_MS;
+        let night = if into < harbour::PLANE_CROSSING_MS {
+            night + std::time::Duration::from_millis(harbour::PLANE_CROSSING_MS - into + 1_000)
+        } else {
+            night
+        };
         for d in [1, 4] {
             let side = (d / 2).max(1);
             let strip = |now| {

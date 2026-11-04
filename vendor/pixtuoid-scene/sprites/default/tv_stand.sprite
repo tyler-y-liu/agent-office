@@ -1,14 +1,90 @@
-# 10x10 wall-mounted TV on a slim stand. Dark monitor frame, cyan-lit
-# display (always "on"), thin mount column, wide base. Lives in the
-# aisle between desk pods as a meeting / standup-board for the office.
+# A Hang Seng quote screen on a cart, quotes crawling.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
 @frame 0
-. n n n n n n n n .
-n M M M M M M M M n
-n M c c c c c c M n
-n M c c c c c c M n
-n M c c c c c c M n
-n M M M M M M M M n
-. . . . n n . . . .
-. . . . n n . . . .
-. . D D D D D D . .
-. . n n n n n n . .
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ Ǵ Ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 1
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ Ǵ Ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 2
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ ǵ ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 3
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ ǵ ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 4
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ Ǵ Ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 5
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ Ǵ Ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 6
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ ǵ ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n
+@frame 7
+4 3 3 3 3 3 3 3 3 4
+4 Ǐ Ƕ Ƕ Ƕ Ƕ Ƕ ǵ ǵ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ Ƕ 4
+4 4 4 4 4 4 4 4 4 4
+. . . . M M . . . .
+. D D D D D D D D .
+. D D D D D D D D .
+n D D D d D D D D n

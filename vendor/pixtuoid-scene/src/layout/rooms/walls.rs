@@ -408,6 +408,11 @@ pub(crate) fn derive_room_walls(
     let mut requests: Vec<WallRequest> = Vec::new();
 
     for (i, room) in meeting_rooms.iter().enumerate() {
+        // agent-office: the rooftop is open air, no glass round it; never
+        // stacked under an office room, it walls none of theirs either.
+        if room.style == super::RoomStyle::Rooftop {
+            continue;
+        }
         let b = room.bounds;
         requests.push(WallRequest {
             run: Run::V {
@@ -771,6 +776,7 @@ mod tests {
                 height: h,
             },
             trio: None::<MeetingTrio>,
+            style: crate::layout::RoomStyle::Office,
         }
     }
 

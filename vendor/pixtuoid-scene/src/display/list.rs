@@ -292,7 +292,10 @@ pub(crate) fn fingerprint(kind: &PieceKind) -> u64 {
         } => (at, art, degraded).hash(&mut h),
         PieceKind::Prop { at, art } | PieceKind::Animated { at, art } => (at, art).hash(&mut h),
         PieceKind::PropBand { at, sprite, rows } => (at, sprite, rows).hash(&mut h),
-        PieceKind::Table { at } => at.hash(&mut h),
+        PieceKind::Table { at, sprite } => {
+            at.hash(&mut h);
+            sprite.hash(&mut h);
+        }
         PieceKind::Door { at, frame } => (at, frame).hash(&mut h),
         PieceKind::Neon {
             at,
@@ -454,6 +457,8 @@ pub(crate) enum PieceKind {
     },
     Table {
         at: crate::layout::Point,
+        /// agent-office: a room's table, or the rooftop's folding one.
+        sprite: pixtuoid_core::sprite::format::Piece,
     },
     /// The elevator from its top-left `at`, as open as `frame` shows.
     Door {

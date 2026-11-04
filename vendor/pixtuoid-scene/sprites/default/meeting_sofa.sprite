@@ -14,9 +14,9 @@
 #   row 6: front baseboard shadow
 @frame 0
 . n n n n n n n n n n n n n n n n n n .
-n n G G G G G G G G G G G G G G G G n n
-n C C C C C C C C C C C C C C C C C C n
+n n ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ ǧ n n
+n Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ n
 n n n n n n n n n n n n n n n n n n n n
-n n G G G G G n G G G G G n G G G G G n
-n C C C C C C C C C C C C C C C C C C n
-. n n C C C C C C C C C C C C C C n n .
+n n ǧ ǧ ǧ ǧ ǧ n ǧ ǧ ǧ ǧ ǧ n ǧ ǧ ǧ ǧ ǧ n
+n Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ n
+. n n Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ Ǧ n n .

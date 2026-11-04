@@ -153,6 +153,30 @@
 "ǚ" = "#f7f5ef"   # desk laminate's lit edge
 "Ǜ" = "#6f6b62"   # desk laminate, darkest: legs and seams
 "ǜ" = "#f2dfb8"   # the desk lamp's pool on laminate
+"Ǟ" = "#d8382e"   # plastic stool, red
+"ǟ" = "#9a2219"   # plastic stool, shaded
+"Ǡ" = "#f0675a"   # plastic stool, lit rim
+"ǡ" = "#d9902a"   # iced lemon tea
+"Ǣ" = "#8ec1ea"   # a shirt on the line, sky blue
+"ǣ" = "#2e4672"   # trousers on the line, navy
+"Ǥ" = "#f1a1b5"   # a towel on the line, pink
+"ǥ" = "#2f8a3a"   # a beer bottle, green
+"Ǧ" = "#7a3a24"   # the boss's leather, oxblood
+"ǧ" = "#a2573a"   # leather, lit
+"Ǫ" = "#552516"   # leather, shaded
+"ǫ" = "#36150c"   # leather's seams and tufting
+"Ǭ" = "#5c2a1c"   # rosewood
+"ǭ" = "#83402a"   # rosewood, lit edge
+"Ǯ" = "#3d1a11"   # rosewood, shaded
+"ǯ" = "#7a4a3e"   # a Yixing clay teapot
+"Ǳ" = "#fde58a"   # gold, catching the light
+"ǲ" = "#b8862a"   # gold, shaded
+"ǳ" = "#1c2d4a"   # an arowana tank's dark backdrop
+"Ǵ" = "#3fd46a"   # a quote up: Hong Kong prints gains green
+"ǵ" = "#f0483c"   # a quote down, in red
+"Ƕ" = "#0c1626"   # a quote screen's black
+"Ƿ" = "#cfcac0"   # incense smoke
+"Ǹ" = "#b8322a"   # Guan Gong's red face
 
 [ramps]
 "h" = { of = "H", level = -2 }   # hair, turned from the light
@@ -328,11 +352,11 @@ frame_ms = 600
 
 [animations.plant_succulent]
 frames   = ["plant_succulent.sprite"]
-frame_ms = 600
+frame_ms = 500   # agent-office: it loops
 
 [animations."plant_succulent@4x"]
 frames   = ["plant_succulent@4x.sprite"]
-frame_ms = 600
+frame_ms = 500   # agent-office: it loops
 
 [animations.floor_lamp]
 frames   = ["floor_lamp.sprite"]
@@ -479,6 +503,55 @@ frame_ms = 375
 frames   = ["lobster_rest_0@4x.sprite", "lobster_rest_1@4x.sprite", "lobster_rest_2@4x.sprite", "lobster_rest_3@4x.sprite"]
 frame_ms = 375
 
+# agent-office: the rooftop's furniture (tools/hk_art.py).
+[animations.rooftop_bench]
+frames   = ["rooftop_bench.sprite"]
+frame_ms = 600
+
+[animations."rooftop_bench@4x"]
+frames   = ["rooftop_bench@4x.sprite"]
+frame_ms = 600
+
+[animations.rooftop_bench_north]
+frames   = ["rooftop_bench_north.sprite"]
+frame_ms = 600
+
+[animations."rooftop_bench_north@4x"]
+frames   = ["rooftop_bench_north@4x.sprite"]
+frame_ms = 600
+
+[animations.rooftop_table]
+frames   = ["rooftop_table.sprite"]
+frame_ms = 600
+
+[animations."rooftop_table@4x"]
+frames   = ["rooftop_table@4x.sprite"]
+frame_ms = 600
+
+[animations.rooftop_stool]
+frames   = ["rooftop_stool.sprite"]
+frame_ms = 600
+
+[animations."rooftop_stool@4x"]
+frames   = ["rooftop_stool@4x.sprite"]
+frame_ms = 600
+
+[animations.laundry_pole]
+frames   = ["laundry_pole.sprite"]
+frame_ms = 1000
+
+[animations."laundry_pole@4x"]
+frames   = ["laundry_pole@4x.sprite"]
+frame_ms = 1000
+
+[animations.water_tank]
+frames   = ["water_tank.sprite"]
+frame_ms = 600
+
+[animations."water_tank@4x"]
+frames   = ["water_tank@4x.sprite"]
+frame_ms = 600
+
 [animations.meeting_sofa]
 # The front view. The classic painter also draws the back view with it, flipped:
 # the south sofa of a meeting trio and the lounge couch.
@@ -535,11 +608,11 @@ frame_ms = 600
 
 [animations.bookshelf]
 frames   = ["bookshelf.sprite"]
-frame_ms = 600
+frame_ms = 500   # agent-office: it loops
 
 [animations."bookshelf@4x"]
 frames   = ["bookshelf@4x.sprite"]
-frame_ms = 600
+frame_ms = 500   # agent-office: it loops
 
 [animations.snack_shelf]
 frames   = ["snack_shelf.sprite"]
@@ -654,11 +727,11 @@ frame_ms = 600
 
 [animations.tv_stand]
 frames   = ["tv_stand.sprite"]
-frame_ms = 600
+frame_ms = 250   # agent-office: it loops
 
 [animations."tv_stand@4x"]
 frames   = ["tv_stand@4x.sprite"]
-frame_ms = 600
+frame_ms = 250   # agent-office: it loops
 
 [animations.phone_booth]
 frames   = ["phone_booth.sprite"]

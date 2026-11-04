@@ -1,0 +1,10 @@
+# Plastic stools in a row, from behind.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
+@frame 0
+. . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . . . . . . . . . .
+. Ǡ Ǡ Ǡ Ǡ Ǡ . Ǡ Ǡ Ǡ Ǡ Ǡ Ǡ . Ǡ Ǡ Ǡ Ǡ Ǡ .
+Ǟ Ǟ Ǟ ǟ Ǟ Ǟ . Ǟ Ǟ Ǟ ǟ Ǟ Ǟ . Ǟ Ǟ ǟ Ǟ Ǟ Ǟ
+Ǟ Ǟ . . Ǟ Ǟ . Ǟ Ǟ . . Ǟ Ǟ . Ǟ Ǟ . . Ǟ ǟ
+Ǟ Ǟ ǟ ǟ ǟ Ǟ . Ǟ Ǟ ǟ ǟ Ǟ Ǟ . Ǟ ǟ ǟ ǟ Ǟ ǟ
+Ǟ Ǟ . . n Ǟ n Ǟ Ǟ . . Ǟ Ǟ n Ǟ n . . Ǟ Ǟ

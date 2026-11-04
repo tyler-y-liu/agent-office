@@ -1,14 +1,54 @@
-# A top-down bookshelf: book spines on three shelves over a closed drawer.
+# Guan Gong's shrine: lamps lit, incense smoking.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
 @frame 0
-. . . . . . . .
-n n n n n n n n
-n D D D D D D n
-n r b y r b y n
-n D D D D D D n
-n b y r b y r n
-n D D D D D D n
-n y r b y r b n
-n D D D D D D n
-n D D d d D D n
-n D D D D D D n
-n n n n n n n n
+Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ
+ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ
+Ǐ ǎ N N N N ǎ Ǐ
+Ǐ ǎ N N Ǹ N N Ǐ
+Ǐ ǎ N l l N N Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ Ǐ Ǐ Ǐ D Ǐ Ǐ Ǐ
+Ǐ ǎ ǎ ǲ ǲ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+@frame 1
+Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ
+ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ
+Ǐ ǎ N N N N ǎ Ǐ
+Ǐ ǎ N N Ǹ N N Ǐ
+Ǐ ǎ N l l N N Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ Ǐ Ǐ Ǐ D Ǐ Ǐ Ǐ
+Ǐ ǎ ǎ ǲ ǲ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+@frame 2
+Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ
+ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ
+Ǐ ǎ N N N N ǎ Ǐ
+Ǐ ǎ N N Ǹ N N Ǐ
+Ǐ ǎ N l l N N Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ Ǐ Ǐ Ǐ D Ǐ Ǐ Ǐ
+Ǐ ǎ ǎ ǲ ǲ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+@frame 3
+Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ
+ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ
+Ǐ ǎ N N N N ǎ Ǐ
+Ǐ ǎ N N Ǹ N N Ǐ
+Ǐ ǎ N l l N N Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ ǎ N l l N ǎ Ǐ
+Ǐ Ǐ Ǐ Ǐ D Ǐ Ǐ Ǐ
+Ǐ ǎ ǎ ǲ ǲ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ
+Ǐ ǎ ǎ ǎ ǎ ǎ ǎ Ǐ

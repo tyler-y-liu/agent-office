@@ -699,6 +699,18 @@ fn push_fixture(
                 StationArt::Appliance(sprite) => appliance(sprite),
             }
         }
+        // agent-office: the lucky cat waves.
+        K::Plant {
+            kind: crate::layout::PlantKind::Succulent,
+            ..
+        } => push_looping(
+            order,
+            pack,
+            centre,
+            PackPiece::PlantSucculent,
+            moment.timing.beat,
+            depth,
+        ),
         K::Plant { kind, .. } => push_art(
             order,
             pack,
@@ -707,6 +719,18 @@ fn push_fixture(
             depth,
             Playback::Held,
         ),
+        // agent-office: the quote screen's quotes crawl.
+        K::Pod {
+            kind: crate::layout::PodDecor::Tv,
+            ..
+        } => push_looping(
+            order,
+            pack,
+            centre,
+            PackPiece::TvStand,
+            moment.timing.beat,
+            depth,
+        ),
         K::Pod { kind, .. } => push_art(
             order,
             pack,
@@ -714,6 +738,18 @@ fn push_fixture(
             Art::still(kind.piece()),
             depth,
             Playback::Held,
+        ),
+        // agent-office: the shrine's incense smokes.
+        K::Wall {
+            kind: crate::layout::WallDecor::Bookshelf,
+            ..
+        } => push_looping(
+            order,
+            pack,
+            centre,
+            PackPiece::Bookshelf,
+            moment.timing.beat,
+            depth,
         ),
         K::Wall { kind, .. } if kind.stands_on_floor() => push_art(
             order,
@@ -727,41 +763,69 @@ fn push_fixture(
         K::NoticeBoard { .. } => push_hung(order, pack, top_left, PackPiece::NoticeBoard, depth),
         // A back-view sofa splits into bands its sitter sorts between
         // ([`push_sofa`]), so it lays its own layers.
-        K::MeetingSofa { faces_away, .. } => {
+        K::MeetingSofa {
+            faces_away, room, ..
+        } => {
             if let Some(tie) = tie_of(fixture) {
-                push_sofa(order, pack, fixture.at, faces_away, tie);
+                let set = SofaArt::of(on_rooftop(layout, room));
+                push_sofa(order, pack, fixture.at, faces_away, tie, set);
             }
             return;
         }
         K::LoungeCouch => {
             if let Some(tie) = tie_of(fixture) {
-                push_sofa(order, pack, centre, true, tie);
+                push_sofa(order, pack, centre, true, tie, SofaArt::of(false));
             }
             return;
         }
-        K::MeetingTable { .. } => {
+        K::MeetingTable { room } => {
             let table = crate::layout::furniture_def(crate::layout::Furniture::MeetingTable).visual;
-            let face = face_rows(pack, PackPiece::MeetingTable, office.scale);
+            // agent-office: the rooftop's folding table.
+            let sprite = if on_rooftop(layout, room) {
+                PackPiece::RooftopTable
+            } else {
+                PackPiece::MeetingTable
+            };
+            let face = face_rows(pack, sprite, office.scale);
             order.push((
                 piece_span(crate::layout::Pivot::Center, centre, table.w, table.h, face)
                     .with_depth(depth),
-                PieceKind::Table { at: centre },
+                PieceKind::Table { at: centre, sprite },
             ));
         }
         // The art's back is west, for a sitter facing east.
-        K::MeetingChair { facing, .. } => {
+        K::MeetingChair { facing, waypoint } => {
             let flip = if facing == crate::layout::Facing::East {
                 Flip::None
             } else {
                 Flip::Horizontal
             };
+            // agent-office: a plastic stool at the rooftop's table.
+            let rooftop = layout
+                .waypoints
+                .get(waypoint)
+                .and_then(|w| w.room_id)
+                .is_some_and(|room| on_rooftop(layout, room));
             let art = Art {
-                sprite: PackPiece::MeetingChair,
+                sprite: if rooftop {
+                    PackPiece::RooftopStool
+                } else {
+                    PackPiece::MeetingChair
+                },
                 frame: 0,
                 flip,
             };
             push_art(order, pack, centre, art, depth, Playback::Held);
         }
+        // agent-office: on the rooftop, the laundry drying.
+        K::CoatRack { room } if on_rooftop(layout, room) => push_looping(
+            order,
+            pack,
+            centre,
+            PackPiece::LaundryPole,
+            moment.timing.beat,
+            depth,
+        ),
         K::CoatRack { .. } => push_art(
             order,
             pack,
@@ -1266,21 +1330,54 @@ fn occupant_span(body: Span, depth: u16, chair: Option<Span>) -> Span {
 ///
 /// NOT `back_couch`: the pack documents that as a character seen from behind, so
 /// it would draw a headless torso where the couch belongs.
+/// agent-office: whether meeting room `room` is the rooftop.
+fn on_rooftop(layout: &crate::layout::SceneLayout, room: usize) -> bool {
+    layout
+        .meeting_rooms
+        .get(room)
+        .is_some_and(|r| r.style == crate::layout::RoomStyle::Rooftop)
+}
+
+/// agent-office: a sofa's front and back art: a room's sofa, or the
+/// rooftop's row of stools.
+#[derive(Clone, Copy)]
+struct SofaArt {
+    front: PackPiece,
+    back: PackPiece,
+}
+
+impl SofaArt {
+    fn of(rooftop: bool) -> Self {
+        if rooftop {
+            Self {
+                front: PackPiece::RooftopBench,
+                back: PackPiece::RooftopBenchNorth,
+            }
+        } else {
+            Self {
+                front: PackPiece::MeetingSofa,
+                back: PackPiece::MeetingSofaNorth,
+            }
+        }
+    }
+}
+
 fn push_sofa(
     order: &mut Vec<(Span, PieceKind)>,
     pack: &OfficeArt,
     at: crate::layout::Point,
     back_view: bool,
     tie: Tie,
+    set: SofaArt,
 ) {
     let sitters = crate::sim::seat::sofa_sitter_sort_row(at);
     if back_view {
-        let (w, h) = art_size(pack, PackPiece::MeetingSofaNorth);
+        let (w, h) = art_size(pack, set.back);
         let tl = crate::layout::anchored_top_left(crate::layout::Pivot::Center, at, w, h);
         let split = NORTH_SOFA_SEAT_ROWS.min(h);
         let band = |rows| PieceKind::PropBand {
             at,
-            sprite: PackPiece::MeetingSofaNorth,
+            sprite: set.back,
             rows,
         };
         // Its own south edge lies rows north of where the sofa stands, where a
@@ -1293,7 +1390,7 @@ fn push_sofa(
         ));
         return;
     }
-    let (w, h) = art_size(pack, PackPiece::MeetingSofa);
+    let (w, h) = art_size(pack, set.front);
     let span = piece_span(crate::layout::Pivot::Center, at, w, h, 0)
         .with_depth(sitters)
         .with_layer(Layer::from(tie));
@@ -1302,7 +1399,7 @@ fn push_sofa(
         PieceKind::Prop {
             at,
             art: Art {
-                sprite: PackPiece::MeetingSofa,
+                sprite: set.front,
                 frame: 0,
                 flip: Flip::None,
             },

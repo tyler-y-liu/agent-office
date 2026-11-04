@@ -35,6 +35,9 @@ pub(crate) struct WindowBay {
     pub(crate) w: u16,
     /// The window's place in the run, counted from the west.
     pub(crate) idx: u16,
+    /// agent-office: open sky over the rooftop rather than glass: no frame,
+    /// mullion or transom, only a railing along its foot ([`rooftop_railing`]).
+    pub(crate) open: bool,
 }
 
 impl WindowBay {
@@ -52,6 +55,10 @@ impl WindowBay {
     /// mullion.
     pub(crate) fn panes(self) -> [Range<u16>; 2] {
         let mullion = self.center_x();
+        // agent-office: open sky has no frame to stand a pane in.
+        if self.open {
+            return [self.x..mullion, mullion..self.span().end];
+        }
         [
             self.x + FRAME_W..mullion,
             mullion + 1..self.span().end - FRAME_W,
@@ -61,6 +68,16 @@ impl WindowBay {
     /// The glass inside its outer frame over the window `rows`, its mullion
     /// and transom included.
     pub(crate) fn glass_box(self, rows: Range<u16>) -> Bounds {
+        // agent-office: open sky runs edge to edge and down to the railing's
+        // foot.
+        if self.open {
+            return Bounds {
+                x: self.x,
+                y: rows.start,
+                width: self.w,
+                height: rows.end.saturating_sub(rows.start + FRAME_W),
+            };
+        }
         Bounds {
             x: self.x + FRAME_W,
             y: rows.start + FRAME_W,
@@ -68,6 +85,70 @@ impl WindowBay {
             height: glass_rows(rows.end.saturating_sub(rows.start)),
         }
     }
+}
+
+impl WindowBay {
+    /// agent-office: whether the cell `(dx, dy)` of this bay, `h` rows tall,
+    /// is solid: its [`window_frame`], or over the rooftop its railing.
+    pub(crate) fn frame(self, dx: u16, dy: u16, h: u16) -> bool {
+        if self.open {
+            rooftop_railing(dx, dy, Size { w: self.w, h })
+        } else {
+            window_frame(dx, dy, Size { w: self.w, h })
+        }
+    }
+}
+
+/// agent-office: how tall the rooftop's railing stands, its foot row included.
+const RAILING_H: u16 = 5;
+/// agent-office: columns from one baluster to the next.
+const BALUSTER_EVERY: u16 = 3;
+
+/// agent-office: whether the cell `(dx, dy)` of open sky `size` big is the
+/// rooftop's railing: its foot, its handrail and the balusters between.
+pub(crate) fn rooftop_railing(dx: u16, dy: u16, size: Size) -> bool {
+    let Size { w: _, h } = size;
+    let rail = h.saturating_sub(RAILING_H);
+    dy + FRAME_W >= h || dy == rail || (dy > rail && dx % BALUSTER_EVERY == 1)
+}
+
+/// agent-office: how many window slots at the east end of a wall `buf_w`
+/// wide open onto the rooftop: none on a narrow office, which keeps its
+/// desks; two from 200 columns, three from 320, and never so many that fewer
+/// than three windows stay west of the door.
+pub(crate) fn rooftop_slots(buf_w: u16) -> u16 {
+    let slots = window_slots(buf_w).count() as u16;
+    let want = match buf_w {
+        320.. => 3,
+        200.. => 2,
+        _ => 0,
+    };
+    if slots < want + 4 { 0 } else { want }
+}
+
+/// agent-office: the door's slot on a wall `buf_w` wide whose `roof`
+/// easternmost slots are the rooftop: the last slot west of them.
+pub(crate) fn door_slot(buf_w: u16, roof: u16) -> Option<WindowBay> {
+    let slots: Vec<WindowBay> = window_slots(buf_w).collect();
+    let at = slots.len().checked_sub(1 + usize::from(roof))?;
+    Some(slots[at])
+}
+
+/// agent-office: the elevator door's left column with the rooftop's `roof`
+/// slots east of it, centred in its slot.
+pub(crate) fn door_x_on(buf_w: u16, roof: u16) -> u16 {
+    match door_slot(buf_w, roof).filter(|_| roof > 0) {
+        Some(slot) => slot.x + (slot.w - ELEVATOR_W) / 2,
+        None => door_x(buf_w),
+    }
+}
+
+/// agent-office: the column the rooftop starts at, the post east of the
+/// door's slot, which stands as the building's last wall; `None` with none.
+pub(crate) fn rooftop_x(buf_w: u16, roof: u16) -> Option<u16> {
+    door_slot(buf_w, roof)
+        .filter(|_| roof > 0)
+        .map(|slot| slot.span().end)
 }
 
 /// The door's slot's left edge on a wall `buf_w` wide: flush with the east
@@ -90,7 +171,12 @@ pub(crate) fn window_slots(buf_w: u16) -> impl Iterator<Item = WindowBay> {
     (0..windows)
         .map(move |idx| {
             let w = WINDOW_W + spare / windows + u16::from(idx >= narrow);
-            let bay = WindowBay { x, w, idx };
+            let bay = WindowBay {
+                x,
+                w,
+                idx,
+                open: false,
+            };
             x += w + POST_W;
             bay
         })
@@ -98,6 +184,7 @@ pub(crate) fn window_slots(buf_w: u16) -> impl Iterator<Item = WindowBay> {
             x,
             w: WINDOW_W,
             idx: windows,
+            open: false,
         }))
 }
 
@@ -170,7 +257,30 @@ impl SceneLayout {
     /// but the door's.
     pub(crate) fn window_bays(&self) -> impl Iterator<Item = WindowBay> + use<> {
         let door = self.door_rect();
-        window_bays(self.buf_w, door.x..door.x + door.width)
+        let mut bays: Vec<WindowBay> =
+            window_bays(self.buf_w, door.x..door.x + door.width).collect();
+        // agent-office: over the rooftop, one stretch of open sky.
+        if let Some(roof) = self.rooftop().map(|r| r.bounds.x) {
+            let open: Vec<WindowBay> = bays.iter().copied().filter(|b| b.x >= roof).collect();
+            bays.retain(|b| b.x < roof);
+            if let (Some(first), Some(last)) = (open.first(), open.last()) {
+                bays.push(WindowBay {
+                    x: first.x,
+                    w: last.span().end - first.x,
+                    idx: first.idx,
+                    open: true,
+                });
+            }
+        }
+        bays.into_iter()
+    }
+
+    /// agent-office: the frame posts this office's north wall stands: every
+    /// one between two slots but those out over the rooftop, its first, the
+    /// building's last wall, kept.
+    pub(crate) fn window_posts(&self) -> impl Iterator<Item = Range<u16>> + use<> {
+        let roof = self.rooftop().map_or(u16::MAX, |r| r.bounds.x);
+        window_posts(self.buf_w).filter(move |p| p.start <= roof)
     }
 
     /// The box the elevator door's art covers.
@@ -191,7 +301,7 @@ impl SceneLayout {
         let h = rows.end - rows.start;
         rows.contains(&y)
             && self.window_bays().any(|b| {
-                b.span().contains(&x) && !window_frame(x - b.x, y - rows.start, Size { w: b.w, h })
+                b.span().contains(&x) && !b.frame(x - b.x, y - rows.start, h)
             })
     }
 }
@@ -272,7 +382,12 @@ mod tests {
     #[test]
     fn a_pane_is_the_glass_between_two_frame_columns() {
         for w in [WINDOW_W, WINDOW_W + 1] {
-            let bay = WindowBay { x: 10, w, idx: 0 };
+            let bay = WindowBay {
+                x: 10,
+                w,
+                idx: 0,
+                open: false,
+            };
             let (h, glass_row) = (20, 5);
             let frame = |x: u16| window_frame(x - bay.x, glass_row, Size { w, h });
             for pane in bay.panes() {
@@ -337,7 +452,7 @@ mod tests {
                 for dx in 0..bay.w {
                     assert_eq!(
                         layout.glass_at(bay.x + dx, rows.start + dy),
-                        !window_frame(dx, dy, size),
+                        !bay.frame(dx, dy, size.h),
                         "({dx}, {dy}) of bay {}",
                         bay.idx
                     );

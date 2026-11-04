@@ -222,6 +222,13 @@ fn pieces(l: &SceneLayout) -> Vec<Piece> {
                     // on the carpet apron at the wall base.
                     WallDecor::Bookshelf | WallDecor::MeetingScreen => Container::WallApron,
                     WallDecor::ExitSign | WallDecor::BulletinBoard => Container::WallBand,
+                    // agent-office: on the rooftop.
+                    WallDecor::WaterTank => Container::MeetingRoom(
+                        l.meeting_rooms
+                            .iter()
+                            .position(|r| r.style == super::RoomStyle::Rooftop)
+                            .expect("a water tank stands on the rooftop"),
+                    ),
                 };
                 out.push(Piece::table(
                     format!("wall_decor[{item}] {kind:?}"),
@@ -1080,6 +1087,11 @@ fn assert_no_free_standing_piece_inside_a_pod(w: u16, h: u16, seed: u64, l: &Sce
         else {
             continue; // wall-hung: no ground contact, nothing to wedge into a pod
         };
+        // agent-office: the rooftop holds no pods; its water tank stands
+        // east of every one.
+        if l.rooftop().is_some_and(|r| g.x >= r.bounds.x) {
+            continue;
+        }
         for &(top, bottom) in &pods {
             assert!(
                 g.y >= bottom || g.y + gs.h <= top,
@@ -1683,7 +1695,9 @@ fn every_pod_decor_kind_can_open_a_floor() {
 #[test]
 fn a_wide_floors_decor_order_is_not_one_fixed_cycle() {
     use std::collections::HashSet;
-    for &(w, h) in &[(160u16, 120u16), (192, 158), (200, 116)] {
+    // agent-office: four-seat benches and the rooftop leave 160x120 and
+    // 200x116 too few aisle slots to be "wide"; these still are.
+    for &(w, h) in &[(196u16, 120u16), (192, 158), (300, 180)] {
         let seen: HashSet<Vec<crate::layout::PodDecor>> = (0..crate::floor::MAX_FLOORS)
             .filter_map(|f| {
                 SceneLayout::compute_with_seed(w, h, None, crate::floor::floor_seed(f))

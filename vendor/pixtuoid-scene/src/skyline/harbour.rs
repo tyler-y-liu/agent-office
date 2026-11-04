@@ -65,6 +65,73 @@ const FERRY_LIGHT: Rgb = Rgb {
     b: 130,
 };
 
+/// agent-office: what else moves out there. The Aqua Luna, its red sails up,
+/// sails slower and farther out than the ferry, only by day.
+const JUNK_CROSSING_MS: u64 = 150_000;
+/// Out of step with the ferry, so the two don't cross as one.
+const JUNK_PHASE_MS: u64 = 47_000;
+const JUNK_HULL: Rgb = Rgb {
+    r: 74,
+    g: 46,
+    b: 32,
+};
+const JUNK_SAIL: Rgb = Rgb {
+    r: 184,
+    g: 50,
+    b: 40,
+};
+
+/// A TurboJET to Macau: fast, near, and not on every trip.
+const TURBOJET_PERIOD_MS: u64 = 75_000;
+const TURBOJET_CROSSING_MS: u64 = 28_000;
+const TURBOJET_HULL: Rgb = Rgb {
+    r: 236,
+    g: 238,
+    b: 240,
+};
+const TURBOJET_STRIPE: Rgb = Rgb {
+    r: 200,
+    g: 40,
+    b: 48,
+};
+const TURBOJET_WINDOW: Rgb = Rgb {
+    r: 36,
+    g: 52,
+    b: 78,
+};
+
+/// Black kites wheeling over the harbour by day: where each circles, as
+/// shares of the run and of the sky over the shore, and its lap in seconds.
+const KITES: [(u16, f32, f64); 3] = [(18, 0.34, 23.0), (52, 0.22, 31.0), (83, 0.4, 19.0)];
+const KITE: Rgb = Rgb {
+    r: 58,
+    g: 44,
+    b: 36,
+};
+
+/// A helicopter by day, a plane's lights by night, crossing high up.
+const HELI_PERIOD_MS: u64 = 140_000;
+const HELI_CROSSING_MS: u64 = 45_000;
+pub(super) const PLANE_PERIOD_MS: u64 = 95_000;
+pub(super) const PLANE_CROSSING_MS: u64 = 60_000;
+const AIRCRAFT: Rgb = Rgb {
+    r: 52,
+    g: 58,
+    b: 66,
+};
+/// Short of full red, so the painters' sun-disc probes don't take it for
+/// the low sun.
+const PLANE_RED: Rgb = Rgb {
+    r: 236,
+    g: 60,
+    b: 50,
+};
+const PLANE_STROBE: Rgb = Rgb {
+    r: 255,
+    g: 255,
+    b: 250,
+};
+
 /// The light show's beams, in turn.
 const BEAMS: [Rgb; 4] = [
     Rgb {
@@ -287,6 +354,243 @@ impl Harbour<'_> {
         }
     }
 
+    /// agent-office: whether it is light enough out for the day's traffic;
+    /// the junk's sails and the kites are in by dusk.
+    fn by_day(&self) -> bool {
+        self.look.darkness < 0.3
+    }
+
+    /// The west end of a `len`-pixel craft `along` (0..1) its crossing of a
+    /// strip `w` wide: in off one side, out past the other.
+    fn crossing_x(w: u16, len: i32, along: f32, eastward: bool) -> i32 {
+        let span = i32::from(w) + len;
+        let run = (along * span as f32) as i32;
+        if eastward { run - len } else { span - run - len }
+    }
+
+    /// agent-office: the Aqua Luna, a junk under red battened sails, farther
+    /// out than the ferry and only by day.
+    pub(super) fn junk(&self, strip: &mut CityStrip) {
+        if !self.by_day() {
+            return;
+        }
+        let d = i32::from(self.d);
+        let len = 6 * d;
+        let leg = (self.beat.ms() + JUNK_PHASE_MS) % (2 * JUNK_CROSSING_MS);
+        let along = (leg % JUNK_CROSSING_MS) as f32 / JUNK_CROSSING_MS as f32;
+        let eastward = leg >= JUNK_CROSSING_MS;
+        let x0 = Self::crossing_x(strip.w, len, along, eastward);
+        let water = i32::from(strip.h) - self.shore_px();
+        let waterline = self.shore_px() + water / 2;
+        let hull = d.max(1);
+        let deck = waterline - hull;
+        // The high stern, at the trailing end.
+        let stern = if eastward { x0 } else { x0 + len - d };
+        for x in x0..x0 + len {
+            let rise = if x >= stern && x < stern + d { (d / 2).max(1) } else { 0 };
+            for y in deck - rise..waterline {
+                strip.put(x, y, JUNK_HULL);
+            }
+        }
+        // Two sails, each sheeted aft of its mast: the main amidships, the
+        // fore by the bow.
+        let aft = if eastward { -1 } else { 1 };
+        let bow = if eastward { x0 + len - 1 } else { x0 };
+        let main = x0 + len / 2;
+        let fore = bow + aft * d;
+        let sail = JUNK_SAIL.mix(self.look.glass_horizon, 0.15);
+        let batten = sail.ramp(-2);
+        let every = d.max(2);
+        for (mast, h, w) in [(main, 3 * d, 2 * d), (fore, 2 * d, (3 * d / 2).max(1))] {
+            for row in 0..h {
+                let colour = if d >= 2 && row % every == every - 1 {
+                    batten
+                } else {
+                    sail
+                };
+                for i in 0..w {
+                    strip.put(mast + aft * i, deck - h + row, colour);
+                }
+            }
+        }
+    }
+
+    /// agent-office: a TurboJET to Macau, low, fast and white with a long
+    /// wake; it runs two trips in three.
+    pub(super) fn turbojet(&self, strip: &mut CityStrip) {
+        let ms = self.beat.ms();
+        let trip = (ms / TURBOJET_PERIOD_MS) as u32;
+        let into = ms % TURBOJET_PERIOD_MS;
+        if into >= TURBOJET_CROSSING_MS || hash(trip).is_multiple_of(3) {
+            return;
+        }
+        let d = i32::from(self.d);
+        let (len, wake) = (7 * d, 5 * d);
+        let eastward = hash(trip ^ 0x7e7).is_multiple_of(2);
+        let along = into as f32 / TURBOJET_CROSSING_MS as f32;
+        // The wake crosses too, so it trails off the strip before it's gone.
+        let x0 = Self::crossing_x(strip.w, len + wake, along, eastward)
+            + if eastward { wake } else { 0 };
+        let water = i32::from(strip.h) - self.shore_px();
+        let waterline = self.shore_px() + water * 4 / 5;
+        let (hull, cabin) = (d.max(1), d.max(1));
+        let lit = self.look.darkness > 0.3;
+        for x in x0..x0 + len {
+            for y in waterline - hull..waterline {
+                let stripe = hull >= 2 && y == waterline - 1;
+                strip.put(x, y, if stripe { TURBOJET_STRIPE } else { TURBOJET_HULL });
+            }
+            // The cabin, set back from the raked bow.
+            let from_bow = if eastward { x0 + len - 1 - x } else { x - x0 };
+            let from_stern = len - 1 - from_bow;
+            if from_bow >= 2 * d && from_stern >= d / 2 {
+                let top = waterline - hull - cabin;
+                for y in top..waterline - hull {
+                    let window = y == top + cabin / 2 && (x - x0) % 2 == 0;
+                    let colour = match (window, lit) {
+                        (true, true) => FERRY_LIGHT,
+                        (true, false) => TURBOJET_WINDOW,
+                        _ => TURBOJET_HULL,
+                    };
+                    strip.put(x, y, colour);
+                }
+            }
+        }
+        // The wake: foam thinning out astern, spray close under the stern.
+        let (stern, step) = if eastward { (x0 - 1, -1) } else { (x0 + len, 1) };
+        for i in 0..wake {
+            let x = stern + step * i;
+            let thin = hash((i as u32) ^ (ms / 250) as u32) % wake.max(1) as u32;
+            if (thin as i32) < i {
+                continue;
+            }
+            for (y, lift) in [(waterline - 1, 3), (waterline - 2, 2)] {
+                if lift == 2 && i >= d {
+                    continue;
+                }
+                if let Some(c) = strip.at_i(x, y) {
+                    strip.put(x, y, c.ramp(lift));
+                }
+            }
+        }
+    }
+
+    /// agent-office: black kites wheeling over the harbour by day, gliding
+    /// with now and then a beat of the wings.
+    pub(super) fn kites(&self, strip: &mut CityStrip) {
+        if !self.by_day() {
+            return;
+        }
+        const GLIDE: [(i32, i32); 8] = [
+            (-3, 1),
+            (-2, 0),
+            (-1, 0),
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 1),
+            (0, 1),
+        ];
+        const FLAP: [(i32, i32); 8] = [
+            (-3, -1),
+            (-2, -1),
+            (-1, 0),
+            (0, 0),
+            (1, 0),
+            (2, -1),
+            (3, -1),
+            (0, 1),
+        ];
+        let d = i32::from(self.d);
+        let secs = self.beat.ms() as f64 / 1000.0;
+        let shore = f64::from(self.shore_px());
+        let r = 6.0 * f64::from(self.d);
+        let colour = KITE.mix(self.look.glass_horizon, 0.3);
+        for (i, &(at, height, lap)) in KITES.iter().enumerate() {
+            let turn = secs / lap * std::f64::consts::TAU + i as f64 * 2.1;
+            let cx = f64::from(pct(self.run_w, at)) * f64::from(self.d);
+            let cy = shore * f64::from(height);
+            let x = (cx + r * turn.cos()).round() as i32;
+            let y = (cy + r * 0.35 * turn.sin()).round() as i32;
+            let flap = (self.beat.ms() / 250 + i as u64 * 3) % 10 < 2;
+            let shape: &[(i32, i32)] = match (d >= 3, flap) {
+                (true, false) => &GLIDE,
+                (true, true) => &FLAP,
+                (false, false) => &[(-1, 0), (0, 0), (1, 0)],
+                (false, true) => &[(-1, -1), (0, 0), (1, -1)],
+            };
+            for &(dx, dy) in shape {
+                strip.put(x + dx, y + dy, colour);
+            }
+        }
+    }
+
+    /// agent-office: high over the far shore, a helicopter by day now and
+    /// then; by night a plane, only its lights showing, blinking.
+    pub(super) fn aircraft(&self, strip: &mut CityStrip) {
+        let ms = self.beat.ms();
+        let fine = self.d >= 3;
+        let shore = self.shore_px();
+        let (period, crossing) = if self.by_day() {
+            (HELI_PERIOD_MS, HELI_CROSSING_MS)
+        } else {
+            (PLANE_PERIOD_MS, PLANE_CROSSING_MS)
+        };
+        let trip = (ms / period) as u32;
+        let into = ms % period;
+        if into >= crossing || (self.by_day() && !hash(trip ^ 0x4e1).is_multiple_of(2)) {
+            return;
+        }
+        let eastward = hash(trip).is_multiple_of(2);
+        let len = if fine { 9 } else { 3 };
+        let along = into as f32 / crossing as f32;
+        let x = Self::crossing_x(strip.w, len, along, eastward) + len / 2;
+        // Drawn facing east, mirrored heading west.
+        let face = if eastward { 1 } else { -1 };
+        let mut put = |dx: i32, dy: i32, y: i32, colour: Rgb| strip.put(x + face * dx, y + dy, colour);
+        if self.by_day() {
+            let y = (shore as f32 * 0.16) as i32;
+            let body = AIRCRAFT.mix(self.look.glass_horizon, 0.25);
+            let spun = (ms / 125).is_multiple_of(2);
+            if fine {
+                let rotor = if spun { -3..=3 } else { -1..=1 };
+                for dx in rotor {
+                    put(dx, -3, y, body);
+                }
+                put(0, -2, y, body);
+                for dx in -1..=2 {
+                    put(dx, -1, y, body);
+                    put(dx, 0, y, body);
+                    put(dx, 1, y, body.ramp(2));
+                }
+                for dx in -4..=-2 {
+                    put(dx, -1, y, body);
+                }
+                put(-4, -2, y, body);
+            } else {
+                for dx in -1..=1 {
+                    put(dx, 0, y, body);
+                }
+                if spun {
+                    put(0, -1, y, body);
+                }
+            }
+        } else {
+            let y = (shore as f32 * 0.1) as i32;
+            let hull = AIRCRAFT.mix(self.look.glass_horizon, 0.5);
+            let reach = if fine { 2 } else { 1 };
+            for dx in -reach..=reach {
+                put(dx, 0, y, hull);
+            }
+            if (ms / 500).is_multiple_of(2) {
+                put(0, -1, y, PLANE_RED);
+            }
+            if ms % 1_500 < 250 {
+                put(-reach, 0, y, PLANE_STROBE);
+            }
+        }
+    }
+
     /// The light show: beams from the roofs sweeping the sky, only where the
     /// sky shows, so the towers stand in front of them.
     pub(super) fn beams(&self, strip: &mut CityStrip) {
@@ -440,5 +744,124 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// agent-office: `draw` on an empty strip with the harbour as it is `ms`
+    /// past the epoch, at density `d`: what it drew, the shore's row, and
+    /// how dark it was out.
+    fn drawn(ms: u64, d: u16, draw: impl Fn(&Harbour, &mut CityStrip)) -> (CityStrip, i32, f32) {
+        let theme = crate::theme::theme_by_name("harbour").expect("theme");
+        let at = UNIX_EPOCH + std::time::Duration::from_millis(ms);
+        let outlook = Moment::resolve(
+            crate::sky::Sky::clock(at),
+            theme,
+            0.0,
+            Motion::Full.timing(at),
+        )
+        .outlook(theme);
+        let colours = Plane::ALL.map(|p| PlaneColours::of(p, outlook.look(), theme));
+        let harbour = Harbour {
+            run_w: RUN.0,
+            glass_h: RUN.1,
+            d,
+            look: outlook.look(),
+            colours: &colours,
+            beat: outlook.beat(),
+            show: None,
+            panes: &[],
+        };
+        let mut s = CityStrip {
+            w: RUN.0 * d,
+            h: RUN.1 * d,
+            px: vec![None; usize::from(RUN.0 * d) * usize::from(RUN.1 * d)],
+        };
+        draw(&harbour, &mut s);
+        (s, harbour.shore_px(), outlook.look().darkness)
+    }
+
+    fn drawn_rows(s: &CityStrip) -> Vec<i32> {
+        (0..i32::from(s.h))
+            .filter(|&y| (0..i32::from(s.w)).any(|x| s.at_i(x, y).is_some()))
+            .collect()
+    }
+
+    /// Every half-hour of a day, a few minutes apart.
+    fn day_of_samples() -> impl Iterator<Item = u64> {
+        (0..48u64).map(|i| i * 1_800_000 + (i * 7_919) % 60_000)
+    }
+
+    /// agent-office: a boat over the far shore's towers reads as one flying;
+    /// the junk and the TurboJET keep to the water as the ferry does.
+    #[test]
+    fn the_junk_and_the_turbojet_keep_to_the_water() {
+        for d in [1, 4] {
+            for ms in day_of_samples() {
+                let (s, shore, _) = drawn(ms, d, |h, s| {
+                    h.junk(s);
+                    h.turbojet(s);
+                });
+                for y in drawn_rows(&s) {
+                    assert!(
+                        y >= shore - 2 * i32::from(d),
+                        "a boat at row {y} over the shore at {shore}, {d}x, {ms} ms"
+                    );
+                }
+            }
+        }
+    }
+
+    /// agent-office: the kites and the aircraft are in the sky over the far
+    /// shore, never down on the water among the boats.
+    #[test]
+    fn the_kites_and_the_aircraft_keep_to_the_sky() {
+        for d in [1, 4] {
+            for ms in day_of_samples() {
+                let (s, shore, _) = drawn(ms, d, |h, s| {
+                    h.kites(s);
+                    h.aircraft(s);
+                });
+                for y in drawn_rows(&s) {
+                    assert!(y < shore, "a flier at row {y}, the shore at {shore}, {d}x");
+                }
+            }
+        }
+    }
+
+    /// agent-office: red sails and kites are a daytime sight; after dark the
+    /// junk is moored and the kites roost, and by day the kites are always
+    /// up, so the window is never empty of life.
+    #[test]
+    fn the_junk_and_the_kites_are_out_by_day_only() {
+        let (mut days, mut nights) = (0, 0);
+        for ms in day_of_samples() {
+            let (junk, _, dark) = drawn(ms, 4, |h, s| h.junk(s));
+            let (kites, _, _) = drawn(ms, 4, |h, s| h.kites(s));
+            if dark >= 0.3 {
+                nights += 1;
+                assert!(drawn_rows(&junk).is_empty(), "a junk out at night, {ms} ms");
+                assert!(drawn_rows(&kites).is_empty(), "kites up at night, {ms} ms");
+            } else {
+                days += 1;
+                assert!(!drawn_rows(&kites).is_empty(), "no kites by day, {ms} ms");
+            }
+        }
+        assert!(days > 0 && nights > 0, "the samples span a day and a night");
+    }
+
+    /// agent-office: by night a plane is only its lights, so its beacon must
+    /// blink, or it reads as a stuck pixel in the sky.
+    #[test]
+    fn a_plane_s_beacon_blinks_by_night() {
+        let night = (0..24u64)
+            .map(|h| h * 3_600_000)
+            .map(|base| base - base % PLANE_PERIOD_MS + 20_000)
+            .find(|&ms| drawn(ms, 4, |_, _| {}).2 >= 0.3)
+            .expect("a night hour");
+        let red = |ms: u64| {
+            let (s, _, _) = drawn(ms, 4, |h, s| h.aircraft(s));
+            s.px.iter().filter(|c| **c == Some(PLANE_RED)).count()
+        };
+        assert!(red(night) > 0, "the beacon on at {night} ms");
+        assert_eq!(red(night + 500), 0, "the beacon off half a second on");
     }
 }

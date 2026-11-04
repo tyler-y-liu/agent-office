@@ -1055,7 +1055,9 @@ fn entry_walk_coordinates_are_continuous() {
 #[test]
 fn desk_approach_cell_is_never_inside_the_blocked_desk() {
     use crate::layout::{Facing, Furniture, OBSTACLE_PAD_PX, furniture_def};
-    let l = layout();
+    // agent-office: two benches' worth, so both of a pod's rows are seated;
+    // the shared fixture's four fill one four-seat bench row.
+    let l = SceneLayout::compute(120, 96, Some(8)).expect("fits");
     // The ONE table `mask::stamp_ground` reads, so this can't drift when the sprite is resized.
     let def = furniture_def(Furniture::Desk);
     let fp = def.footprint.expect("the desk carries a static footprint");

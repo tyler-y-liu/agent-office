@@ -533,6 +533,7 @@ mod tests {
             x: 30,
             w: crate::layout::WINDOW_W,
             idx: 1,
+            open: false,
         };
         let rows = 1..33;
         for d in [1, 4] {

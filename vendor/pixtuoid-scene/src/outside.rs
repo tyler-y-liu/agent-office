@@ -12,7 +12,7 @@ use pixtuoid_core::sprite::format::Density;
 use crate::atmosphere::Moment;
 use crate::celestial::SkyView;
 use crate::glass_weather::GlassWeather;
-use crate::layout::{Bounds, Size, WindowBay, window_frame, window_rows, window_run};
+use crate::layout::{Bounds, Size, WindowBay, window_rows, window_run};
 use crate::skyline::CityStrip;
 use crate::theme::Theme;
 
@@ -67,7 +67,8 @@ impl WindowView {
             for sy in 0..d {
                 let ay = uy * d + sy;
                 for ux in 0..bay.w {
-                    let joinery = window_frame(ux, uy, size);
+                    // agent-office: the rooftop's open sky has only its railing.
+                    let joinery = bay.frame(ux, uy, size.h);
                     for sx in 0..d {
                         let ax = ux * d + sx;
                         px.push((!joinery).then(|| base(origin.cell(ax, ay))));
@@ -440,6 +441,7 @@ impl Outside {
 pub(crate) mod tests {
     use super::*;
     use crate::display::pen::test_density;
+    use crate::layout::window_frame;
     use crate::sky::{Sky, Weather};
     use pixtuoid_core::sprite::RgbBuffer;
 
@@ -576,6 +578,7 @@ pub(crate) mod tests {
             x: 5,
             w: crate::layout::WINDOW_W,
             idx: 0,
+            open: false,
         }
     }
 
@@ -893,6 +896,7 @@ pub(crate) mod tests {
                 x,
                 w: crate::layout::WINDOW_W,
                 idx: 0,
+                open: false,
             };
             outside
                 .through(bay)

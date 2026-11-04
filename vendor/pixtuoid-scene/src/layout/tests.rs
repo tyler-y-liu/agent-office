@@ -378,11 +378,16 @@ fn desk_is_walk_behind_the_monitor() {
 
 #[test]
 fn partial_bottom_row_caps_mid_fill_when_agents_run_out() {
-    // Sizes chosen empirically: each has a 2-desk partial bottom row whose first
-    // desk appears at num_agents = cap-1 and second at cap, so cap-1 breaks the
-    // `'partial_y` loop MID-ROW. A smaller num_agents caps in the earlier full-pod
-    // phase instead and never reaches it.
-    for (w, h, cap) in [(88u16, 100u16, 6usize), (88, 125, 8), (88, 160, 10)] {
+    // Sizes chosen empirically: each has a `seats`-desk partial bottom row whose
+    // last desk appears at num_agents = cap, so cap-1 breaks the `'partial_y`
+    // loop MID-ROW. A smaller num_agents caps in the earlier full-pod phase
+    // instead and never reaches it. agent-office: re-picked for four-seat
+    // benches, the row's seat count now per size.
+    for (w, h, cap, seats) in [
+        (88u16, 100u16, 9usize, 3usize),
+        (100, 90, 12, 4),
+        (88, 150, 15, 3),
+    ] {
         let full = SceneLayout::compute_with_seed(w, h, Some(TEST_DEFAULT_DESKS), 0).expect("fits");
         assert_eq!(
             full.home_desks.len(),
@@ -410,12 +415,12 @@ fn partial_bottom_row_caps_mid_fill_when_agents_run_out() {
         }
         assert_eq!(
             band_at(cap),
-            2,
-            "{w}x{h}: partial bottom row seats 2 at cap"
+            seats,
+            "{w}x{h}: partial bottom row seats {seats} at cap"
         );
         assert_eq!(
             band_at(cap - 1),
-            1,
+            seats - 1,
             "{w}x{h}: cap-1 leaves the partial row half-filled (break mid-row)"
         );
     }
@@ -984,6 +989,7 @@ fn a_room_too_short_for_the_rack_drops_it() {
             height: 4,
         },
         trio: None,
+        style: crate::layout::RoomStyle::Office,
     };
     assert_eq!(room.coat_rack_pos(), None);
 }
@@ -1019,16 +1025,26 @@ fn desk_columns_stay_on_one_lattice_and_never_shift_with_width() {
     use std::collections::BTreeSet;
     let stride_x = POD_COLS * DESK_W + (POD_COLS - 1) * INTRA_POD_GAP_X + INTER_POD_AISLE_X;
     let mut prev: BTreeSet<u16> = BTreeSet::new();
+    let mut roof = None;
     for w in (140..=260u16).step_by(4) {
         let Some(l) = SceneLayout::compute(w, 160, Some(64)) else {
             continue;
         };
+        // agent-office: the rooftop opening takes the east end's desks, on
+        // purpose; between openings widening still only adds columns.
+        let now = l.rooftop().map(|r| r.bounds.x);
+        if now.is_some() != roof.is_some() {
+            prev.clear();
+        }
+        roof = now;
         let origin = l.cubicle_band.x + INTER_POD_AISLE_X / 2;
         let offs: BTreeSet<u16> = l.home_desks.iter().map(|d| d.at.x - origin).collect();
         for &off in &offs {
             let in_pod = off % stride_x;
+            // agent-office: any of a bench's POD_COLS seats, not just two.
+            let seat = DESK_W + INTRA_POD_GAP_X;
             assert!(
-                in_pod == 0 || in_pod == DESK_W + INTRA_POD_GAP_X,
+                in_pod.is_multiple_of(seat) && in_pod / seat < POD_COLS,
                 "{w}x160: column offset {off} is off the pod lattice (in_pod {in_pod})"
             );
         }
@@ -1128,6 +1144,7 @@ fn pantry_and_meeting_procedural_rects_match_the_painted_geometry() {
             height: 40,
         },
         trio: None,
+        style: crate::layout::RoomStyle::Office,
     };
     assert_eq!(
         meeting.doormat_rect(),
@@ -1161,6 +1178,7 @@ fn pantry_and_meeting_procedural_rects_match_the_painted_geometry() {
             height: 40,
         },
         trio: None,
+        style: crate::layout::RoomStyle::Office,
     };
     assert_eq!(tiny_meeting.doormat_rect(), None);
 }
@@ -1177,6 +1195,7 @@ fn sofa_east_drain_edge_reads_the_placed_sofa_and_is_none_when_bare() {
     let room = MeetingRoom {
         bounds,
         trio: Some(trio),
+        style: crate::layout::RoomStyle::Office,
     };
     // place_trio centres the sofa on the room's mid-column.
     assert_eq!(trio.sofas[0].x, bounds.x + bounds.width / 2);
@@ -1193,7 +1212,11 @@ fn sofa_east_drain_edge_reads_the_placed_sofa_and_is_none_when_bare() {
         ))
     );
 
-    let bare = MeetingRoom { bounds, trio: None };
+    let bare = MeetingRoom {
+        bounds,
+        trio: None,
+        style: crate::layout::RoomStyle::Office,
+    };
     assert_eq!(bare.sofa_east_drain_edge(), None);
 }
 
@@ -1287,4 +1310,86 @@ fn waypoint_depth_baseline_is_its_grounds_south_row() {
             "{kind:?}: sorts on the row it stands on"
         );
     }
+}
+
+/// agent-office: the rooftop takes the east end only where the office is
+/// wide enough to give it up: a narrow window keeps every desk it had, and a
+/// wide one still seats a whole bench west of the open air.
+#[test]
+fn the_rooftop_opens_only_on_a_wide_office() {
+    for seed in 0..5 {
+        let narrow = SceneLayout::compute_with_seed(180, 160, None, seed).expect("fits");
+        assert!(narrow.rooftop().is_none(), "seed {seed}: a rooftop at 180");
+        let wide = SceneLayout::compute_with_seed(256, 180, None, seed).expect("fits");
+        let roof = wide.rooftop().expect("a rooftop at 256").bounds;
+        assert_eq!(roof.x + roof.width, wide.buf_w, "seed {seed}: at the east end");
+        let band = wide.cubicle_band;
+        assert!(band.x + band.width < roof.x, "seed {seed}: desks on the roof");
+        assert!(
+            wide.home_desks.iter().all(|d| d.at.x < roof.x),
+            "seed {seed}: a desk past the rooftop's edge"
+        );
+        assert!(
+            wide.corridor.x + wide.corridor.width <= roof.x,
+            "seed {seed}: the runner laid out on the roof"
+        );
+    }
+}
+
+/// agent-office: idle agents go out to the rooftop only if its stools are
+/// lounge seats they pick, so it must seat some, all its own.
+#[test]
+fn the_rooftop_seats_idle_agents() {
+    let l = SceneLayout::compute_with_seed(256, 180, None, 0).expect("fits");
+    let room = l
+        .meeting_rooms
+        .iter()
+        .position(|r| r.style == RoomStyle::Rooftop)
+        .expect("a rooftop");
+    let seats: Vec<_> = l
+        .waypoints
+        .iter()
+        .filter(|w| w.room_id == Some(room))
+        .collect();
+    assert!(!seats.is_empty(), "the rooftop seats nobody");
+    let roof = l.meeting_rooms[room].bounds;
+    for w in seats {
+        assert!(
+            matches!(
+                w.kind,
+                WaypointKind::MeetingSofa | WaypointKind::MeetingChair
+            ),
+            "{:?} is not a lounge seat",
+            w.kind
+        );
+        let on = (roof.x..roof.x + roof.width).contains(&w.pos.x)
+            && (roof.y..roof.y + roof.height).contains(&w.pos.y);
+        assert!(on, "{:?} off the roof", w.pos);
+    }
+}
+
+/// agent-office: over the rooftop the north wall is open sky: no post, frame,
+/// mullion or transom across it, only the railing along its foot.
+#[test]
+fn the_rooftop_is_open_to_the_sky() {
+    let l = SceneLayout::compute_with_seed(256, 180, None, 0).expect("fits");
+    let roof = l.rooftop().expect("a rooftop").bounds;
+    assert!(
+        l.window_posts().all(|p| p.start <= roof.x),
+        "a window post stands out over the rooftop"
+    );
+    let open: Vec<_> = l.window_bays().filter(|b| b.open).collect();
+    assert_eq!(open.len(), 1, "one stretch of sky");
+    let rows = crate::layout::window_rows(l.wall_band_h());
+    let (top, h) = (rows.start, rows.end - rows.start);
+    let sky = open[0];
+    for dy in 0..h * 2 / 3 {
+        for x in sky.span() {
+            assert!(l.glass_at(x, top + dy), "joinery at ({x}, {}) over the roof", top + dy);
+        }
+    }
+    assert!(
+        !l.glass_at(sky.x + 1, rows.end - 1),
+        "no railing along the rooftop's foot"
+    );
 }

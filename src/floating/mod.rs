@@ -21,6 +21,7 @@ use pixtuoid_scene::floor::{FloorInputs, FloorMeta, OfficeSession, PetInputs};
 use pixtuoid_scene::layout::{Bounds, Size};
 use pixtuoid_scene::look::{Dim, Picture, Place, RenderInputs, WorldText};
 use pixtuoid_scene::pack::OfficeArt;
+use pixtuoid_scene::pet::{Pet, PetKind};
 use pixtuoid_scene::render_scale::PixelFit;
 use pixtuoid_scene::sky::WeatherPolicy;
 use pixtuoid_scene::theme::Theme;
@@ -139,6 +140,8 @@ struct Office {
     session: OfficeSession,
     /// The office size the desk capacities were last published for.
     caps_size: Option<Size>,
+    /// The shop cat that wanders every floor, as a cha chaan teng keeps one.
+    pets: Vec<Pet>,
 }
 
 impl Floors for Office {
@@ -331,6 +334,10 @@ impl Floating<'_> {
             office: Office {
                 session: OfficeSession::new(Arc::clone(&self.pack)),
                 caps_size: None,
+                pets: vec![Pet {
+                    kind: PetKind::Cat,
+                    name: "店长".to_string(),
+                }],
             },
             on_top: true,
             cursor: PhysicalPosition::default(),
@@ -492,7 +499,7 @@ impl Win {
                 debug_walkable: false,
                 dim: Dim::NONE,
             },
-            &[],
+            &self.office.pets,
             theme.surface.bg_fallback,
         );
         let picture = self.office.session.picture()?;
