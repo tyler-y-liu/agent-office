@@ -636,14 +636,26 @@ fn paint_cells(
     g: Grid,
 ) {
     let baseline = i64::from((g.row_h - g.px) / 2) + i64::from(faces.ascent(g.px));
+    // Every background first: a wide character's glyph spans the next cell,
+    // whose fill would otherwise cut it in half.
+    // A wide character's background covers both its cells: ratatui leaves
+    // the second unstyled.
+    for y in 0..cells.area.height {
+        for x in 0..cells.area.width {
+            let cell = &cells[(x, y)];
+            if let Color::Rgb(r, gr, b) = cell.bg {
+                let px = i64::from(origin.0 + u32::from(x) * g.cell_w);
+                let py = i64::from(origin.1 + u32::from(y) * g.row_h);
+                let span = Faces::cells(cell.symbol()).max(1);
+                canvas.fill(px, py, g.cell_w * span, g.row_h, rgb(r, gr, b));
+            }
+        }
+    }
     for y in 0..cells.area.height {
         for x in 0..cells.area.width {
             let cell = &cells[(x, y)];
             let px = i64::from(origin.0 + u32::from(x) * g.cell_w);
             let py = i64::from(origin.1 + u32::from(y) * g.row_h);
-            if let Color::Rgb(r, gr, b) = cell.bg {
-                canvas.fill(px, py, g.cell_w, g.row_h, rgb(r, gr, b));
-            }
             let sym = cell.symbol();
             if sym.trim().is_empty() {
                 continue;
@@ -774,6 +786,8 @@ pub(crate) struct Tag {
 
 /// Rows over its badge a task label may climb to find room.
 const LABEL_TIERS: i64 = 2;
+/// Tiers a badge may step up off a neighbour's.
+const BADGE_TIERS: usize = 3;
 
 /// Points a badge's name and a task label are set in.
 const NAME_PT: f64 = 10.0;
@@ -831,7 +845,19 @@ fn place_tags(
             }
         })
         .collect();
-    let mut taken: Vec<Area> = tags.iter().map(|t| t.badge).collect();
+    // A badge that would cover a neighbour's (sitters side by side on a
+    // sofa) steps up a tier over its own figure, so every name reads.
+    let mut taken: Vec<Area> = Vec::with_capacity(tags.len());
+    for t in &mut tags {
+        let step = i64::from(t.badge.h + pad);
+        for _ in 0..BADGE_TIERS {
+            if !taken.iter().any(|o| o.meets(&t.badge)) || t.badge.y - step < 0 {
+                break;
+            }
+            t.badge.y -= step;
+        }
+        taken.push(t.badge);
+    }
     for t in &mut tags {
         let Some(task) = &t.task else { continue };
         let w = Faces::cells(task) * faces.cell_w(task_px) + 2 * pad;

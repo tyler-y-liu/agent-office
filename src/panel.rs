@@ -24,6 +24,8 @@ const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
 const WORK: Color = Color::Rgb(0x7d, 0xcf, 0xff);
 const STUCK: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);
+/// Text on a coloured chip or avatar.
+const CHIP_INK: Color = Color::Rgb(0x16, 0x18, 0x1d);
 
 #[derive(Debug, Default)]
 pub struct PanelState {
@@ -153,6 +155,15 @@ fn group_color(g: Group) -> Color {
     }
 }
 
+/// The first letter of the repository a label names (`cc·repo`), as an
+/// avatar shows it.
+fn avatar_initial(label: &str) -> char {
+    let repo = label.split_once('·').map_or(label, |(_, r)| r);
+    repo.chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or('?', |c| c.to_uppercase().next().unwrap_or(c))
+}
+
 fn rgb(c: Rgb) -> Color {
     Color::Rgb(c.r, c.g, c.b)
 }
@@ -259,22 +270,37 @@ fn card(
     };
     let pad = pad.as_str();
     let body_w = w.saturating_sub(pad.len() as u16);
-    let marker = ink.map_or(TEXT, rgb);
+    let marker = ink.map_or(DIM, rgb);
     let (st, st_color) = status(slot, view);
     let name = match view.and_then(|v| v.agent_type.as_deref()) {
         Some(t) if depth > 0 && !slot.label.contains(t) => format!("{t} {}", &*slot.label),
         _ => slot.label.to_string(),
     };
-    let name_w = w.saturating_sub(indent.chars().count() as u16 + 2 + crate::text::cells(&st) + 1);
+    let chip = format!(" {st} ");
+    let avatar = format!(" {} ", avatar_initial(&slot.label));
+    let name_w = w.saturating_sub(
+        indent.chars().count() as u16
+            + crate::text::cells(&avatar)
+            + 1
+            + crate::text::cells(&chip)
+            + 1,
+    );
     let mut lines = vec![Line::from(vec![
         Span::raw(indent.clone()),
-        Span::styled("● ", Style::default().fg(marker)),
+        Span::styled(
+            avatar,
+            Style::default()
+                .bg(marker)
+                .fg(CHIP_INK)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
         Span::styled(
             truncate_cells(&name, name_w),
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(st, Style::default().fg(st_color)),
+        Span::styled(chip, Style::default().bg(st_color).fg(CHIP_INK)),
     ])];
     let task = view.and_then(|v| v.line.clone());
     let summarized = view.is_some_and(|v| v.summarized);
@@ -359,6 +385,7 @@ pub fn render(
 ) -> Vec<(u16, AgentId)> {
     let now = SystemTime::now();
     let order = order(scene, views, now);
+    let hues = pixtuoid_scene::badge::repo_hues(scene.agents.values());
     let waiting = order
         .iter()
         .filter(|(id, _)| {
@@ -405,11 +432,13 @@ pub fn render(
         .filter_map(|(id, depth)| {
             let slot = scene.agents.get(id)?;
             let sel = state.selected == Some(*id);
+            // The repository's colour, as its sitters' badges wear it in
+            // the office.
             let mut lines = card(
                 slot,
                 *depth,
                 views.get(id),
-                inks.get(id).copied(),
+                pixtuoid_scene::badge::repo_hue(slot, &hues).or_else(|| inks.get(id).copied()),
                 sel && state.expanded,
                 inner.width,
             );
@@ -656,6 +685,37 @@ mod tests {
             Group::Idle,
             "idle 15 min+ is up on the rooftop"
         );
+    }
+
+    /// A card leads with its repository's initial on the repository's colour
+    /// (the colour its sitters' badges wear) and ends on its status as a chip
+    /// in the status's colour, so a glance down the panel reads project and
+    /// state without reading words.
+    #[test]
+    fn a_card_wears_its_repo_and_its_status() {
+        assert_eq!(avatar_initial("cc·agent-office"), 'A');
+        assert_eq!(avatar_initial("cc·_dotfiles"), 'D');
+        assert_eq!(avatar_initial(""), '?');
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::RequiresAction { reason: None };
+        let ink = Rgb { r: 1, g: 2, b: 3 };
+        let lines = card(slot, 0, None, Some(ink), false, 40);
+        let first = &lines[0].spans;
+        let avatar = first
+            .iter()
+            .find(|s| s.style.bg == Some(rgb(ink)))
+            .expect("an avatar");
+        assert_eq!(
+            avatar.content.trim(),
+            avatar_initial(&slot.label).to_string()
+        );
+        let chip = first.last().expect("a chip");
+        assert_eq!(chip.style.bg, Some(WAIT), "the status on its colour");
+        assert!(chip.content.contains("等你确认"));
     }
 
     #[test]

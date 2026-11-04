@@ -219,9 +219,11 @@ pub fn footer(
         ("b", labels),
         ("[ ]", "换楼层"),
     ];
+    // Each key on a keycap, its action beside it.
+    let cap = key.bg(Color::Rgb(0x3b, 0x40, 0x4c));
     for (k, what) in base.iter().chain(extra).chain(&[("q", "退出")]) {
-        spans.push(Span::styled(format!(" {k} "), key));
-        spans.push(Span::styled(format!("{what} "), dim));
+        spans.push(Span::styled(format!(" {k} "), cap));
+        spans.push(Span::styled(format!(" {what}  "), dim));
     }
     let right = format!(
         "F{}/{}  {} ",
