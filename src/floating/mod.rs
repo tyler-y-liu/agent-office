@@ -780,6 +780,9 @@ fn badge_run(b: &Badge) -> TextRun {
 pub(crate) struct Tag {
     agent: AgentId,
     badge: Area,
+    /// The window row its figure's top stands at, whichever tier its badge
+    /// stepped up to.
+    figure_top: i64,
     label: Option<Area>,
     plate: u32,
     marker: u32,
@@ -842,6 +845,7 @@ fn place_tags(
                     w,
                     h,
                 },
+                figure_top: foot + i64::from(LABEL_GAP) * i64::from(u),
                 label: None,
                 plate: to_u32(b.plate),
                 marker: to_u32(b.marker),
@@ -1023,7 +1027,7 @@ fn paint_stuck(
     for t in tags.iter().filter(|t| stuck.contains(&t.agent)) {
         let b = t.badge;
         let cx = b.x + i64::from(b.w / 2);
-        let top = b.y + i64::from(b.h) + i64::from(LABEL_GAP) * u;
+        let top = t.figure_top;
         let half_h = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * u / 2;
         let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * u * 3 / 4;
         let dot = (u / 2).max(1) as u32;
