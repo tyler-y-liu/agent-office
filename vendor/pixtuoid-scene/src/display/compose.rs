@@ -177,6 +177,16 @@ pub(crate) fn compose_at<'a>(
     let ambient = crate::display::light::Ambient::of(&moment.look);
     let (mut collected, mut host_text) = collect_pieces(frame, office, moment, outside);
     host_text.signs = TextRun::signs(board, office.layout, floor, theme);
+    // agent-office: each bench's repository plate, from this floor's sitters.
+    let here: Vec<_> = frame
+        .agents
+        .iter()
+        .filter(|a| a.floor_idx == floor.floor_idx)
+        .cloned()
+        .collect();
+    host_text
+        .signs
+        .extend(TextRun::bench_plates(office.layout, &here));
     collected.extend(signs(office, &host_text.signs));
     let sorted = depth_sort(
         collected

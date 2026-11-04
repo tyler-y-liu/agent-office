@@ -922,7 +922,7 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
     let mut signs: Vec<Area> = Vec::new();
     // Door signs are set in the readable faces over the upscaled office
     // ([`door_signs`]): the art font has no Chinese.
-    for run in text.signs.iter().filter(|r| r.role != TextRole::DoorSign) {
+    for run in text.signs.iter().filter(|r| !set_readable(r.role)) {
         let rect = run_rect(run, d);
         if signs.iter().any(|s| s.meets(&rect)) {
             continue;
@@ -932,12 +932,19 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
     }
 }
 
-/// A zone's door sign as the window sets it: in Chinese, on its zone's
-/// colour, centred where pixtuoid hangs it.
+/// Whether the window sets a sign of `role` in the readable faces rather
+/// than the art font: the zones' door signs, in Chinese, and the benches'
+/// repository plates, whose names may be.
+fn set_readable(role: TextRole) -> bool {
+    matches!(role, TextRole::DoorSign | TextRole::BenchPlate)
+}
+
+/// A door sign or a bench's plate as the window sets it, on its colour,
+/// centred where pixtuoid hangs it.
 pub(crate) struct DoorSign {
     /// Its plate, in window pixels.
     area: Area,
-    text: &'static str,
+    text: String,
     plate: u32,
     ink: u32,
 }
@@ -970,13 +977,16 @@ fn door_signs(
     let pad = tag_pad(scale_factor);
     text.signs
         .iter()
-        .filter(|r| r.role == TextRole::DoorSign)
+        .filter(|r| set_readable(r.role))
         .filter_map(|r| {
             let text: String = r.spans.iter().map(|s| s.text().to_owned()).collect();
-            let zh = door_sign_zh(&text)?;
+            let zh = match r.role {
+                TextRole::DoorSign => door_sign_zh(&text)?.to_owned(),
+                _ => truncate_cells(&text, PLATE_CELLS),
+            };
             let cx = i64::from(u32::from(r.at.x) * d) * i64::from(u);
             let cy = (i64::from(u32::from(r.at.y) * d) + cell / 2) * i64::from(u);
-            let w = Faces::cells(zh) * faces.cell_w(px) + 2 * pad;
+            let w = Faces::cells(&zh) * faces.cell_w(px) + 2 * pad;
             let h = px + 2 * pad;
             Some(DoorSign {
                 area: Area {
@@ -1001,12 +1011,14 @@ fn paint_door_signs(canvas: &mut Canvas, faces: &mut Faces, signs: &[DoorSign], 
         let Area { x, y, w, h } = s.area;
         canvas.fill(x, y, w, h, s.plate);
         let base = y + i64::from(pad) + i64::from(faces.ascent(px));
-        faces.draw(canvas, x + i64::from(pad), base, s.text, s.ink, px);
+        faces.draw(canvas, x + i64::from(pad), base, &s.text, s.ink, px);
     }
 }
 
 /// Points a door sign is set in.
 const SIGN_PT: f64 = 9.0;
+/// Cells a bench's plate may take.
+const PLATE_CELLS: u16 = 16;
 
 /// Red for a stuck agent, the panel's stuck colour.
 const STUCK_RED: u32 = 0x00f7_768e;
