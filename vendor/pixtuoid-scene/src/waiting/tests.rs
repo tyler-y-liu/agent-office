@@ -1,5 +1,6 @@
 use super::*;
 use crate::character::test_support::make_slot;
+use crate::layout::{Facing, RoomStyle, WaypointKind};
 use crate::pose::{Pose, RouteRig, derive_with_routing};
 use pixtuoid_core::state::GlobalDeskIndex;
 use std::time::Duration;
@@ -31,9 +32,10 @@ fn only_a_long_wait_lines_up() {
     assert!(!lines_up(&working, t0()), "only waiting on you lines up");
 }
 
-/// The line keeps the order agents started waiting in, first nearest the
-/// entrance, each in a place of its own — so which one to answer first reads
-/// off the floor.
+/// The first one waiting on you sits in the guest chair at your desk and the
+/// rest take the waiting area's seats in the order they started waiting,
+/// nearest your office first — so which one to answer first reads off the
+/// floor.
 #[test]
 fn the_line_keeps_waiting_order() {
     let l = office();
@@ -43,22 +45,48 @@ fn the_line_keeps_waiting_order() {
         waiter("third", 2, 25_000),
     ];
     let line = waiting_line(&agents, t0(), &l);
-    let dx = |i: usize| {
-        l.door_threshold
-            .x
-            .abs_diff(line[&agents[i].agent_id].dest.x)
+    let room_of = |i: usize| {
+        let WanderKind::Named { wp_idx, .. } = line[&agents[i].agent_id].kind else {
+            panic!("a seat for {i}: {line:?}")
+        };
+        (
+            l.meeting_rooms[l.waypoints[wp_idx].room_id.expect("a room")].style,
+            l.waypoints[wp_idx],
+        )
     };
-    assert!(
-        dx(1) < dx(0) && dx(0) < dx(2),
-        "first waiter nearest the entrance"
+    let (room, chair) = room_of(1);
+    assert_eq!(room, RoomStyle::Boss, "the first sits at your desk");
+    assert_eq!(
+        (chair.kind, chair.facing),
+        (WaypointKind::MeetingChair, Facing::East)
     );
-    let mut spots: Vec<_> = line.values().map(|t| t.dest).collect();
-    spots.dedup();
-    assert_eq!(spots.len(), 3, "a place each");
+    let ((r2, s2), (r3, s3)) = (room_of(0), room_of(2));
+    assert_eq!((r2, r3), (RoomStyle::Waiting, RoomStyle::Waiting));
+    assert_ne!(s2.pos, s3.pos, "a seat each");
+    assert!(
+        (std::cmp::Reverse(s2.pos.x), s2.pos.y) < (std::cmp::Reverse(s3.pos.x), s3.pos.y),
+        "the earlier waiter nearer your office"
+    );
 }
 
-/// A waiting agent walks to its place and stands there, then once approved
-/// walks back to its desk rather than popping there.
+/// With the seats taken, the rest still line up, standing by the entrance,
+/// rather than go uncounted.
+#[test]
+fn those_past_the_seats_stand_in_line() {
+    let l = office();
+    let agents: Vec<AgentSlot> = (0..16)
+        .map(|i| waiter(&format!("w{i}"), i, 30_000 + i as u64 * 1000))
+        .collect();
+    let line = waiting_line(&agents, t0(), &l);
+    assert_eq!(line.len(), agents.len(), "everyone waiting has a place");
+    assert!(
+        line.values().any(|t| t.kind == WanderKind::Aimless),
+        "some stand once the seats run out"
+    );
+}
+
+/// A waiting agent walks to its seat and sits, then once approved walks back
+/// to its desk rather than popping there.
 #[test]
 fn a_waiter_walks_to_the_line_and_back_when_approved() {
     let l = office();
@@ -72,8 +100,8 @@ fn a_waiter_walks_to_the_line_and_back_when_approved() {
     for _ in 0..600 {
         now += Duration::from_millis(100);
         match derive_with_routing(&slot, now, &l, &mut rig.rctx()) {
-            Some(Pose::AimlessAt { dest }) => {
-                assert_eq!(dest, place);
+            Some(Pose::AtWaypoint { .. }) => {
+                assert_eq!(rig.walks[&slot.agent_id].wander.target.dest, place);
                 arrived = true;
                 break;
             }

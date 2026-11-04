@@ -8,7 +8,7 @@ use std::time::Duration;
 fn team_rooms(l: &SceneLayout) -> usize {
     l.meeting_rooms
         .iter()
-        .filter(|r| r.style != RoomStyle::Rooftop && r.trio.is_some())
+        .filter(|r| r.style == RoomStyle::Office && r.trio.is_some())
         .count()
 }
 

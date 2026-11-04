@@ -375,7 +375,7 @@ pub(crate) struct Doorway {
 }
 
 /// agent-office: where along your office's north wall its door stands.
-const OFFICE_DOOR_PCT: u16 = 25;
+pub(crate) const OFFICE_DOOR_PCT: u16 = 25;
 
 /// Doorway width in ABSOLUTE pixels — NOT a percentage, which shrinks to nothing
 /// on a small terminal and disconnects the room. The cuts are endpoint-inclusive,
@@ -413,8 +413,6 @@ struct WallRequest {
 pub(crate) fn derive_room_walls(
     meeting_rooms: &[MeetingRoom],
     pantry: Option<Bounds>,
-    waiting: Option<Bounds>,
-    office: Option<Bounds>,
     corridor: Bounds,
 ) -> (Vec<WallSegment>, Vec<Doorway>) {
     let mut requests: Vec<WallRequest> = Vec::new();
@@ -440,11 +438,13 @@ pub(crate) fn derive_room_walls(
     // waiting on you sit.
     let mut south: Vec<(Bounds, Option<DoorAt>)> = meeting_rooms
         .iter()
-        .filter(|r| r.style != super::RoomStyle::Rooftop)
-        .map(|r| (r.bounds, Some(DoorAt::Centered)))
+        .filter_map(|r| match r.style {
+            super::RoomStyle::Rooftop => None,
+            super::RoomStyle::Office => Some((r.bounds, Some(DoorAt::Centered))),
+            super::RoomStyle::Waiting => Some((r.bounds, None)),
+            super::RoomStyle::Boss => Some((r.bounds, Some(DoorAt::Pct(OFFICE_DOOR_PCT)))),
+        })
         .chain(pantry.map(|p| (p, Some(DoorAt::Centered))))
-        .chain(waiting.map(|w| (w, None)))
-        .chain(office.map(|o| (o, Some(DoorAt::Pct(OFFICE_DOOR_PCT)))))
         .collect();
     south.sort_by_key(|(b, _)| b.x);
     let east_of: Vec<Option<u16>> = (0..south.len())
@@ -825,7 +825,7 @@ mod tests {
     fn each_south_room_opens_north_and_is_walled_from_the_next() {
         let rooms = [room(0, 20, 40, 30), room(44, 20, 40, 30)];
         let pantry = Some(bounds(88, 20, 40, 30));
-        let (walls, doorways) = derive_room_walls(&rooms, pantry, None, None, CORRIDOR);
+        let (walls, doorways) = derive_room_walls(&rooms, pantry, CORRIDOR);
         let north: Vec<_> = doorways.iter().filter(|d| d.start.y == d.end.y).collect();
         assert_eq!(north.len(), 3, "a north door each: {doorways:?}");
         assert!(north.iter().all(|d| d.start.y == 20));
@@ -852,9 +852,17 @@ mod tests {
     /// agent walks straight in; your office east of it still has its wall.
     #[test]
     fn the_waiting_area_has_no_north_wall() {
-        let waiting = Some(bounds(0, 20, 30, 30));
-        let office = Some(bounds(34, 20, 44, 30));
-        let (walls, doorways) = derive_room_walls(&[], None, waiting, office, CORRIDOR);
+        let rooms = [
+            MeetingRoom {
+                style: crate::layout::RoomStyle::Waiting,
+                ..room(0, 20, 30, 30)
+            },
+            MeetingRoom {
+                style: crate::layout::RoomStyle::Boss,
+                ..room(34, 20, 44, 30)
+            },
+        ];
+        let (walls, doorways) = derive_room_walls(&rooms, None, CORRIDOR);
         assert!(
             h_runs(&walls).iter().all(|&(x0, _)| x0 >= 34 || x0 > 0),
             "{walls:?}"
@@ -878,7 +886,7 @@ mod tests {
             width: 100,
             height: 12,
         };
-        let (_, doorways) = derive_room_walls(&[roof], None, None, None, corridor);
+        let (_, doorways) = derive_room_walls(&[roof], None, corridor);
         let [d] = doorways[..] else {
             panic!("{doorways:?}")
         };
@@ -892,8 +900,7 @@ mod tests {
 
     #[test]
     fn a_door_as_wide_as_its_run_leaves_a_post_at_each_end_on_its_axis() {
-        let (walls, doorways) =
-            derive_room_walls(&[room(0, 20, DOOR_GAP - 1, 30)], None, None, None, CORRIDOR);
+        let (walls, doorways) = derive_room_walls(&[room(0, 20, DOOR_GAP - 1, 30)], None, CORRIDOR);
         let end = DOOR_GAP - 1;
         assert_eq!(
             walls,
@@ -922,7 +929,7 @@ mod tests {
     #[test]
     fn vertical_run_trims_below_crossing_horizontal_wall() {
         let rooms = [room(0, 20, 40, 30), room(44, 20, 40, 30)];
-        let (walls, _) = derive_room_walls(&rooms, None, None, None, CORRIDOR);
+        let (walls, _) = derive_room_walls(&rooms, None, CORRIDOR);
         assert_eq!(
             v_runs(&walls),
             vec![(20 + WALL_THICK_H, 50)],
@@ -932,7 +939,7 @@ mod tests {
 
     #[test]
     fn no_rooms_request_nothing() {
-        let (w, d) = derive_room_walls(&[], None, None, None, CORRIDOR);
+        let (w, d) = derive_room_walls(&[], None, CORRIDOR);
         assert!(w.is_empty() && d.is_empty());
     }
 

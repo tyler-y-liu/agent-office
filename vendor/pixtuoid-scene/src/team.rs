@@ -42,18 +42,47 @@ pub(crate) fn brief_subs<'a>(
     out
 }
 
-/// Whether waypoint `wp_idx` is a seat in a meeting room kept for teams, as
-/// opposed to the rooftop's seats, which are a lounge.
+/// Whether waypoint `wp_idx` is a seat in a meeting room kept for teams.
+#[cfg(test)]
 pub(crate) fn is_team_seat(layout: &SceneLayout, wp_idx: usize) -> bool {
+    room_style(layout, wp_idx) == Some(RoomStyle::Office)
+}
+
+/// Whether waypoint `wp_idx` is a seat kept for a purpose — a team's, or
+/// one waiting on you — rather than the rooftop's, which is a lounge.
+pub(crate) fn is_reserved_seat(layout: &SceneLayout, wp_idx: usize) -> bool {
+    room_style(layout, wp_idx).is_some_and(|s| s != RoomStyle::Rooftop)
+}
+
+fn room_style(layout: &SceneLayout, wp_idx: usize) -> Option<RoomStyle> {
     layout.waypoints[wp_idx]
         .room_id
         .and_then(|r| layout.meeting_rooms.get(r))
-        .is_some_and(|room| room.style != RoomStyle::Rooftop)
+        .map(|room| room.style)
 }
 
-/// The seats of team room `room`, head first: the chair at the table's west
-/// end, then the sofas, then the far chair.
-fn seats_head_first(layout: &SceneLayout, room: usize) -> Vec<usize> {
+/// The walk to seat waypoint `wp_idx` for an agent whose desk is `desk`;
+/// `None` for a seat no side of which can be reached.
+pub(crate) fn seat_target(
+    layout: &SceneLayout,
+    wp_idx: usize,
+    desk: crate::layout::HomeDesk,
+) -> Option<WanderTarget> {
+    let wp = layout.waypoints[wp_idx];
+    let dest = layout.approach_point(wp.kind.furniture(), wp.pos, desk.at, wp.facing);
+    (dest != wp.pos).then(|| WanderTarget {
+        dest,
+        kind: WanderKind::Named {
+            wp_idx,
+            kind: wp.kind,
+            seat: crate::layout::seated_foot_cell(wp.kind.furniture(), wp.pos),
+        },
+    })
+}
+
+/// The seats of room `room`, head first: the chair at the table's west end,
+/// then the sofas, then the far chair.
+pub(crate) fn seats_head_first(layout: &SceneLayout, room: usize) -> Vec<usize> {
     let mut seats: Vec<usize> = (0..layout.waypoints.len())
         .filter(|&i| layout.waypoints[i].room_id == Some(room))
         .collect();
@@ -102,7 +131,7 @@ pub(crate) fn meeting_seats(
     teams.sort_by_key(|(p, _)| (p.created_at, p.agent_id));
 
     let rooms = (0..layout.meeting_rooms.len())
-        .filter(|&r| layout.meeting_rooms[r].style != RoomStyle::Rooftop)
+        .filter(|&r| layout.meeting_rooms[r].style == RoomStyle::Office)
         .map(|r| seats_head_first(layout, r))
         .filter(|seats| !seats.is_empty());
 
@@ -112,22 +141,9 @@ pub(crate) fn meeting_seats(
             let Some(desk) = layout.home_desk(member.desk_index.single_floor_local()) else {
                 continue;
             };
-            let wp = layout.waypoints[wp_idx];
-            let dest = layout.approach_point(wp.kind.furniture(), wp.pos, desk.at, wp.facing);
-            if dest == wp.pos {
-                continue;
+            if let Some(t) = seat_target(layout, wp_idx, desk) {
+                out.insert(member.agent_id, t);
             }
-            out.insert(
-                member.agent_id,
-                WanderTarget {
-                    dest,
-                    kind: WanderKind::Named {
-                        wp_idx,
-                        kind: wp.kind,
-                        seat: crate::layout::seated_foot_cell(wp.kind.furniture(), wp.pos),
-                    },
-                },
-            );
         }
     }
     out

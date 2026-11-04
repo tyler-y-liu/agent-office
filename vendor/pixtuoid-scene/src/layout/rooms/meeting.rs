@@ -65,11 +65,17 @@ pub struct MeetingRoom {
 /// idle agents sit out at, under the open sky, with no glass round it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RoomStyle {
-    /// A glass-walled room west of the divider.
+    /// A glass-walled meeting room in the south row.
     #[default]
     Office,
-    /// The open-air rooftop at the east end, past the elevator.
+    /// The open-air rooftop at the west end, out the office's west wall.
     Rooftop,
+    /// agent-office: the waiting area by your office, open to the corridor:
+    /// those waiting on you sit out the wait on its seats.
+    Waiting,
+    /// agent-office: your office: the first one waiting on you sits in the
+    /// guest chair at its desk.
+    Boss,
 }
 
 /// Horizontal offset of each head-of-table chair from the table centre —
@@ -105,8 +111,8 @@ impl MeetingRoom {
         /// Rows from the room-centre row down to the rack's base.
         const BASE_BELOW_MID: u16 = 3;
         // agent-office: the rooftop keeps to its benches and table; no laundry
-        // pole.
-        if self.style == RoomStyle::Rooftop {
+        // pole. The waiting area has no door to hang coats by.
+        if matches!(self.style, RoomStyle::Rooftop | RoomStyle::Waiting) {
             return None;
         }
         let b = self.bounds;
@@ -184,16 +190,21 @@ impl MeetingRoom {
     /// clear column east of the room's east wall) — `None` on a room too narrow.
     /// The roster's mat also gives way to what stands over it.
     pub(crate) fn doormat_rect(&self) -> Option<Bounds> {
-        // agent-office: the rooftop has no door to lay one by.
-        if self.style == RoomStyle::Rooftop {
+        // agent-office: the rooftop and the waiting area have no door to lay
+        // one by.
+        if matches!(self.style, RoomStyle::Rooftop | RoomStyle::Waiting) {
             return None;
         }
         let b = self.bounds;
         // agent-office: just inside the door in the room's north wall, one
         // floor row south of the wall's face, as the pantry's entry mat lies.
         const MAT: Size = Size { w: 8, h: 4 };
+        let door_x = match self.style {
+            RoomStyle::Boss => b.x + pct(b.width, super::walls::OFFICE_DOOR_PCT),
+            _ => b.x + b.width / 2,
+        };
         (b.width > 10).then(|| Bounds {
-            x: b.x + b.width / 2 - MAT.w / 2,
+            x: door_x.saturating_sub(MAT.w / 2).max(b.x),
             y: b.y + WALL_H.thickness + 1,
             width: MAT.w,
             height: MAT.h,

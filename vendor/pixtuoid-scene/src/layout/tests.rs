@@ -807,10 +807,11 @@ fn fish_tank_sits_east_of_the_lounge_lamp_clear_of_the_elevator() {
 fn meeting_table_ends_are_chair_seats_not_stands() {
     let l = SceneLayout::compute(192, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
     let trio = l.meeting_rooms[0].trio.as_ref().expect("trio");
+    // agent-office: room 0's; the waiting area and your office have theirs.
     let chairs: Vec<_> = l
         .waypoints
         .iter()
-        .filter(|w| w.kind == WaypointKind::MeetingChair)
+        .filter(|w| w.kind == WaypointKind::MeetingChair && w.room_id == Some(0))
         .collect();
     assert_eq!(chairs.len(), 2, "one chair per table end");
     let (west, east) = (

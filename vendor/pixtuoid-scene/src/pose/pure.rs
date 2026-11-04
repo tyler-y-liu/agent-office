@@ -498,12 +498,13 @@ pub(crate) fn resolve_wander_target(
     // where it lands, and standing mid-aisle for minutes reads as lost. The
     // stage's own lounges first; a floor without them (a narrow window drops
     // the rooftop) falls back to any lounge, then any free spot. The meeting
-    // rooms are kept for teams (`crate::team`) until nothing else is left.
+    // rooms are kept for teams (`crate::team`), the waiting area and your
+    // office for those waiting on you, until nothing else is left.
     let free = |fits: &dyn Fn(WaypointKind) -> bool, rooms: bool| {
         (0..n).map(|step| (first + step) % n).find(|i| {
             !claimed.holds(*i)
                 && fits(layout.waypoints[*i].kind)
-                && (rooms || !crate::team::is_team_seat(layout, *i))
+                && (rooms || !crate::team::is_reserved_seat(layout, *i))
         })
     };
     let Some(wp_idx) = free(&|k| stage.hosts(k), false)

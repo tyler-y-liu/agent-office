@@ -194,10 +194,6 @@ struct FloorPlan {
         reason = "agent-office: the door no longer moves for the rooftop"
     )]
     rooftop_slots: u16,
-    /// agent-office: the waiting area in the south row.
-    waiting: Option<Bounds>,
-    /// agent-office: your office, at the south row's east end.
-    office: Option<Bounds>,
 }
 
 /// agent-office: rows of floor kept south of the benches' south desks, for
@@ -423,10 +419,16 @@ impl FloorPlan {
 
         // A room too small for its trio still occupies its slot with `trio: None`, so
         // bounds and furniture can't mis-join.
+        // agent-office: the waiting area and your office seat their sitters
+        // as a meeting room does, on a sofa pair and the chairs at a table's
+        // ends, so they follow the meeting rooms in the Vec.
         let mut meeting_rooms: Vec<MeetingRoom> = south
             .meeting
             .iter()
-            .map(|&mr| {
+            .map(|&mr| (mr, super::RoomStyle::Office))
+            .chain(south.waiting.map(|w| (w, super::RoomStyle::Waiting)))
+            .chain(south.office.map(|o| (o, super::RoomStyle::Boss)))
+            .map(|(mr, style)| {
                 // South of the north wall's rows and a lane under them, so the
                 // door in that wall opens onto floor rather than the north sofa.
                 // And no taller than the trio and a little floor round it, so
@@ -445,7 +447,7 @@ impl FloorPlan {
                     bounds: mr,
                     trio: room_fits_furniture(&inner)
                         .then(|| MeetingRoom::place_trio(inner, false)),
-                    style: super::RoomStyle::Office,
+                    style,
                 }
             })
             .collect();
@@ -469,8 +471,6 @@ impl FloorPlan {
             pantry_counter_size,
             meeting_rooms,
             rooftop_slots,
-            waiting: south.waiting,
-            office: south.office,
         }
     }
 
@@ -528,8 +528,6 @@ pub(super) fn compute_with_seed(
     let (room_walls, doorways) = super::rooms::walls::derive_room_walls(
         &plan.meeting_rooms,
         plan.pantry,
-        plan.waiting,
-        plan.office,
         plan.cubicle_aisle,
     );
 

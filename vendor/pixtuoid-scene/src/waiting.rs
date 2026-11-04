@@ -1,8 +1,9 @@
 //! agent-office: the waiting line. An agent that has been waiting on you
-//! (a permission prompt, a question) for a while leaves its desk and lines up
-//! by the entrance in the order it started waiting, so how many need you, and
-//! which first, reads off the floor. A prompt answered within seconds moves
-//! no one. Approved, it walks back to its desk.
+//! (a permission prompt, a question) for a while leaves its desk and takes a
+//! seat by your office in the order it started waiting: the first in the
+//! guest chair at your desk, the rest in the waiting area outside, so how
+//! many need you, and which first, reads off the floor. A prompt answered
+//! within seconds moves no one. Approved, it walks back to its desk.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -10,7 +11,7 @@ use std::time::SystemTime;
 use pixtuoid_core::AgentId;
 use pixtuoid_core::state::{ActivityState, AgentSlot};
 
-use crate::layout::{CHARACTER_SPRITE_W, Point, SceneLayout};
+use crate::layout::{CHARACTER_SPRITE_W, Facing, Point, RoomStyle, SceneLayout, WaypointKind};
 use crate::walk::{WanderKind, WanderTarget};
 
 /// How long an agent waits on you at its desk before it lines up.
@@ -26,7 +27,29 @@ pub(crate) fn lines_up(slot: &AgentSlot, now: SystemTime) -> bool {
         && crate::anim::elapsed_ms(now, slot.state_started_at) >= LINE_UP_AFTER_MS
 }
 
-/// The places in the line, first first: west from the entrance along the
+/// The seats the line takes, first first: the guest chair at your desk (the
+/// chair facing it from the west), then the waiting area's, nearest your
+/// office first.
+fn seats(layout: &SceneLayout) -> Vec<usize> {
+    let room = |style| layout.meeting_rooms.iter().position(|r| r.style == style);
+    let in_room = |r: Option<usize>| {
+        (0..layout.waypoints.len())
+            .filter(move |&i| r.is_some() && layout.waypoints[i].room_id == r)
+    };
+    let guest = in_room(room(RoomStyle::Boss)).find(|&i| {
+        let w = layout.waypoints[i];
+        w.kind == WaypointKind::MeetingChair && w.facing == Facing::East
+    });
+    let mut waiting: Vec<usize> = in_room(room(RoomStyle::Waiting)).collect();
+    // Nearest your office, east, first; north before south on a sofa.
+    waiting.sort_by_key(|&i| {
+        let p = layout.waypoints[i].pos;
+        (std::cmp::Reverse(p.x), p.y)
+    });
+    guest.into_iter().chain(waiting).collect()
+}
+
+/// Where those the seats run out for stand: west from the entrance along the
 /// north wall, each a walkable cell the floor reaches.
 fn places(layout: &SceneLayout, n: usize) -> Vec<Point> {
     let start = layout.door_threshold;
@@ -65,20 +88,34 @@ pub(crate) fn waiting_line(
         })
         .collect();
     waiting.sort_by_key(|s| (s.state_started_at, s.agent_id));
-    let spots = places(layout, waiting.len());
-    waiting
-        .into_iter()
-        .zip(spots)
-        .map(|(s, dest)| {
-            (
-                s.agent_id,
-                WanderTarget {
-                    dest,
-                    kind: WanderKind::Aimless,
-                },
-            )
-        })
-        .collect()
+    let mut seats = seats(layout).into_iter();
+    let mut out = HashMap::new();
+    let mut standing = Vec::new();
+    for s in waiting {
+        let desk = layout
+            .home_desk(s.desk_index.single_floor_local())
+            .expect("filtered on its desk");
+        match seats
+            .by_ref()
+            .find_map(|i| crate::team::seat_target(layout, i, desk))
+        {
+            Some(t) => {
+                out.insert(s.agent_id, t);
+            }
+            None => standing.push(s.agent_id),
+        }
+    }
+    let spots = places(layout, standing.len());
+    for (id, dest) in standing.into_iter().zip(spots) {
+        out.insert(
+            id,
+            WanderTarget {
+                dest,
+                kind: WanderKind::Aimless,
+            },
+        );
+    }
+    out
 }
 
 #[cfg(test)]
