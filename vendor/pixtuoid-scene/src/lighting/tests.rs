@@ -162,12 +162,13 @@ fn a_spills_bounds_hold_every_row_whichever_way_it_leans() {
                 w: WINDOW_W,
                 top: 10,
                 slant,
+                depth: crate::lighting::SPILL_DEPTH,
             },
             strength: 1.0,
         };
         let ((x0, y0), (x1, y1)) = spill.bounds();
         assert_eq!((y0, y1), (10, 10 + SPILL_DEPTH));
-        let rows: Vec<_> = spill_rows(40, WINDOW_W, slant).collect();
+        let rows: Vec<_> = spill_rows(40, WINDOW_W, slant, SPILL_DEPTH).collect();
         assert!(
             rows.iter()
                 .all(|r| r.start >= i32::from(x0) && r.end <= i32::from(x1))
@@ -336,6 +337,7 @@ fn every_shape() -> [Emitter; 4] {
                 w: WINDOW_W,
                 top: 12,
                 slant: 0.4,
+                depth: crate::lighting::SPILL_DEPTH,
             },
         ),
         lit(
@@ -442,6 +444,7 @@ fn a_lights_peak_is_its_brightest_cell() {
             w: WINDOW_W,
             top: 10,
             slant: 0.3,
+            depth: crate::lighting::SPILL_DEPTH,
         },
         Light::Patch { centre: at(30, 20) },
     ];
@@ -462,4 +465,30 @@ fn a_lights_peak_is_its_brightest_cell() {
             e.peak()
         );
     }
+}
+
+/// agent-office: a low sun throws long shafts across the floor: at the golden
+/// hour's height the window spill reaches the extra rows, and lights a row a
+/// noon spill never does.
+#[test]
+fn a_golden_hour_spill_reaches_further_across_the_floor() {
+    assert_eq!(super::sunset_depth(0.0), SPILL_DEPTH);
+    assert_eq!(
+        super::sunset_depth(1.0),
+        SPILL_DEPTH + super::SUNSET_SPILL_EXTRA
+    );
+    let at = |depth| Emitter {
+        kind: EmitterKind::WindowSpill,
+        light: Light::Spill {
+            x: 40,
+            w: WINDOW_W,
+            top: 10,
+            slant: 0.0,
+            depth,
+        },
+        strength: 1.0,
+    };
+    let row = 10 + SPILL_DEPTH + 2;
+    assert_eq!(at(super::sunset_depth(0.0)).level_at(45, row), None);
+    assert!(at(super::sunset_depth(1.0)).level_at(45, row).is_some());
 }

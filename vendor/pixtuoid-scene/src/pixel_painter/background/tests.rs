@@ -177,6 +177,7 @@ fn short_buffer_clamps_spill_and_window_without_panic() {
             w: WINDOW_W,
             top: top_wall_h,
             slant: 0.0,
+            depth: crate::lighting::SPILL_DEPTH,
         },
         ..spill(0, 0.0)
     };
@@ -1107,6 +1108,7 @@ fn spill(x: u16, slant: f32) -> crate::lighting::Emitter {
             w: WINDOW_W,
             top: 0,
             slant,
+            depth: crate::lighting::SPILL_DEPTH,
         },
         strength: 0.32,
     }

@@ -43,11 +43,29 @@ pub(crate) struct BackdropTones {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Covering {
     Rug { trim: Rgb, accent: Rgb, field: Rgb },
+    #[allow(dead_code, reason = "agent-office: the corridor is laid in terrazzo")]
     Runner { base: Rgb, stripe: Rgb, edge: Rgb },
     /// agent-office: a cha chaan teng's mosaic floor, its colours its own.
     Mosaic,
     /// agent-office: a Hong Kong rooftop's green waterproof paint.
     RooftopPaint,
+    /// agent-office: a zone's own floor, so where an agent is reads off what
+    /// it stands on.
+    Floor(Floor),
+}
+
+/// agent-office: the floor each zone of the office is laid in, its colours
+/// its own under every theme (the hour's light still falls on it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Floor {
+    /// The benches': grey-blue carpet tiles.
+    Carpet,
+    /// The corridor's: terrazzo, chips set in cement.
+    Terrazzo,
+    /// The waiting area's: cream marble slabs, veined.
+    Marble,
+    /// Your office's: rosewood in herringbone.
+    Herringbone,
 }
 
 impl Covering {
@@ -55,7 +73,7 @@ impl Covering {
     /// rather than lies.
     pub(crate) fn of(kind: FixtureKind, theme: &Theme) -> Option<Self> {
         use FixtureKind as K;
-        let (f, o) = (&theme.furniture, &theme.office);
+        let f = &theme.furniture;
         match kind {
             // agent-office: the pantry is a cha chaan teng, tiled.
             K::PantryMat | K::IslandMat => Some(Self::Mosaic),
@@ -64,11 +82,8 @@ impl Covering {
                 accent: f.rug_accent,
                 field: f.rug_field,
             }),
-            K::Runner => Some(Self::Runner {
-                base: o.runner_base,
-                stripe: o.runner_stripe,
-                edge: o.runner_edge,
-            }),
+            // agent-office: the corridor is terrazzo, not a runner.
+            K::Runner => Some(Self::Floor(Floor::Terrazzo)),
             K::Desk(_)
             | K::FilingCabinet(_)
             | K::DeskChair(_)
@@ -95,6 +110,27 @@ impl Covering {
     }
 }
 
+/// agent-office: the floors laid under each zone: the benches' carpet, the
+/// pantry's mosaic, the waiting area's marble and your office's herringbone.
+/// The corridor's terrazzo is its runner's.
+fn zone_floors(layout: &SceneLayout) -> impl Iterator<Item = (Bounds, Covering)> + '_ {
+    use crate::layout::RoomStyle;
+    let rooms = layout.meeting_rooms.iter().filter_map(|r| match r.style {
+        RoomStyle::Waiting => Some((r.bounds, Covering::Floor(Floor::Marble))),
+        RoomStyle::Boss => Some((r.bounds, Covering::Floor(Floor::Herringbone))),
+        RoomStyle::Office | RoomStyle::Rooftop => None,
+    });
+    let benches = Bounds {
+        y: layout.wall_band_h(),
+        height: (layout.cubicle_band.y + layout.cubicle_band.height)
+            .saturating_sub(layout.wall_band_h()),
+        ..layout.cubicle_band
+    };
+    std::iter::once((benches, Covering::Floor(Floor::Carpet)))
+        .chain(layout.pantry.map(|p| (p.bounds, Covering::Mosaic)))
+        .chain(rooms)
+}
+
 impl Backdrop {
     /// `layout`'s backdrop in `theme`'s tones.
     pub(crate) fn of(layout: &SceneLayout, theme: &Theme) -> Self {
@@ -110,11 +146,13 @@ impl Backdrop {
             posts: layout.window_posts().collect(),
             window_rows: crate::layout::window_rows(band_h),
             trim_row: crate::layout::wall_trim_row(band_h),
-            // agent-office: the rooftop's paint first, under everything.
+            // agent-office: the rooftop's paint and each zone's floor first,
+            // under everything.
             coverings: layout
                 .rooftop()
                 .map(|r| (r.bounds, Covering::RooftopPaint))
                 .into_iter()
+                .chain(zone_floors(layout))
                 .chain(
                     layout
                         .fixtures()
@@ -128,5 +166,67 @@ impl Backdrop {
                 wall_trim: s.wall_trim,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::RoomStyle;
+
+    /// agent-office: each zone is laid in a floor of its own, so where an
+    /// agent is — at the benches, in the corridor, the pantry, the waiting
+    /// area or your office — reads off what it stands on.
+    #[test]
+    fn each_zone_has_its_own_floor() {
+        let l = SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+        let b = Backdrop::of(&l, &crate::theme::NORMAL);
+        let floor_at = |bounds: Bounds| {
+            b.coverings
+                .iter()
+                .find(|(at, c)| *at == bounds && !matches!(c, Covering::Rug { .. }))
+                .map(|(_, c)| *c)
+        };
+        let room = |style| {
+            l.meeting_rooms
+                .iter()
+                .find(|r| r.style == style)
+                .expect("the room")
+                .bounds
+        };
+        assert_eq!(
+            floor_at(room(RoomStyle::Waiting)),
+            Some(Covering::Floor(Floor::Marble))
+        );
+        assert_eq!(
+            floor_at(room(RoomStyle::Boss)),
+            Some(Covering::Floor(Floor::Herringbone))
+        );
+        assert_eq!(
+            floor_at(room(RoomStyle::Rooftop)),
+            Some(Covering::RooftopPaint)
+        );
+        assert_eq!(
+            floor_at(l.pantry.expect("a pantry").bounds),
+            Some(Covering::Mosaic)
+        );
+        assert!(
+            b.coverings
+                .iter()
+                .any(|(_, c)| *c == Covering::Floor(Floor::Terrazzo)),
+            "the corridor's terrazzo"
+        );
+        let carpet = b
+            .coverings
+            .iter()
+            .find(|(_, c)| *c == Covering::Floor(Floor::Carpet))
+            .expect("the benches' carpet")
+            .0;
+        assert!(
+            l.home_desks
+                .iter()
+                .all(|d| carpet.x <= d.at.x && d.at.y < carpet.y + carpet.height),
+            "every desk stands on the carpet"
+        );
     }
 }

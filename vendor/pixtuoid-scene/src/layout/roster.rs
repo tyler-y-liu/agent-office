@@ -552,8 +552,9 @@ impl SceneLayout {
             .chain(desk_fixtures(home_desks.iter().map(|d| d.at), *buf_h))
             .chain(rooms.clone().filter_map(move |(room, r, trio)| {
                 // agent-office: the rooftop's stools stand on its painted
-                // concrete, not a rug.
-                if r.style == super::RoomStyle::Rooftop {
+                // concrete, the waiting area's seats on its marble and your
+                // office's on its herringbone, not a rug.
+                if r.style != super::RoomStyle::Office {
                     return None;
                 }
                 // Off the corridor runner a south room's floor runs into.

@@ -197,7 +197,15 @@ fn pieces(l: &SceneLayout) -> Vec<Piece> {
                 let in_meeting = l
                     .meeting_room_bounds(0)
                     .is_some_and(|mr| contains_point(mr, pos));
-                let container = if in_meeting {
+                // agent-office: the rooftop's own pots.
+                let on_roof = l
+                    .meeting_rooms
+                    .iter()
+                    .position(|r| r.style == super::RoomStyle::Rooftop)
+                    .filter(|&r| contains_point(l.meeting_rooms[r].bounds, pos));
+                let container = if let Some(roof) = on_roof {
+                    Container::MeetingRoom(roof)
+                } else if in_meeting {
                     Container::MeetingRoom(0)
                 } else if contains_point(l.cubicle_aisle, pos) {
                     Container::Aisle

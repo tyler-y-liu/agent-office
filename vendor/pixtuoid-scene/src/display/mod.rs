@@ -15,7 +15,7 @@ pub(crate) mod pen;
 pub mod text;
 
 pub use crate::creatures::GatewayCard;
-pub(crate) use backdrop::{Backdrop, Covering};
+pub(crate) use backdrop::{Backdrop, Covering, Floor};
 pub use compose::{Office, Showing};
 pub(crate) use compose::{PLATE_PAD, compose, desk_span, face_rows, run_rect};
 pub(crate) use hover::Hover;

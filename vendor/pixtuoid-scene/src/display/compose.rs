@@ -361,13 +361,31 @@ fn lights(
         .chain(std::iter::once(&lights.neon))
         .map(|&emitter| crate::display::light::ViewInputs {
             emitter,
-            tint: crate::display::light::tint_of(emitter.kind, theme, frame.neon),
+            // agent-office: a low sun's shafts glow orange.
+            tint: crate::display::light::tint_of(emitter.kind, theme, frame.neon).map(|t| {
+                if emitter.kind == crate::lighting::EmitterKind::WindowSpill {
+                    t.mix(
+                        SUNSET_SHAFT,
+                        crate::lighting::golden_share(moment.look.golden_hour),
+                    )
+                } else {
+                    t
+                }
+            }),
             ambient,
             pen,
             size: (layout.buf_w, layout.buf_h),
         });
     cache.resolve(inputs)
 }
+
+/// agent-office: the colour a window's light takes at the golden hour's
+/// height.
+const SUNSET_SHAFT: pixtuoid_core::sprite::Rgb = pixtuoid_core::sprite::Rgb {
+    r: 255,
+    g: 160,
+    b: 80,
+};
 
 /// The last frame's lights beside what each was resolved from, which a frame
 /// resolving the same reuses as [`OutsideCache`](crate::outside::OutsideCache)
@@ -1191,8 +1209,7 @@ fn push_characters(
         scale,
     } = office;
     let pen = Pen::for_pack(scale, pack);
-    let namesakes =
-        crate::badge::Namesakes::of(&frame.agents).with_brief_subs(&frame.agents, now);
+    let namesakes = crate::badge::Namesakes::of(&frame.agents).with_brief_subs(&frame.agents, now);
     let mut carried = Vec::new();
     for c in &frame.characters {
         let agent = &frame.agents[c.agent_idx];

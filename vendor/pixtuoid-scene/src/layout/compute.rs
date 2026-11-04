@@ -674,6 +674,46 @@ pub(super) fn compute_with_seed(
         }
     }
 
+    // agent-office: the rooftop's greenery: a flower planter in each corner
+    // by the railing and a big pot in each south corner. They stand where
+    // they are put or not at all: sliding toward the benches' middle would
+    // carry them through the rooftop's wall.
+    let mut roof_plants: Vec<PlantItem> = Vec::new();
+    if let Some(roof) = plan
+        .meeting_rooms
+        .iter()
+        .find(|r| r.style == super::RoomStyle::Rooftop)
+        .map(|r| r.bounds)
+    {
+        const INSET: u16 = 5;
+        let (west, east) = (
+            roof.x + INSET,
+            (roof.x + roof.width).saturating_sub(INSET + 1),
+        );
+        let (north, south) = (
+            roof.y + INSET,
+            (roof.y + roof.height).saturating_sub(2 * INSET),
+        );
+        for (kind, x, y) in [
+            (PlantKind::Flower, west, north),
+            (PlantKind::Flower, east, north),
+            (PlantKind::Tall, west, south),
+            (PlantKind::Tall, east, south),
+        ] {
+            let v = furniture_def(kind.furniture()).visual;
+            let tl = anchored_top_left(Pivot::Center, Point { x, y }, v.w, v.h);
+            if tl.x > roof.x
+                && tl.x + v.w < roof.x + roof.width
+                && tl.y + v.h <= roof.y + roof.height
+            {
+                roof_plants.push(PlantItem {
+                    kind,
+                    pos: Point { x, y },
+                });
+            }
+        }
+    }
+
     let mut wall_decor = place_wall_decor(&plan, door, &desk_art, &pod_decor);
 
     // The island pushes its 4 slots BEFORE the shelf's — the push order the goldens pin.
@@ -734,6 +774,11 @@ pub(super) fn compute_with_seed(
             floor_seed,
         ) {
             plants.push(settled);
+        }
+    }
+    for p in roof_plants {
+        if plant_spot_clear(p.kind, p.pos, &desk_art, &waypoints, &singleton_rects) {
+            plants.push(p);
         }
     }
 
