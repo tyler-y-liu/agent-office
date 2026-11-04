@@ -188,6 +188,10 @@ pub struct WalkState {
     /// Lifted by a pointer, and walking home after: overrides the wander and
     /// the state's pose until it arrives.
     pub(crate) lifted: Option<Lifted>,
+
+    /// agent-office: out at (or walking to) its team's meeting, on the wander
+    /// timeline's `WalkingOut` / `AtWaypoint`.
+    pub(crate) in_meeting: bool,
 }
 
 /// An agent a pointer lifted.
@@ -224,6 +228,7 @@ impl Default for WalkState {
             },
             walk_path: None,
             lifted: None,
+            in_meeting: false,
         }
     }
 }
@@ -429,6 +434,78 @@ pub(crate) fn advance_wander(
     let (phase, progress) = result;
     WanderFrame {
         phase,
+        progress,
+        dest: walk.wander.target.dest,
+        kind: walk.wander.target.kind,
+        from: walk.wander.from,
+    }
+}
+
+/// agent-office: walk `slot` to its team's meeting seat `seat` and keep it
+/// there, whatever its state: the meeting outranks the desk and the lounges
+/// until the team breaks up. `from` is where it stands now, `None` at its desk.
+#[expect(clippy::too_many_arguments, reason = "mirrors advance_wander's stores")]
+pub(crate) fn advance_meeting(
+    slot: &AgentSlot,
+    now: SystemTime,
+    layout: &SceneLayout,
+    desk: HomeDesk,
+    router: &mut dyn Router,
+    overlay: &OccupancyOverlay,
+    walks: &mut HashMap<AgentId, WalkState>,
+    seat: WanderTarget,
+    from: Option<Point>,
+) -> WanderFrame {
+    let id = slot.agent_id;
+    let walk = walks.entry(id).or_default();
+    let heading = walk.in_meeting
+        && walk.wander.target == seat
+        && matches!(
+            walk.wander.phase,
+            WanderPhase::WalkingOut(_) | WanderPhase::AtWaypoint(_)
+        );
+    if !heading {
+        // From the lounge it sat at, else where it stands, else its desk.
+        let origin = match walk.wander.phase {
+            WanderPhase::AtWaypoint(_) => Some(walk.wander.target),
+            _ => from.map(|dest| WanderTarget {
+                dest,
+                kind: WanderKind::Aimless,
+            }),
+        };
+        let (leg_from, rise) = match origin {
+            Some(o) => (o.dest, o.kind.seat()),
+            None => desk_leg_endpoint(desk, layout),
+        };
+        walk.in_meeting = true;
+        walk.wander.from = origin;
+        walk.wander.target = seat;
+        walk.wander.phase = WanderPhase::WalkingOut(snapshot_leg_profile(
+            router,
+            &layout.walkable,
+            overlay,
+            id,
+            LegPlan {
+                from: leg_from,
+                to: seat.dest,
+                settle: Settle::from_pair(rise, seat.kind.seat()),
+                intent: WalkIntent::WanderOut,
+            },
+        ));
+        walk.wander.phase_started_at = now;
+    }
+    let elapsed = crate::anim::elapsed_ms(now, walk.wander.phase_started_at);
+    let progress = match walk.wander.phase {
+        WanderPhase::WalkingOut(profile) if walk_arrived(&profile, elapsed) => {
+            walk.wander.phase = WanderPhase::AtWaypoint(profile);
+            LegProgress::ZERO
+        }
+        WanderPhase::WalkingOut(profile) => crate::physics::walk_progress(&profile, elapsed),
+        _ => LegProgress::ZERO,
+    };
+    walk.wander.last_advanced_at = walk.wander.last_advanced_at.max(now);
+    WanderFrame {
+        phase: walk.wander.phase,
         progress,
         dest: walk.wander.target.dest,
         kind: walk.wander.target.kind,

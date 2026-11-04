@@ -497,15 +497,18 @@ pub(crate) fn resolve_wander_target(
     // full. agent-office: lounges only, and no aimless cycles — the agent stays
     // where it lands, and standing mid-aisle for minutes reads as lost. The
     // stage's own lounges first; a floor without them (a narrow window drops
-    // the rooftop) falls back to any lounge, then any free spot.
-    let free = |fits: &dyn Fn(WaypointKind) -> bool| {
-        (0..n)
-            .map(|step| (first + step) % n)
-            .find(|i| !claimed.holds(*i) && fits(layout.waypoints[*i].kind))
+    // the rooftop) falls back to any lounge, then any free spot. The meeting
+    // rooms are kept for teams (`crate::team`) until nothing else is left.
+    let free = |fits: &dyn Fn(WaypointKind) -> bool, rooms: bool| {
+        (0..n).map(|step| (first + step) % n).find(|i| {
+            !claimed.holds(*i)
+                && fits(layout.waypoints[*i].kind)
+                && (rooms || !crate::team::is_team_seat(layout, *i))
+        })
     };
-    let Some(wp_idx) = free(&|k| stage.hosts(k))
-        .or_else(|| free(&lounges))
-        .or_else(|| free(&|_| true))
+    let Some(wp_idx) = free(&|k| stage.hosts(k), false)
+        .or_else(|| free(&lounges, false))
+        .or_else(|| free(&|_| true, true))
     else {
         return amble();
     };

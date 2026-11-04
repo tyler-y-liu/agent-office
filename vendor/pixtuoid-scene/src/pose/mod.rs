@@ -14,8 +14,8 @@ use pixtuoid_core::state::AgentSlot;
 
 use crate::physics::{Segment, WalkIntent, WalkProfile, walk_arrived, walk_progress};
 use crate::walk::{
-    LegPlan, Lifted, Settle, WalkLeg, WalkPathSnapshot, WalkState, WanderKind, WanderPhase,
-    advance_wander, snapshot_leg_profile,
+    LegPlan, Lifted, Settle, WalkLeg, WalkPathSnapshot, WalkState, WanderFrame, WanderKind,
+    WanderPhase, WanderTarget, advance_meeting, advance_wander, snapshot_leg_profile,
 };
 use pixtuoid_core::walkable::{OccupancyOverlay, WalkableMask};
 
@@ -56,6 +56,8 @@ pub(crate) struct RouteCtx<'a> {
     /// Whether an idle agent wanders off its desk: an ambient loop, so not at
     /// [`Motion::Still`](crate::anim::Motion::Still).
     pub wanders: bool,
+    /// agent-office: this frame's team meeting seats ([`crate::team`]).
+    pub meetings: &'a HashMap<AgentId, WanderTarget>,
 }
 
 /// Owns the stores a [`RouteCtx`] borrows, so a test threads one value.
@@ -65,6 +67,7 @@ pub(crate) struct RouteRig<R> {
     pub(crate) overlay: OccupancyOverlay,
     pub(crate) history: PoseHistory,
     pub(crate) walks: HashMap<AgentId, WalkState>,
+    pub(crate) meetings: HashMap<AgentId, WanderTarget>,
 }
 
 #[cfg(test)]
@@ -75,6 +78,7 @@ impl<R: Router> RouteRig<R> {
             overlay: OccupancyOverlay::new(),
             history: PoseHistory::new(),
             walks: HashMap::new(),
+            meetings: HashMap::new(),
         }
     }
 
@@ -85,6 +89,7 @@ impl<R: Router> RouteRig<R> {
             history: &mut self.history,
             walks: &mut self.walks,
             wanders: true,
+            meetings: &self.meetings,
         }
     }
 }
@@ -406,6 +411,45 @@ pub(crate) fn derive_with_routing(
         // and causes a double-walk. Fall through to the state-driven pose.
     }
 
+    // agent-office: a team member goes to its meeting whatever its state; one
+    // whose team broke up walks home from the meeting seat, like an agent set
+    // down by a pointer, rather than popping back to its desk.
+    if rctx.wanders
+        && slot.exiting_at.is_none()
+        && let Some(&seat) = rctx.meetings.get(&slot.agent_id)
+    {
+        let anchor = desk_walk_anchor_facing(desk.at, desk.facing);
+        let from = rctx
+            .history
+            .recent(slot.agent_id, HISTORY_RECENT_MS, now)
+            .filter(|p| *p != anchor);
+        let wf = advance_meeting(
+            slot,
+            now,
+            layout,
+            desk,
+            rctx.router,
+            rctx.overlay,
+            rctx.walks,
+            seat,
+            from,
+        );
+        return Some(wander_pose(slot, now, layout, desk, rctx, wf));
+    }
+    if let Some(walk) = rctx.walks.get_mut(&slot.agent_id)
+        && std::mem::take(&mut walk.in_meeting)
+    {
+        let at = rctx
+            .history
+            .recent(slot.agent_id, HISTORY_RECENT_MS, now)
+            .unwrap_or_else(|| walk.wander.target.kind.seat().unwrap_or(walk.wander.target.dest));
+        walk.set_down(at);
+        walk.wander.target.kind = WanderKind::Aimless;
+        if let Some(pose) = lifted_pose(slot, now, layout, desk, rctx) {
+            return Some(pose);
+        }
+    }
+
     // Gates on Idle, NOT `since_spawn >= ENTRY_ANIMATION_MS`: that fixed gate sat a
     // near-desk agent in `idle_pose` for seconds, then snapped it to physics wander.
     let is_idle = matches!(slot.state, pixtuoid_core::state::ActivityState::Idle);
@@ -425,65 +469,7 @@ pub(crate) fn derive_with_routing(
             rctx.walks,
         );
 
-        match wf.phase {
-            WanderPhase::WalkingOut(_) => {
-                let dest = wf.dest;
-                let seat = wf.kind.seat();
-                // agent-office: a pantry → rooftop move leaves the pantry seat.
-                let (from, chair_settle) = match wf.from {
-                    Some(lounge) => (lounge.dest, lounge.kind.seat()),
-                    None => desk_leg_endpoint(desk, layout),
-                };
-                let settle = Settle::from_pair(chair_settle, seat);
-                return Some(route_walking_pose(
-                    slot,
-                    now,
-                    layout,
-                    rctx,
-                    LegPose {
-                        from,
-                        to: dest,
-                        progress: wf.progress,
-                        carrying_coffee: false,
-                    },
-                    settle,
-                ));
-            }
-            WanderPhase::AtWaypoint(_) => {
-                let pose = wf.kind.at_pose(wf.dest);
-                // The RENDERED position, which snap-back/exit read as their origin:
-                // the seat cell for a seat waypoint, else `dest`. Recording `dest`
-                // popped the sprite to the off-side approach cell on frame one.
-                let pt = wf.kind.seat().unwrap_or(wf.dest);
-                rctx.history.record(slot.agent_id, pt, now);
-                return Some(pose);
-            }
-            WanderPhase::WalkingBack(_) => {
-                let carrying_coffee = wf.kind.carries_coffee();
-                let seat = wf.kind.seat();
-                let (snap_target, chair_settle) = desk_leg_endpoint(desk, layout);
-                let settle = Settle::from_pair(seat, chair_settle);
-                return Some(route_walking_pose(
-                    slot,
-                    now,
-                    layout,
-                    rctx,
-                    LegPose {
-                        from: wf.dest,
-                        to: snap_target,
-                        progress: wf.progress,
-                        carrying_coffee,
-                    },
-                    settle,
-                ));
-            }
-            WanderPhase::Seated => {
-                // DIRECTLY, not via `derive_state_only`: that re-runs the STATELESS
-                // `idle_pose`, whose independent timeline returns AtWaypoint at an
-                // unrelated location and teleports the sprite as the clocks drift.
-                return Some(Pose::SeatedIdle);
-            }
-        }
+        return Some(wander_pose(slot, now, layout, desk, rctx, wf));
     }
 
     // Went Running/RequiresAction: drop any exclusive-spot claim, else the frozen
@@ -582,6 +568,75 @@ pub(crate) fn derive_with_routing(
             }
             Some(raw)
         }
+    }
+}
+
+/// The pose for wander frame `wf`: the walk out (from the desk, or from the
+/// lounge `wf.from`), the stay, or the walk back.
+fn wander_pose(
+    slot: &AgentSlot,
+    now: SystemTime,
+    layout: &SceneLayout,
+    desk: HomeDesk,
+    rctx: &mut RouteCtx<'_>,
+    wf: WanderFrame,
+) -> Pose {
+    match wf.phase {
+        WanderPhase::WalkingOut(_) => {
+            let dest = wf.dest;
+            let seat = wf.kind.seat();
+            // agent-office: a pantry → rooftop move leaves the pantry seat.
+            let (from, chair_settle) = match wf.from {
+                Some(lounge) => (lounge.dest, lounge.kind.seat()),
+                None => desk_leg_endpoint(desk, layout),
+            };
+            let settle = Settle::from_pair(chair_settle, seat);
+            route_walking_pose(
+                slot,
+                now,
+                layout,
+                rctx,
+                LegPose {
+                    from,
+                    to: dest,
+                    progress: wf.progress,
+                    carrying_coffee: false,
+                },
+                settle,
+            )
+        }
+        WanderPhase::AtWaypoint(_) => {
+            let pose = wf.kind.at_pose(wf.dest);
+            // The RENDERED position, which snap-back/exit read as their origin:
+            // the seat cell for a seat waypoint, else `dest`. Recording `dest`
+            // popped the sprite to the off-side approach cell on frame one.
+            let pt = wf.kind.seat().unwrap_or(wf.dest);
+            rctx.history.record(slot.agent_id, pt, now);
+            pose
+        }
+        WanderPhase::WalkingBack(_) => {
+            let carrying_coffee = wf.kind.carries_coffee();
+            let seat = wf.kind.seat();
+            let (snap_target, chair_settle) = desk_leg_endpoint(desk, layout);
+            let settle = Settle::from_pair(seat, chair_settle);
+            route_walking_pose(
+                slot,
+                now,
+                layout,
+                rctx,
+                LegPose {
+                    from: wf.dest,
+                    to: snap_target,
+                    progress: wf.progress,
+                    carrying_coffee,
+                },
+                settle,
+            )
+        }
+        // DIRECTLY, not via `derive_state_only`: that re-runs the STATELESS
+        // `idle_pose`, whose independent timeline returns AtWaypoint at an
+        // unrelated location and teleports the sprite as the clocks drift.
+        WanderPhase::Seated => Pose::SeatedIdle,
     }
 }
 

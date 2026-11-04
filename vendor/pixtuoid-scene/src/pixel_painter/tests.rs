@@ -4602,10 +4602,14 @@ fn one_meeting_sofa_still_seats_three_agents_at_once() {
 
     let now0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut scene = SceneState::uniform(64);
+    // agent-office: the meeting rooms seat teams, so one session and its
+    // long-running sub-agents fill the room.
+    let lead = pixtuoid_core::AgentId::from_transcript_path("/p/sofa0.jsonl");
     for i in 0..TEST_DEFAULT_DESKS {
         let id = pixtuoid_core::AgentId::from_transcript_path(&format!("/p/sofa{i}.jsonl"));
         let mut slot = make_slot(id, ActivityState::Idle);
-        let started = now0 - Duration::from_secs(5 + (i as u64 * 11) % 80);
+        slot.parent_id = (i > 0).then_some(lead);
+        let started = now0 - Duration::from_secs(20 + (i as u64 * 11) % 80);
         slot.created_at = started;
         slot.state_started_at = started;
         slot.last_event_at = started;
@@ -4664,10 +4668,14 @@ fn a_meeting_chair_sitter_is_drawn_on_the_seat_not_5px_high() {
         SceneLayout::compute_with_seed(192, 160, Some(TEST_DEFAULT_DESKS), 0).expect("fits");
     let now0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut scene = SceneState::uniform(64);
+    // agent-office: the meeting rooms seat teams, so one session and its
+    // long-running sub-agents fill the room.
+    let lead = pixtuoid_core::AgentId::from_transcript_path("/p/mc0.jsonl");
     for i in 0..TEST_DEFAULT_DESKS {
         let id = pixtuoid_core::AgentId::from_transcript_path(&format!("/p/mc{i}.jsonl"));
         let mut slot = make_slot(id, ActivityState::Idle);
-        let started = now0 - Duration::from_secs(5 + (i as u64 * 11) % 80);
+        slot.parent_id = (i > 0).then_some(lead);
+        let started = now0 - Duration::from_secs(20 + (i as u64 * 11) % 80);
         slot.created_at = started;
         slot.state_started_at = started;
         slot.last_event_at = started;

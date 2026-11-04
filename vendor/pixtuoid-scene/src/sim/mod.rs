@@ -360,6 +360,7 @@ pub(crate) fn sim_step(stores: &mut SimStores<'_>, inputs: SimInputs<'_>) -> Sim
     // resolution below looks the result up instead of re-deriving (a second
     // derive would double the A*). The `exiting_at` filter is INTENTIONALLY
     // absent — an exiting agent's pose is still needed to place its character.
+    let meetings = crate::team::meeting_seats(&agents, now, layout);
     let poses: HashMap<AgentId, Option<Pose>> = agents
         .iter()
         .filter(|a| {
@@ -368,6 +369,13 @@ pub(crate) fn sim_step(stores: &mut SimStores<'_>, inputs: SimInputs<'_>) -> Sim
                 .is_some()
         })
         .map(|a| {
+            // agent-office: a brief sub-agent is a "+N" on its parent's badge,
+            // not a figure (`crate::team::is_brief_sub`).
+            if a.parent_id.is_some_and(|p| scene.agents.contains_key(&p))
+                && crate::team::is_brief_sub(a, now)
+            {
+                return (a.agent_id, None);
+            }
             let p = pose::derive_with_routing(
                 a,
                 now,
@@ -378,6 +386,7 @@ pub(crate) fn sim_step(stores: &mut SimStores<'_>, inputs: SimInputs<'_>) -> Sim
                     history: &mut *stores.history,
                     walks: &mut *stores.walks,
                     wanders: !beat.is_rest(),
+                    meetings: &meetings,
                 },
             );
             (a.agent_id, p)

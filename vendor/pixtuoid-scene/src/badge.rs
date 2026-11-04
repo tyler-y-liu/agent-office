@@ -90,7 +90,10 @@ pub fn badge_ink(text: &str, tone: BadgeTone, theme: &Theme) -> BadgeInk {
 
 /// How many agents wear each label: an agent sharing its label carries its
 /// session's suffix, even where the namesake is not drawn.
-pub(crate) struct Namesakes<'a>(HashMap<&'a str, usize>);
+pub(crate) struct Namesakes<'a>(
+    HashMap<&'a str, usize>,
+    HashMap<pixtuoid_core::AgentId, usize>,
+);
 
 impl<'a> Namesakes<'a> {
     pub(crate) fn of(agents: impl IntoIterator<Item = &'a AgentSlot>) -> Self {
@@ -98,7 +101,18 @@ impl<'a> Namesakes<'a> {
         for agent in agents {
             *counts.entry(&*agent.label).or_insert(0) += 1;
         }
-        Self(counts)
+        Self(counts, HashMap::new())
+    }
+
+    /// agent-office: also mark each parent's brief sub-agents, which are not
+    /// drawn, as "+N" on its badge ([`crate::team::brief_subs`]).
+    pub(crate) fn with_brief_subs(
+        mut self,
+        agents: impl IntoIterator<Item = &'a AgentSlot>,
+        now: std::time::SystemTime,
+    ) -> Self {
+        self.1 = crate::team::brief_subs(agents, now);
+        self
     }
 
     /// `agent`'s badge text, disambiguated and truncated, with no marker.
@@ -112,7 +126,13 @@ impl<'a> Namesakes<'a> {
             std::borrow::Cow::Borrowed(&*agent.label)
         };
         let marker = crate::display::text::cells(BADGE_MARKER.encode_utf8(&mut [0; 4]));
-        truncate_label(&raw, BADGE_CELLS.saturating_sub(marker)).into_owned()
+        // agent-office: the "+N" is kept whole and the name truncated to fit.
+        let team = match self.1.get(&agent.agent_id) {
+            Some(n) => format!(" +{n}"),
+            None => String::new(),
+        };
+        let room = BADGE_CELLS.saturating_sub(marker + crate::display::text::cells(&team));
+        format!("{}{team}", truncate_label(&raw, room))
     }
 }
 
