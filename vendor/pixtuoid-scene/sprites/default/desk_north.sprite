@@ -1,0 +1,19 @@
+# The back-turned desk at 1x: the raised monitor, its casing outlined in
+# grey so it reads against a dark carpet, two lines of dim text on its glass,
+# and a keyboard a row clear of the stand so the two never merge into one
+# dark base.
+# agent-office: recoloured by tools/hk_art.py from pixtuoid's art.
+@frame 0
+@mark cup 11 6
+@mark tower 2 6
+. . . 3 3 3 3 3 3 3 3 . . .
+. . . 3 M M M M M M 3 . . .
+. . . 3 j J J J J j 3 . . .
+ǘ ǘ ǘ 3 j J J j j j 3 ǘ Θ Θ
+Ǘ Ǘ Ǘ Ǘ 4 M M M M 4 Ǘ Ǘ 9 Ǘ
+Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ
+Ǘ Ǘ Ǘ Ǘ k 6 6 6 6 k Ǘ Ǘ Ǘ Ǘ
+Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ
+ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ
+Ǚ Ǜ . . . . . . . . . . Ǜ Ǚ
+Ǚ Ǜ . . . . . . . . . . Ǜ Ǚ

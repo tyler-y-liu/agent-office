@@ -1,0 +1,45 @@
+# Seated in profile, facing east, one arm reaching forward.
+# Bald: the pack's [hairstyles] dress it.
+# agent-office: redrawn by tools/people.py from pixtuoid's art.
+@frame 0
+@mark head.side 16 12
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . . . . . . S S S S S S . . . . . . . . . .
+. . . . . . . . . . . . . . s S S S S S S S S S . . . . . . . .
+. . . . . . . . . . . . . s s S S S S S S S S S S . . . . . . .
+. . . . . . . . . . . . s s s S S S S S S S S S S S . . . . . .
+. . . . . . . . . . . s s s s S S S S S S S S S S S S . . . . .
+. . . . . . . . . . s s s s s S S S S S S S S S S S S S . . . .
+. . . . . . . . . . s s s s s S S S S S S S S S S S S S . . . .
+. . . . . . . . . . s s s s s S S S S S S S S S S S S S . . . .
+. . . . . . . . . s s s s s s S S S S S S S S S S S S S S . . .
+. . . . . . . . . s s s s s s S S S S S S S S S S S S S S . . .
+. . . . . . . . . s s s s s s S S S S S S S S S S S S S S . . .
+. . . . . . . . . s s s s s s S S S S S S S S S S S S S S . . .
+. . . . . . . . . s s s s s s S S S S S S S S S w e S S S . . .
+. . . . . . . . . s s s s s s S S S S S S S S S e e S S S . . .
+. . . . . . . . . . s s s s s S S S S S S S S S e e S S . . . .
+. . . . . . . . . . s s s s s S S S S S S S S S e e S S . . . .
+. . . . . . . . . . s s s s s S S S S S S ǁ ǁ S S S S S . . . .
+. . . . . . . . . . . s s s s S S S S S S S S S S S S . . . . .
+. . . . . . . . . . . . s s s S S S S S S S S S S S . . . . . .
+. . . . . . . . . . . . . s s S S S S S S S S S S . . . . . . .
+. . . . . . . . . . . . . . s S S S S S S S S S . . . . . . . .
+. . . . . . . . . . . . . i i i S S S S S S s . . . . . . . . .
+. . . . . . . . . . . . . i i i i i i s s . . . . . . . . . . .
+. . . . . . . . U U . . . i i i i i i . . . . . . . . . . . . .
+. . . . . . . . U U W B B i i i i i i B B B . . . . . . . . . .
+. . . . . . . . U U W B v v v v v B B v v v . . . . . . . . . .
+. . . . . . . . U U W B v v v v v B B v v v . . . . . . . . . .
+. . . . . . . . . W W B v v v v B B B B B B B B S S S S . . . .
+. . . . . . . . . W W B v v v v B B B B B B B B S S S S . . . .
+. . . . . . . . . W W B B B B B B B B B B B B B S S S S . . . .
+. . . . . . . . . W W B B B B B v v v v v v v v s s s . . . . .
+. . . . . . . . . W W B B B B B B B B v v v . . . . . . . . . .
+. . . . . . . . . W W B B B B B B B B v v v . . . . . . . . . .
+. . . . . . . . . ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( ( . . . .
+. . . . . . . . . P P P P P P P P P P P P P P P P p p p . . . .
+. . . . . . . . . P P P P P P P P P P P P P P P P p p p . . . .
+. . . . . . . . . P P P P P P P P P P P P P P P P p p p . . . .

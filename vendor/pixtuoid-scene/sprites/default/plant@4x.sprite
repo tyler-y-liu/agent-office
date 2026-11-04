@@ -1,0 +1,31 @@
+# A money tree in a red pot.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
+@frame 0
+. . . . . . . . . κ l l l l l κ . . . . . . . .
+. . . . κ κ κ κ κ l l l l l l l κ κ κ κ κ . . .
+. . . κ l l l l l l l l l l l l l l l l l κ . .
+. . κ l l l l l l l l Φ l l l l l l l l l l κ .
+. κ l l l l l l l l l l Ψ l l l l l l l l l l κ
+. κ l l l Φ l l l l l l l l l l l Φ l l l l l κ
+. κ l l l l Ψ l l l l l l L l l l l Ψ l l l l κ
+. κ l l l l l l l l l l l l l l l l l l l l l κ
+. κ l l l l l l l l l l l l l l l l l L l l l κ
+. . κ l l l l l Φ l l l l l Φ l l l l l l l κ .
+. . . κ l l l l l Ψ l l l l l Ψ l l l l l κ . .
+. . . . κ κ l l l l l l l l l l l l l κ κ . . .
+. . . . . . κ l l l L l D l l l L l κ . . . . .
+. . . . . . . κ l l l κ κ d l l l κ . . . . . .
+. . . . . . . . κ κ D κ κ d κ κ κ . . . . . . .
+. . . . . . . . . . κ d D κ . . . . . . . . . .
+. . . . . . . . . . κ d D κ . . . . . . . . . .
+. . . . . . . . . κ D κ κ d κ . . . . . . . . .
+. . . . . κ κ κ κ κ D κ κ d κ κ κ κ κ . . . . .
+. . . . κ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ Ǐ κ . . . .
+. . . . κ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ κ . . . .
+. . . . κ ǎ ǎ ǎ ǎ ǎ Ǐ Ǐ Ǐ Ǐ ǎ ǎ ǎ ǎ ǎ κ . . . .
+. . . . κ ǎ ǎ ǎ ǎ ǎ Ǐ Ǐ Ǐ Ǐ ǎ ǎ ǎ ǎ ǎ κ . . . .
+. . . . κ ǎ ǎ ǎ ǎ ǎ Ǐ Ǐ Ǐ Ǐ ǎ ǎ ǎ ǎ ǎ κ . . . .
+. . . . κ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ κ . . . .
+. . . . κ ǎ N N N N N N N N N N N N ǎ κ . . . .
+. . . . κ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ ǎ κ . . . .
+. . . . . κ κ κ κ κ κ κ κ κ κ κ κ κ κ . . . . .

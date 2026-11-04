@@ -1,0 +1,77 @@
+[package]
+name                   = "pixtuoid-scene"
+description            = "Backend-agnostic render + simulation engine for pixtuoid"
+# Reads ../../site/src/sources.json at runtime, so `cargo test` on the
+# extracted .crate would panic (no workspace tree).
+exclude                = ["tests/site_badge_colors.rs", "tests/readme_chart_palette.rs"]
+version.workspace      = true
+edition.workspace      = true
+# Fusion Pixel 8px, embedded: fonts/
+license                = "MIT AND OFL-1.1"
+repository.workspace   = true
+authors.workspace      = true
+homepage.workspace     = true
+keywords.workspace     = true
+categories.workspace   = true
+
+# `workspace = true` cannot be combined with per-crate lint tables (Cargo
+# rejects the manifest), so this crate's `forbid(unsafe_code)` is a crate-root
+# attribute in src/lib.rs instead.
+[lints]
+workspace = true
+
+[features]
+default        = ["native", "cutaway-assets"]
+# Without it the render engine builds for wasm32 (no tokio/notify): the
+# WebAssembly office hero.
+native         = ["pixtuoid-core/native"]
+# The bundled `@Nx` art and hair dressing, which only a render scale above
+# `RenderScale::ONE` reaches (`densest_frame`, `dress_for`), and the text's
+# Fusion Pixel face. The wasm hero draws only the classic, so building without
+# this keeps those bytes out of the page.
+cutaway-assets = []
+
+[dependencies]
+pixtuoid-core = { path = "../pixtuoid-core", version = "0.21.0", default-features = false }
+pixtuoid-lofi = { workspace = true }
+tracing       = { workspace = true }
+lru           = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+# `clock` gives Local::now() w/ system timezone for the wall clock.
+chrono        = { workspace = true, features = ["clock"] }
+foldhash      = { workspace = true }
+strum         = { workspace = true }
+enum-map      = { workspace = true }
+thiserror     = { workspace = true }
+
+[build-dependencies]
+toml_edit = { workspace = true }
+
+[dev-dependencies]
+# `harness` is dev-only (see core's manifest), so `examples/corpus_check.rs`
+# requests it here rather than in [dependencies].
+pixtuoid-core = { path = "../pixtuoid-core", version = "0.21.0", default-features = false, features = ["harness"] }
+serde_json = { workspace = true }
+proptest   = { workspace = true }
+tempfile   = { workspace = true }
+snapbox    = { workspace = true }
+# tests/model_boundary.rs parses the source.
+syn         = { workspace = true }
+proc-macro2 = { workspace = true }
+# build_support/density_art.rs, which the tests compile too.
+toml_edit  = { workspace = true }
+# Statistical render-path benchmarks (`just bench`). The CodSpeed compat
+# package is a documented passthrough to real criterion when CodSpeed is
+# inactive, so local `cargo bench` behaves as plain criterion; codspeed.yml
+# instruments the same benches in CI. Lean feature set: no plotters/rayon.
+criterion  = { workspace = true }
+
+[[bench]]
+name = "render_frame"
+harness = false
+
+[[example]]
+name = "corpus_check"
+required-features = ["native"]
+test = true

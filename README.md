@@ -1,0 +1,70 @@
+# agent-office
+
+An always-on-top pixel office on Victoria Harbour for your Claude Code sessions: every session is a little worker, with a one-line AI summary of its current task over its head and in the side panel. It flags sessions waiting for your approval or likely stuck, and a double-click jumps back to that session in the Claude desktop app. macOS, Claude Code only; the UI is in Chinese.
+
+![agent-office](docs/screenshot.png)
+
+一个置顶的像素办公室窗口，开在维港边：每个 Claude Code 会话是一个小人，头顶和右侧任务栏写着它**正在做的任务（AI 一句话总结）**。双击小人就能跳回它所在的会话。
+
+- 任务摘要：读每个会话的最新指令、进行中的 todo 和最近的动作，用你配置的 OpenAI 兼容接口总结成不超过 20 字的一句话；子 agent 直接用父 agent 派活时写的 description。
+- 阶段与卡点：按最近的工具调用标出调研 / 写码 / 测试 / 执行 / 派活；连续失败 3 次，或者在工作中却 5 分钟没有新动静（构建、子 agent 这类长调用放宽到 20 分钟），会标红为「可能卡住」。
+- 调度：双击小人或卡片（或选中后按 `o`）在 Claude 桌面 app 里打开那个会话；点任务栏标题（或按 `w`）打开「等你的会话」列表。
+- 维港窗景：海面和倒影、对岸楼群和 ICC、狮子山山脊、天星小轮；每晚 8 点幻彩咏香江激光。天色按香港时间走，与本机时区无关。
+- 室内：茶餐厅一角（面包柜、奶茶桶、马赛克柜台、卡座）、绿白马赛克地砖、两人一张的长桌、发财树 / 富贵竹 / 年桔 / 招财猫；Q 版小人，挂工牌穿帽衫。
+
+## 安装
+
+```bash
+cargo install --path .
+agent-office connect      # 往 ~/.claude/settings.json 加 hooks（先备份），新开的 Claude 会话生效
+agent-office
+```
+
+不接 hooks 也能用，只靠会话记录，但看不到「等你确认」。`agent-office disconnect` 移除 hooks。hooks 指向 `connect` 时这个程序所在的位置，移动或重装到别处后要重新 `connect`。
+
+按键：`↑↓` 选中 · `Enter` 展开（完整指令 + 最近 5 个动作）· `o` 打开会话 · `w` 等你的会话 · `r` 重新总结 · `b` 开关头顶标签 · `[ ]` 换楼层 · `t` 切换置顶 · `q` 退出。鼠标点卡片或小人选中，双击打开会话。
+
+```bash
+agent-office doctor            # 检查会话目录、hooks、socket、摘要接口
+agent-office --shot out.png    # 跑 20 秒后把画面存成 PNG 并退出
+```
+
+## 配置
+
+| 环境变量 | 作用 |
+|---|---|
+| `AGENT_OFFICE_API_BASE` / `AGENT_OFFICE_API_KEY` / `AGENT_OFFICE_MODEL` | 摘要用的 OpenAI 兼容接口（`<base>/v1/chat/completions`）。环境变量没有时从 `~/.config/agent-office/env`（`KEY=value` 每行一个）读；三个都配了才开启摘要 |
+| `AGENT_OFFICE_SUMMARY=off` | 不发任何内容出去，任务栏显示原始指令 |
+| `AGENT_OFFICE_SOCKET` | hook socket 路径（默认在临时目录下的 `agent-office-$USER/`） |
+| `AGENT_OFFICE_DEBUG=<file>` | 把每次摘要结果追加写到该文件 |
+| `AGENT_OFFICE_THEME` | 换主题：默认 `harbour`，另有 `paper` 和 pixtuoid 自带的几套 |
+| `AGENT_OFFICE_UTC_OFFSET` | 窗外天色用的时区，秒（默认 `28800`，香港） |
+
+开启摘要时，会话的指令文本、todo 和最近动作会发到你配置的接口。没配就不发任何内容。挑一个回得快、不带长推理的模型。
+
+## 限制
+
+- 只在 macOS 上用过。
+- 跳转只支持 Claude 桌面 app 里的会话；终端里跑的会话会在页脚提示跳不过去。
+- 只显示 Claude Code 会话。
+- 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
+
+## 美术与改动
+
+`vendor/` 里是 pixtuoid 的 `pixtuoid-core` / `pixtuoid-scene` 0.21.0（MIT），改成了 agent-office 自己的样子，凡是改过的地方都标了 `agent-office`：
+
+- `tools/people.py`：Q 版头、工牌、帽衫、球鞋，以及 9 种发型；
+- `tools/hk_art.py`：茶餐厅、吉祥物和植物、桌子和文件柜的配色；
+- `vendor/pixtuoid-scene/src/skyline/harbour.rs`：维港窗景；
+- `theme/harbour.rs` / `theme/paper.rs`：两套主题；
+- 布局（两人长桌）、马赛克地砖、招牌文字、香港时钟，改在 scene 源码里。
+
+两个脚本读的是 cargo registry 里的上游原版 sprite（registry 里没有的话，临时注释掉 `Cargo.toml` 的 `[patch.crates-io]` 跑一次 `cargo fetch`，再改回来），所以可以重复运行。改完美术后，在 `vendor/pixtuoid-scene` 里运行 `SNAPSHOTS=overwrite cargo test --release` 更新像素金样。
+
+## 致谢
+
+办公室的渲染器、动画和数据源来自 [pixtuoid](https://github.com/pixtuoid/pixtuoid)，MIT License，Copyright (c) pixtuoid authors；许可证全文见 `LICENSE`。
+
+`assets/` 里的 Fusion Pixel 8px 字体随 pixtuoid-scene 发布，SIL OFL 1.1（见 `assets/OFL-Fusion-Pixel.txt` 和 `assets/LICENSES-Fusion-Pixel/`）。
+
+`src/floating/mod.rs` 的缩放倍数、名牌版式按 pixtuoid 悬浮窗和 pixtuoid-scene 的 `display/compose.rs` 复刻；`src/pipeline.rs` 的接线改写自 pixtuoid（`crates/pixtuoid/src/runtime/`），MIT License，Copyright (c) pixtuoid authors。

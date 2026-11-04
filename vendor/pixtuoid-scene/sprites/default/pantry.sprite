@@ -1,0 +1,13 @@
+# A cha chaan teng counter: bakery case, milk-tea urn, menu, drinks fridge.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
+@frame 0
+. . . . . . . . . . q . . . . . . . . . ǎ ǎ ǎ ǎ K K K K K K K K
+. . . . . . . . . ξ ξ ξ ξ . . . . . . . ǖ ǖ ǖ ǖ K ¤ ¤ ¤ ¤ ¤ ¤ K
+K ¤ ¤ ¤ ¤ ¤ ¤ K . K K K ξ . . . . . . . ǖ ǖ ǖ ǖ K ǎ Ǐ w Ǌ ǎ Ǐ K
+K Ǌ ¤ Ǌ Ǌ ¤ ¤ ¤ . K K K ξ . w w w w w w ǖ ǖ ǖ ǖ K ¤ ¤ ¤ ¤ ¤ ¤ K
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤ ǒ ǒ K K ǒ ǒ ǒ ǒ ǒ ǒ ǒ ǒ ǒ ǒ ǒ ǒ K ¤ ¤ ¤ ¤ ¤ ¤ K
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ K w Ǌ ǎ Ǐ w Ǌ K
+¤ Ǌ ¤ ¤ Ǌ ¤ ¤ ¤ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ K ¤ ¤ ¤ ¤ ¤ ¤ K
+¤ ¤ ¤ ¤ ¤ ¤ ¤ ¤ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ K Ǌ ǎ Ǐ w Ǌ ǎ K
+¤ ǌ ¤ ǋ ǌ ¤ ¤ ¤ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ K ξ ξ ξ ξ ξ ξ K
+K ξ ξ ξ ξ ξ ξ K ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ Ǉ Ǉ Ǉ Ǉ Ǉ Ǉ Ǉ Ǉ

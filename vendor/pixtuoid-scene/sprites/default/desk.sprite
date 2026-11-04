@@ -1,0 +1,17 @@
+# The viewer-facing desk at 1x: the monitor's back, lit along its top
+# edge. Its glass rows stay casing: a viewer-facing seat never shows a
+# screen, though the glow still lights them where a pack ships no
+# `desk_north` and this art stands in for it.
+# agent-office: recoloured by tools/hk_art.py from pixtuoid's art.
+@frame 0
+@mark cup 2 2
+@mark tower 11 4
+. . . 3 3 3 3 3 3 3 3 . . .
+Θ Θ ǘ M M M M M M M M ǘ ǘ ǘ
+Ǘ 9 Ǘ M M M M M M M M Ǘ Ǘ Ǘ
+Ǘ Ǘ Ǘ M M M M M M M M Ǘ Ǘ Ǘ
+Ǘ Ǘ Ǘ Ǘ 4 M M M M 4 Ǘ Ǘ Ǘ Ǘ
+Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ Ǘ
+ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ ǚ
+Ǚ Ǜ . . . . . . . . . . Ǜ Ǚ
+Ǚ Ǜ . . . . . . . . . . Ǜ Ǚ

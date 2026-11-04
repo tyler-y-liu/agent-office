@@ -1,0 +1,32 @@
+[package]
+name = "agent-office"
+version = "0.1.0"
+edition = "2024"
+description = "An always-on-top pixel office where every Claude Code session is a little worker with its task over its head"
+license = "MIT"
+repository = "https://github.com/tyler-y-liu/agent-office"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.104"
+pixtuoid-core = "=0.21.0"
+pixtuoid-scene = "=0.21.0"
+png = "0.18"
+ratatui = "0.30.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+softbuffer = "0.4"
+tokio = { version = "1.54.1", features = ["full"] }
+unicode-width = "0.2.3"
+winit = "0.30"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+# Idle agents lounge instead of cycling desk ↔ waypoint; see vendor/pixtuoid-scene/src/walk/mod.rs.
+# The scene is also agent-office's own look (theme, sign, art), and core is
+# vendored for the furniture pieces only it can name.
+[patch.crates-io]
+pixtuoid-scene = { path = "vendor/pixtuoid-scene" }
+pixtuoid-core = { path = "vendor/pixtuoid-core" }

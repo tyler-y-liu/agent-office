@@ -1,0 +1,11 @@
+# A small cha chaan teng counter: bakery case, urn, menu.
+# agent-office: drawn by tools/hk_art.py; edit the script, not this file.
+@frame 0
+. . . . . . ξ ξ ξ . . . . . . ǎ ǎ ǎ ǎ ǎ
+K K K K K . K K K . . . . . . ǖ ǖ ǖ ǖ ǖ
+¤ Ǌ ¤ ¤ ¤ K K K K q w w w w . ǖ ǖ ǖ ǖ ǖ
+¤ ¤ ¤ ¤ ¤ ǒ ǒ K ǒ ǒ ǒ ǒ ǒ ǒ ǒ ǖ ǖ w ǖ ǖ
+¤ ǌ ¤ ¤ ¤ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǉ ǖ ǖ ǖ ǖ ǖ
+¤ ¤ ¤ ¤ ¤ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǖ ǖ ǖ ǖ ǖ
+K Ǌ ¤ ¤ ¤ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǖ w ǖ ǖ
+K ¤ ¤ ¤ ¤ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǆ ǖ ǖ ǖ ǖ ǖ
