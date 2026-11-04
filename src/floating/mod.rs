@@ -392,8 +392,11 @@ impl Win {
                 TEXT,
                 g.px,
             );
-        } else if let Some(tags) = self.render_office(&frame.scene, fit, theme, &frame.labels, sf) {
+        } else if let Some((tags, signs)) =
+            self.render_office(&frame.scene, fit, theme, &frame.labels, sf)
+        {
             canvas.blit_scaled(&self.art, 0, 0, u32::from(fit.upscale()));
+            paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
             let stuck: Vec<AgentId> = frame
                 .scene
                 .agents
@@ -493,7 +496,7 @@ impl Win {
         theme: &'static Theme,
         labels: &HashMap<AgentId, String>,
         scale_factor: f64,
-    ) -> Option<Vec<Tag>> {
+    ) -> Option<(Vec<Tag>, Vec<DoorSign>)> {
         let _feed = self.office.session.render(
             fit.look(WorldText::Host),
             RenderInputs {
@@ -525,15 +528,18 @@ impl Win {
             *dst = to_u32(*src);
         }
         let mut tags = Vec::new();
+        let mut signs = Vec::new();
         if let Picture::Floor(floor) = picture
             && let Some(text) = floor.text
         {
             let d = u32::from(fit.density().get());
             let u = u32::from(fit.upscale());
-            tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor);
+            signs = door_signs(&mut self.faces, text, d, u, scale_factor);
+            let avoid: Vec<Area> = signs.iter().map(|s| s.area).collect();
+            tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor, &avoid);
             paint_world_text(art, text, d, u, &tags);
         }
-        Some(tags)
+        Some((tags, signs))
     }
 
     /// Select the card or the figure under the pointer; a double click opens
@@ -814,6 +820,7 @@ fn place_tags(
     u: u32,
     labels: &HashMap<AgentId, String>,
     scale_factor: f64,
+    avoid: &[Area],
 ) -> Vec<Tag> {
     let (name_px, task_px) = (pt_px(NAME_PT, scale_factor), pt_px(TASK_PT, scale_factor));
     let pad = tag_pad(scale_factor);
@@ -858,6 +865,8 @@ fn place_tags(
         }
         taken.push(t.badge);
     }
+    // A task label keeps off the door signs too.
+    taken.extend(avoid.iter().copied());
     for t in &mut tags {
         let Some(task) = &t.task else { continue };
         let w = Faces::cells(task) * faces.cell_w(task_px) + 2 * pad;
@@ -906,7 +915,9 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
         }
     }
     let mut signs: Vec<Area> = Vec::new();
-    for run in text.signs {
+    // Door signs are set in the readable faces over the upscaled office
+    // ([`door_signs`]): the art font has no Chinese.
+    for run in text.signs.iter().filter(|r| r.role != TextRole::DoorSign) {
         let rect = run_rect(run, d);
         if signs.iter().any(|s| s.meets(&rect)) {
             continue;
@@ -915,6 +926,82 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
         paint_run(art, run, rect);
     }
 }
+
+/// A zone's door sign as the window sets it: in Chinese, on its zone's
+/// colour, centred where pixtuoid hangs it.
+pub(crate) struct DoorSign {
+    /// Its plate, in window pixels.
+    area: Area,
+    text: &'static str,
+    plate: u32,
+    ink: u32,
+}
+
+/// The Chinese for a zone pixtuoid signs in ASCII, the art font having no
+/// Chinese.
+fn door_sign_zh(text: &str) -> Option<&'static str> {
+    Some(match text {
+        "MTG A" => "会议室 A",
+        "MTG B" => "会议室 B",
+        "PANTRY" => "茶水间",
+        "WAIT" => "等候区",
+        "OFFICE" => "你的办公室",
+        "ROOF" => "天台",
+        _ => return None,
+    })
+}
+
+/// The door signs among `text`'s, at `d` art pixels a layout unit and `u`
+/// window pixels an art pixel.
+fn door_signs(
+    faces: &mut Faces,
+    text: HostText<'_>,
+    d: u32,
+    u: u32,
+    scale_factor: f64,
+) -> Vec<DoorSign> {
+    let cell = i64::from(u32::from(pixtuoid_scene::layout::CELL_ROWS) * d);
+    let px = pt_px(SIGN_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    text.signs
+        .iter()
+        .filter(|r| r.role == TextRole::DoorSign)
+        .filter_map(|r| {
+            let text: String = r.spans.iter().map(|s| s.text().to_owned()).collect();
+            let zh = door_sign_zh(&text)?;
+            let cx = i64::from(u32::from(r.at.x) * d) * i64::from(u);
+            let cy = (i64::from(u32::from(r.at.y) * d) + cell / 2) * i64::from(u);
+            let w = Faces::cells(zh) * faces.cell_w(px) + 2 * pad;
+            let h = px + 2 * pad;
+            Some(DoorSign {
+                area: Area {
+                    x: cx - i64::from(w / 2),
+                    y: cy - i64::from(h / 2),
+                    w,
+                    h,
+                },
+                text: zh,
+                plate: r.plate.map_or(PANEL_BG, to_u32),
+                ink: r.spans.first().map_or(TEXT, |s| to_u32(s.ink)),
+            })
+        })
+        .collect()
+}
+
+/// Set each door sign on its plate in the readable faces.
+fn paint_door_signs(canvas: &mut Canvas, faces: &mut Faces, signs: &[DoorSign], scale_factor: f64) {
+    let px = pt_px(SIGN_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    for s in signs {
+        let Area { x, y, w, h } = s.area;
+        canvas.fill(x, y, w, h, s.plate);
+        let base = y + i64::from(pad) + i64::from(faces.ascent(px));
+        faces.draw(canvas, x + i64::from(pad), base, s.text, s.ink, px);
+    }
+}
+
+/// Points a door sign is set in.
+const SIGN_PT: f64 = 9.0;
 
 /// Red for a stuck agent, the panel's stuck colour.
 const STUCK_RED: u32 = 0x00f7_768e;
@@ -1002,5 +1089,27 @@ fn paint_tags(
         canvas.fill(r.x, r.y, r.w, r.h, t.plate);
         let base = r.y + i64::from(pad) + i64::from(faces.ascent(task_px));
         faces.draw(canvas, r.x + i64::from(pad), base, task, TASK, task_px);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every zone pixtuoid signs reads in Chinese in the window: a sign the
+    /// map missed would vanish, not fall back to ASCII.
+    #[test]
+    fn every_door_sign_has_its_chinese() {
+        for (ascii, zh) in [
+            ("MTG A", "会议室 A"),
+            ("MTG B", "会议室 B"),
+            ("PANTRY", "茶水间"),
+            ("WAIT", "等候区"),
+            ("OFFICE", "你的办公室"),
+            ("ROOF", "天台"),
+        ] {
+            assert_eq!(door_sign_zh(ascii), Some(zh));
+        }
+        assert_eq!(door_sign_zh("LOBBY"), None);
     }
 }
