@@ -37,6 +37,8 @@ pub struct TaskView {
     pub agent_type: Option<String>,
     pub phase: Option<Phase>,
     pub stuck: Option<Stuck>,
+    /// When the transcript was last written.
+    pub written_at: Option<SystemTime>,
 }
 
 /// Why an agent looks stuck.
@@ -345,6 +347,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         agent_type: e.sub.as_ref().and_then(|s| s.agent_type.clone()),
         phase: t.phase,
         stuck: stuck(t, working, now.duration_since(e.grew_at)),
+        written_at: e.tail.modified,
     }
 }
 
