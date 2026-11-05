@@ -33,6 +33,21 @@ pub struct PanelState {
     /// When you last opened each session from here: what it had done by
     /// then is read.
     pub seen: HashMap<AgentId, SystemTime>,
+    /// The first row of cards shown: the wheel moves it, and a new
+    /// selection moves it as far as it takes to show that card.
+    pub scroll: usize,
+    /// Bring the selected card into view on the next draw. Only when the
+    /// selection or its size changes, so the wheel can scroll away from it.
+    pub reveal: bool,
+}
+
+impl PanelState {
+    /// Scroll the cards by `rows`, down when positive; the draw keeps it
+    /// within the cards.
+    pub fn scroll_by(&mut self, rows: isize) {
+        self.scroll = self.scroll.saturating_add_signed(rows);
+        self.reveal = false;
+    }
 }
 
 /// Whether `slot` is idle and was opened since it went idle: its result is
@@ -456,7 +471,7 @@ pub fn render(
     scene: &SceneState,
     views: &TaskViews,
     inks: &HashMap<AgentId, Rgb>,
-    state: &PanelState,
+    state: &mut PanelState,
 ) -> Vec<(u16, AgentId)> {
     let now = SystemTime::now();
     let order = order(scene, views, now, &state.seen);
@@ -559,8 +574,6 @@ pub fn render(
             Some(Card { id: *id, lines })
         })
         .collect();
-    // Scroll so the selected card is wholly in view.
-    let mut start = 0usize;
     let mut sel_range = None;
     let mut y = 0usize;
     for c in &cards {
@@ -570,11 +583,20 @@ pub fn render(
         y += c.lines.len();
     }
     let h = usize::from(inner.height);
-    if let Some((top, bottom)) = sel_range
-        && bottom > h
+    // A newly selected card is brought wholly into view, its top kept in
+    // view if it is taller than the panel.
+    if std::mem::take(&mut state.reveal)
+        && let Some((top, bottom)) = sel_range
     {
-        start = (bottom - h).min(top);
+        if bottom > state.scroll + h {
+            state.scroll = bottom.saturating_sub(h);
+        }
+        state.scroll = state.scroll.min(top);
     }
+    // No scrolling past the last card, so the wheel never leaves the panel
+    // blank and a shrinking list pulls its cards back into view.
+    state.scroll = state.scroll.min(y.saturating_sub(h));
+    let start = state.scroll;
     let mut row = 0usize;
     let mut rows = Vec::new();
     for c in &cards {
@@ -701,6 +723,70 @@ mod tests {
             o[2].1, 2,
             "a subagent's own subagent is listed, one level deeper"
         );
+    }
+
+    /// More sessions than fit must be reachable by the wheel, not only by
+    /// selecting through them; a scroll past the end would blank the panel,
+    /// and a selection that keeps snapping back would undo every scroll.
+    #[test]
+    fn the_wheel_scrolls_the_cards_and_a_selection_brings_its_card_back() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = (0..8)
+            .map(|i| {
+                start(
+                    &mut scene,
+                    &mut r,
+                    &format!("s{i}"),
+                    None,
+                    t0 + Duration::from_secs(i),
+                )
+            })
+            .collect();
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 40, 12);
+        let mut state = PanelState::default();
+        let draw = |state: &mut PanelState| {
+            let mut buf = Buffer::empty(area);
+            render(&mut buf, area, &scene, &views, &HashMap::new(), state)
+        };
+        let first_card = |rows: &[(u16, AgentId)]| rows.first().map(|(_, id)| *id);
+        let top = draw(&mut state);
+        let shown_first = first_card(&top);
+        assert!(
+            ids.iter().any(|id| !top.iter().any(|(_, o)| o == id)),
+            "the test needs more cards than the panel holds"
+        );
+
+        state.scroll_by(3);
+        let scrolled = draw(&mut state);
+        assert_eq!(state.scroll, 3);
+        assert_ne!(scrolled, top, "the wheel moves the cards");
+
+        state.scroll_by(1000);
+        let bottom = draw(&mut state);
+        assert!(state.scroll < 1000, "the scroll stops at the last card");
+        assert_eq!(
+            bottom.last().map(|(y, _)| *y),
+            Some(area.height - 1),
+            "scrolled to the end, the last row is still filled"
+        );
+
+        state.scroll_by(-1000);
+        assert_eq!(first_card(&draw(&mut state)), shown_first);
+
+        // Selecting an off-screen card brings it into view once ...
+        let target = *ids
+            .iter()
+            .find(|id| !draw(&mut state).iter().any(|(_, o)| o == *id))
+            .expect("some card starts off screen");
+        state.selected = Some(target);
+        state.reveal = true;
+        assert!(draw(&mut state).iter().any(|(_, o)| *o == target));
+        // ... and the wheel can then scroll away from it.
+        state.scroll_by(-1000);
+        assert!(!draw(&mut state).iter().any(|(_, o)| *o == target));
     }
 
     /// The panel lists sessions by what they need from you, most urgent
