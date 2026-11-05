@@ -1,7 +1,9 @@
 //! agent-office: pixtuoid's pixel office in an always-on-top window, with
 //! every agent's task in one line over its head and in a panel beside it.
 
+mod codex;
 mod core;
+mod cursor;
 mod doctor;
 mod dsh;
 mod floating;
@@ -41,8 +43,16 @@ fn main() -> Result<()> {
                 ("disconnect", None) => hook::disconnect(),
                 ("connect", Some(&"dsh")) => dsh::connect(),
                 ("disconnect", Some(&"dsh")) => dsh::disconnect(),
+                ("connect", Some(&"codex")) => codex::connect(),
+                ("disconnect", Some(&"codex")) => codex::disconnect(),
+                ("connect", Some(&"cursor")) => cursor::connect(),
+                ("disconnect", Some(&"cursor")) => cursor::disconnect(),
                 // A typo must not touch Claude Code's hooks instead.
-                (_, Some(other)) => anyhow::bail!("不认识 {other}：只有 {cmd} 或 {cmd} dsh"),
+                (_, Some(other)) => {
+                    anyhow::bail!(
+                        "不认识 {other}：只有 {cmd}、{cmd} dsh、{cmd} codex、{cmd} cursor"
+                    )
+                }
                 _ => unreachable!(),
             };
         }

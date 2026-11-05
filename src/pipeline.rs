@@ -1,4 +1,4 @@
-//! Source → reducer → latest `SceneState`, Claude Code and dsh only. Mirrors
+//! Source → reducer → latest `SceneState`, the shown CLIs only. Mirrors
 //! pixtuoid's `runtime/driver.rs` + `pipeline.rs` (MIT, pixtuoid authors),
 //! minus the other CLIs, daemon presence and the Sources panel gate.
 
@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use pixtuoid_core::source::claude_code::ClaudeCodeSource;
+use pixtuoid_core::source::codex::CodexSource;
 use pixtuoid_core::source::hook::HookRouter;
 use pixtuoid_core::source::jsonl::ChildEndUnclaims;
 use pixtuoid_core::source::manager::SourceManager;
@@ -17,9 +18,12 @@ use pixtuoid_core::{AgentEvent, Reducer, SceneState, TaggedReceiver, Transport};
 use tokio::sync::{mpsc, watch};
 
 pub const CC_SOURCE: &str = "claude-code";
-/// The CLIs the office shows: Claude Code, and DeepSeek Harness through
-/// agent-office's own plugin (`connect dsh`).
-pub const SHOWN_SOURCES: [&str; 2] = [CC_SOURCE, crate::dsh::SOURCE];
+pub const CODEX_SOURCE: &str = pixtuoid_core::source::codex::SOURCE_NAME;
+pub const CURSOR_SOURCE: &str = pixtuoid_core::source::cursor::SOURCE_NAME;
+/// The CLIs the office shows: Claude Code; DeepSeek Harness through
+/// agent-office's own plugin (`connect dsh`); Codex, from its rollouts and
+/// the hooks `connect codex` adds; Cursor, from the hooks `connect cursor` adds.
+pub const SHOWN_SOURCES: [&str; 4] = [CC_SOURCE, crate::dsh::SOURCE, CODEX_SOURCE, CURSOR_SOURCE];
 
 pub fn is_shown_source(source: &str) -> bool {
     SHOWN_SOURCES.contains(&source)
@@ -45,10 +49,13 @@ pub fn spawn(socket_path: PathBuf, boot_caps: [usize; MAX_FLOORS]) -> Pipeline {
     let unclaims = ChildEndUnclaims::new();
     let mut cc = ClaudeCodeSource::default_paths();
     cc.child_end_unclaims = Some(unclaims.clone());
+    let mut codex = CodexSource::default_paths();
+    codex.child_end_unclaims = Some(unclaims.clone());
     let router = HookRouter::new(socket_path).with_child_end_unclaims(Some(unclaims));
     SourceManager::new()
         .with_source(Box::new(router))
         .with_source(Box::new(cc))
+        .with_source(Box::new(codex))
         .spawn(tx);
 
     Pipeline {
@@ -92,8 +99,8 @@ async fn reducer_task(
     }
 }
 
-/// The hook socket is shared with every CLI pixtuoid connected (Cursor,
-/// Codex, ...): their events must not reach the reducer, or each one walks a
+/// The hook socket is shared with every CLI pixtuoid connected (OpenCode,
+/// Grok, ...): their events must not reach the reducer, or each one walks a
 /// figure in that the next sweep walks out again. The gate pixtuoid's
 /// `runtime/gate.rs` keeps, narrowed to the shown sources.
 fn is_shown(scene: &SceneState, ev: &AgentEvent) -> bool {
@@ -241,14 +248,15 @@ mod tests {
         }
     }
 
-    /// dsh sessions reach the office through agent-office's own plugin, so
-    /// they must pass the gate; another CLI pixtuoid hooked into the same
-    /// socket must not, or its figure walks in and out every sweep.
+    /// The CLIs agent-office connects must pass the gate; another CLI
+    /// pixtuoid hooked into the same socket must not, or its figure walks in
+    /// and out every sweep.
     #[test]
-    fn the_gate_lets_claude_and_dsh_through_and_no_other_cli() {
+    fn the_gate_lets_the_connected_clis_through_and_no_other() {
         let scene = SceneState::new([1; MAX_FLOORS]);
-        assert!(is_shown(&scene, &start(CC_SOURCE)));
-        assert!(is_shown(&scene, &start(crate::dsh::SOURCE)));
-        assert!(!is_shown(&scene, &start("codex")));
+        for source in [CC_SOURCE, crate::dsh::SOURCE, "codex", "cursor"] {
+            assert!(is_shown(&scene, &start(source)), "{source}");
+        }
+        assert!(!is_shown(&scene, &start("opencode")));
     }
 }

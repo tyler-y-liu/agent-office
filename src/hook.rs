@@ -87,10 +87,22 @@ pub fn forward(source: Option<&str>) {
     if std::io::stdin()
         .take(STDIN_CAP)
         .read_to_string(&mut raw)
-        .is_ok()
+        .is_err()
     {
-        send(&raw, source, &socket_path());
+        return;
     }
+    if source == Some(crate::pipeline::CURSOR_SOURCE)
+        && let Ok(v) = serde_json::from_str::<Value>(&raw)
+    {
+        crate::cursor::record(&v);
+        // Only the task log takes the prompt: pixtuoid's decoder refuses an
+        // event it does not know. Cursor reads the answer to this one.
+        if v["hook_event_name"] == crate::cursor::PROMPT_EVENT {
+            println!("{}", json!({ "continue": true }));
+            return;
+        }
+    }
+    send(&raw, source, &socket_path());
 }
 
 fn send(raw: &str, source: Option<&str>, socket: &std::path::Path) -> Option<()> {

@@ -1,7 +1,8 @@
 //! What a Claude Code transcript says the agent was asked to do. pixtuoid's
 //! decoder keeps only tool calls, so the prompts and todos come from here.
 //! agent-office's dsh plugin writes its task logs in the same shape, with
-//! dsh's own tool names (`bash`, `read`, `todo_write`, ...).
+//! dsh's own tool names (`bash`, `read`, `todo_write`, ...), and a Codex
+//! rollout says the same in its own lines (`event_msg` / `response_item`).
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -111,14 +112,31 @@ fn phase_of(name: &str, input: &Value) -> Option<Phase> {
         "Read" | "Grep" | "Glob" | "WebFetch" | "WebSearch" | "LSP" => Phase::Research,
         "read" | "read_image" | "grep" | "glob" | "web_fetch" | "web_search" => Phase::Research,
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Phase::Code,
+        // Cursor's names.
+        "StrReplace" | "Delete" => Phase::Code,
+        "LS" => Phase::Research,
         "edit" | "write" => Phase::Code,
         // One tool for looking and changing; `view` only reads.
         "str_replace_editor" if input.get("command").and_then(Value::as_str) == Some("view") => {
             Phase::Research
         }
         "str_replace_editor" => Phase::Code,
-        "Task" | "Agent" | "subagent" | "subagent_fork" => Phase::Delegate,
-        "Bash" | "bash" => {
+        "Task" | "Agent" | "subagent" | "subagent_fork" | "spawn_agent" => Phase::Delegate,
+        "apply_patch" => Phase::Code,
+        "view_image" => Phase::Research,
+        // Cursor's `Shell` too: like Codex, it reads through its shell.
+        n if CODEX_SHELLS.contains(&n) || n == "Shell" => {
+            let cmd = shell_command(input).unwrap_or_default().to_lowercase();
+            let first = cmd.split_whitespace().next().unwrap_or_default();
+            if CHECK_WORDS.iter().any(|w| cmd.contains(w)) {
+                Phase::Test
+            } else if LOOK_COMMANDS.contains(&first) {
+                Phase::Research
+            } else {
+                Phase::Run
+            }
+        }
+        "Bash" | "bash" | "Shell" | "shell" => {
             let cmd = input
                 .get("command")
                 .and_then(Value::as_str)
@@ -148,6 +166,7 @@ impl Transcript {
         match v.get("type").and_then(Value::as_str) {
             Some("user") => self.feed_user(&v),
             Some("assistant") => self.feed_assistant(&v),
+            Some("event_msg" | "response_item") => self.feed_codex(&v),
             // Claude Code's own note of the last prompt: what a tail read
             // that starts past the prompt itself still finds.
             Some("last-prompt") => {
@@ -236,24 +255,137 @@ impl Transcript {
             }
             let name = b.get("name").and_then(Value::as_str).unwrap_or("?");
             let input = b.get("input").unwrap_or(&Value::Null);
-            self.tool_calls += 1;
-            if let Some(id) = b.get("id").and_then(Value::as_str) {
-                if self.outstanding.len() == KEEP_OUTSTANDING {
-                    self.outstanding.remove(0);
-                }
-                self.outstanding.push((id.to_owned(), name.to_owned()));
-            }
-            if let Some(p) = phase_of(name, input) {
-                self.phase = Some(p);
-            }
-            if name == "TodoWrite" || name == "todo_write" {
-                self.todo_active = active_todo(input);
-            }
-            if self.recent_tools.len() == KEEP_TOOLS {
-                self.recent_tools.pop_front();
-            }
-            self.recent_tools.push_back(tool_line(name, input));
+            self.tool_call(b.get("id").and_then(Value::as_str), name, input);
         }
+    }
+
+    fn tool_call(&mut self, id: Option<&str>, name: &str, input: &Value) {
+        self.tool_calls += 1;
+        if let Some(id) = id {
+            if self.outstanding.len() == KEEP_OUTSTANDING {
+                self.outstanding.remove(0);
+            }
+            self.outstanding.push((id.to_owned(), name.to_owned()));
+        }
+        if let Some(p) = phase_of(name, input) {
+            self.phase = Some(p);
+        }
+        match name {
+            "TodoWrite" | "todo_write" => self.todo_active = active_todo(input),
+            "update_plan" => self.todo_active = active_plan_step(input),
+            _ => {}
+        }
+        if self.recent_tools.len() == KEEP_TOOLS {
+            self.recent_tools.pop_front();
+        }
+        self.recent_tools.push_back(tool_line(name, input));
+    }
+
+    /// One rollout line. The human's words are the `user_message` event: the
+    /// `message` items with role `user` also carry the context Codex injects
+    /// (`<environment_context>`, AGENTS.md).
+    fn feed_codex(&mut self, v: &Value) {
+        let Some(p) = v.get("payload") else { return };
+        let s = |k: &str| p.get(k).and_then(Value::as_str);
+        match (v.get("type").and_then(Value::as_str), s("type")) {
+            (Some("event_msg"), Some("user_message")) => {
+                let Some(text) = s("message") else { return };
+                if human_prompt(text).is_some() {
+                    self.fail_streak = 0;
+                    self.turn_started = v
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .and_then(parse_timestamp);
+                }
+                self.push_prompt(text);
+            }
+            (Some("response_item"), Some(kind @ ("function_call" | "custom_tool_call"))) => {
+                let name = s("name").unwrap_or("?");
+                // A function call's arguments are a JSON string; a custom
+                // tool's input (apply_patch's patch) is free text.
+                let input = if kind == "function_call" {
+                    s("arguments")
+                        .and_then(|a| serde_json::from_str(a).ok())
+                        .unwrap_or(Value::Null)
+                } else {
+                    serde_json::json!({ "input": s("input").unwrap_or_default() })
+                };
+                self.tool_call(s("call_id"), name, &input);
+            }
+            (Some("response_item"), Some("web_search_call")) => {
+                let action = p.get("action").cloned().unwrap_or(Value::Null);
+                self.tool_call(None, "web_search", &action);
+            }
+            (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
+                if let Some(id) = s("call_id") {
+                    self.outstanding.retain(|(o, _)| o != id);
+                }
+                match codex_outcome(p.get("output").unwrap_or(&Value::Null)) {
+                    Outcome::Failed => self.fail_streak += 1,
+                    Outcome::Rejected => {}
+                    Outcome::Ok => self.fail_streak = 0,
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How a Codex call came back.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Failed,
+    /// The user turned it down: their say, not the agent failing.
+    Rejected,
+}
+
+/// A Codex call's output is text, or JSON text with the exit code in its
+/// `metadata` (older `shell`), or an object with a `success` flag. A command
+/// says how it exited in its text (`Exit code: 1`, `Process exited with code 1`).
+fn codex_outcome(output: &Value) -> Outcome {
+    let parsed;
+    let output = match output {
+        Value::String(t) => match serde_json::from_str::<Value>(t) {
+            Ok(v @ Value::Object(_)) => {
+                parsed = v;
+                &parsed
+            }
+            _ => output,
+        },
+        _ => output,
+    };
+    if output.get("success").and_then(Value::as_bool) == Some(false) {
+        return Outcome::Failed;
+    }
+    if let Some(code) = output
+        .pointer("/metadata/exit_code")
+        .and_then(Value::as_i64)
+    {
+        return if code == 0 {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        };
+    }
+    let text = match output {
+        Value::String(t) => t.as_str(),
+        _ => match output.get("content").or_else(|| output.get("output")) {
+            Some(Value::String(t)) => t.as_str(),
+            _ => "",
+        },
+    };
+    if text.contains("rejected by user") {
+        return Outcome::Rejected;
+    }
+    let exit = text.lines().take(8).find_map(|l| {
+        l.strip_prefix("Exit code: ")
+            .or_else(|| l.strip_prefix("Process exited with code "))
+            .and_then(|c| c.trim().parse::<i64>().ok())
+    });
+    match exit {
+        Some(c) if c != 0 => Outcome::Failed,
+        _ => Outcome::Ok,
     }
 }
 
@@ -330,6 +462,56 @@ fn parse_timestamp(s: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::new(secs, nanos))
 }
 
+/// The `in_progress` step of Codex's `update_plan`.
+fn active_plan_step(input: &Value) -> Option<String> {
+    input
+        .get("plan")?
+        .as_array()?
+        .iter()
+        .find(|t| t.get("status").and_then(Value::as_str) == Some("in_progress"))
+        .and_then(|t| t.get("step").and_then(Value::as_str))
+        .map(one_line)
+}
+
+/// A shell call's command line: Claude's and dsh's `command`, Codex's `cmd`,
+/// or Codex's argv, whose `bash -lc <script>` is the script.
+fn shell_command(input: &Value) -> Option<String> {
+    let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_owned);
+    if let Some(c) = s("cmd").or_else(|| s("command")) {
+        return Some(c);
+    }
+    let argv: Vec<&str> = input
+        .get("command")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    match argv.as_slice() {
+        [_, flag, script] if flag.starts_with('-') && flag.ends_with('c') => {
+            Some((*script).to_owned())
+        }
+        _ => Some(argv.join(" ")),
+    }
+}
+
+/// Codex's shell names; it has no read or search tool of its own.
+const CODEX_SHELLS: &[&str] = &["exec_command", "shell", "local_shell", "shell_command"];
+
+/// Commands that only look: how Codex reads and searches.
+const LOOK_COMMANDS: &[&str] = &[
+    "rg", "grep", "cat", "sed", "ls", "find", "head", "tail", "nl", "wc", "fd", "tree",
+];
+
+/// The file an `apply_patch` patch touches first.
+fn patched_file(patch: &str) -> Option<&str> {
+    patch.lines().find_map(|l| {
+        ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+            .iter()
+            .find_map(|p| l.strip_prefix(p))
+            .map(str::trim)
+    })
+}
+
 fn active_todo(input: &Value) -> Option<String> {
     let todos = input.get("todos")?.as_array()?;
     todos
@@ -347,7 +529,7 @@ fn tool_line(name: &str, input: &Value) -> String {
     let s = |k: &str| input.get(k).and_then(Value::as_str);
     let target = match name {
         "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "read" | "read_image"
-        | "edit" | "write" | "str_replace_editor" => s("file_path")
+        | "edit" | "write" | "str_replace_editor" | "StrReplace" | "Delete" => s("file_path")
             .or_else(|| s("notebook_path"))
             .or_else(|| s("path"))
             .map(|p| {
@@ -355,7 +537,18 @@ fn tool_line(name: &str, input: &Value) -> String {
                     .file_name()
                     .map_or_else(|| p.to_owned(), |f| f.to_string_lossy().into_owned())
             }),
-        "Bash" | "bash" => s("description").or_else(|| s("command")).map(str::to_owned),
+        // `shell` is Cursor's and Codex's: a command line, or Codex's argv.
+        "Bash" | "bash" | "Shell" | "shell" => s("description")
+            .map(str::to_owned)
+            .or_else(|| shell_command(input)),
+        n if CODEX_SHELLS.contains(&n) => shell_command(input),
+        "apply_patch" => s("input").and_then(patched_file).map(|p| {
+            Path::new(p)
+                .file_name()
+                .map_or_else(|| p.to_owned(), |f| f.to_string_lossy().into_owned())
+        }),
+        "spawn_agent" => s("description").or_else(|| s("message")).map(str::to_owned),
+        "view_image" => s("path").map(str::to_owned),
         "Grep" | "Glob" | "grep" | "glob" => s("pattern").map(str::to_owned),
         "Task" | "Agent" | "subagent" | "subagent_fork" => s("description").map(str::to_owned),
         "WebFetch" | "web_fetch" => s("url").map(str::to_owned),
@@ -522,6 +715,112 @@ mod tests {
             t.recent_tools.back().map(String::as_str),
             Some("edit quiz.py")
         );
+    }
+
+    fn rollout(outer: &str, payload: Value) -> String {
+        json!({"timestamp":"2026-11-05T09:30:15.000Z","type":outer,"payload":payload}).to_string()
+    }
+
+    /// A Codex session's rollout must give the same task, todo, phase and
+    /// failures a Claude transcript does, or its figure has no task line and
+    /// is never flagged stuck.
+    #[test]
+    fn a_codex_rollout_reads_like_a_claude_transcript() {
+        let mut t = Transcript::default();
+        // Codex's injected context rides a `user` message item, not the event.
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"message","role":"user","content":[{"type":"input_text",
+                "text":"<environment_context>cwd</environment_context>"}]}),
+        ));
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"message","role":"user","content":[{"type":"input_text",
+                "text":"# AGENTS.md instructions for /repo"}]}),
+        ));
+        assert_eq!(t.latest_prompt(), None);
+        t.feed(&rollout(
+            "event_msg",
+            json!({"type":"user_message","message":"修复登录页的报错","images":[]}),
+        ));
+        assert_eq!(t.latest_prompt(), Some("修复登录页的报错"));
+        assert!(t.turn_started.is_some());
+        let call = |name: &str, args: Value, id: &str| {
+            rollout(
+                "response_item",
+                json!({"type":"function_call","name":name,"arguments":args.to_string(),"call_id":id}),
+            )
+        };
+        t.feed(&call(
+            "update_plan",
+            json!({"plan":[{"step":"读代码","status":"completed"},{"step":"改登录页","status":"in_progress"}]}),
+            "p1",
+        ));
+        assert_eq!(t.todo_active.as_deref(), Some("改登录页"));
+        t.feed(&call("exec_command", json!({"cmd":"rg login src"}), "c1"));
+        assert_eq!(
+            t.phase,
+            Some(Phase::Research),
+            "Codex reads through its shell"
+        );
+        assert_eq!(
+            t.recent_tools.back().map(String::as_str),
+            Some("exec_command rg login src")
+        );
+        assert!(t.awaits_any(&["exec_command"]));
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"custom_tool_call","name":"apply_patch","call_id":"c2",
+                "input":"*** Begin Patch\n*** Update File: src/login.ts\n@@\n-a\n+b\n*** End Patch"}),
+        ));
+        assert_eq!(t.phase, Some(Phase::Code));
+        assert_eq!(
+            t.recent_tools.back().map(String::as_str),
+            Some("apply_patch login.ts")
+        );
+        t.feed(&call(
+            "shell",
+            json!({"command":["bash","-lc","cargo test --release"]}),
+            "c3",
+        ));
+        assert_eq!(t.phase, Some(Phase::Test));
+        assert_eq!(
+            t.recent_tools.back().map(String::as_str),
+            Some("shell cargo test --release")
+        );
+        let output = |id: &str, out: Value| {
+            rollout(
+                "response_item",
+                json!({"type":"function_call_output","call_id":id,"output":out}),
+            )
+        };
+        t.feed(&output(
+            "c1",
+            json!("Chunk ID: a\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\nok"),
+        ));
+        assert_eq!(t.fail_streak, 0);
+        assert!(!t.awaits_any(&["exec_command"]));
+        t.feed(&output(
+            "c3",
+            json!(r#"{"output":"error[E0425]","metadata":{"exit_code":101}}"#),
+        ));
+        t.feed(&output(
+            "c4",
+            json!("Exit code: 1\nWall time: 2 seconds\nOutput:\nboom"),
+        ));
+        t.feed(&output(
+            "c5",
+            json!({"content":"failed to parse patch","success":false}),
+        ));
+        assert_eq!(t.fail_streak, 3);
+        // The user turning a call down is not the agent failing.
+        t.feed(&output("c6", json!("exec command rejected by user")));
+        assert_eq!(t.fail_streak, 3);
+        t.feed(&rollout(
+            "event_msg",
+            json!({"type":"user_message","message":"换个办法"}),
+        ));
+        assert_eq!(t.fail_streak, 0, "the human spoke: it starts over");
     }
 
     #[test]

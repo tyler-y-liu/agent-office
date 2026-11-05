@@ -1,6 +1,7 @@
 //! Each agent's task, as one line: a background loop tails the transcripts of
 //! the agents the office shows and keeps their summaries fresh. A dsh
-//! session's transcript is the task log agent-office's dsh plugin writes.
+//! session's transcript is the task log agent-office's dsh plugin writes; a
+//! Codex session's is its rollout.
 
 pub mod client;
 pub mod extract;
@@ -15,7 +16,7 @@ use pixtuoid_core::state::ActivityState;
 use pixtuoid_core::{AgentId, SceneState};
 use tokio::sync::{mpsc, watch};
 
-use crate::pipeline::{CC_SOURCE, is_shown_source};
+use crate::pipeline::{CC_SOURCE, CODEX_SOURCE, CURSOR_SOURCE, is_shown_source};
 use crate::text::truncate_cells;
 use client::{SUMMARY_CELLS, Summarizer, SummaryInput};
 pub use extract::Phase;
@@ -74,6 +75,16 @@ const LONG_CALLS: &[&str] = &[
     "subagent",
     "subagent_fork",
     "job_output",
+    // Codex's: its shells, a running command it feeds, and its wait on agents.
+    "exec_command",
+    "shell",
+    "local_shell",
+    "shell_command",
+    "write_stdin",
+    "wait",
+    // Cursor's shell.
+    "Shell",
+    "shell",
 ];
 
 fn stuck(t: &Transcript, working: bool, quiet: Duration) -> Option<Stuck> {
@@ -109,8 +120,10 @@ struct Entry {
     grew_at: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Locator {
+    /// Every transcript under a root, keyed by agent.
+    scan: fn(&Path) -> HashMap<AgentId, PathBuf>,
     paths: HashMap<AgentId, PathBuf>,
     /// Ids the last scan did not find, so an agent with no transcript costs
     /// one scan per [`RESCAN_MISSED`], not one per tick.
@@ -121,6 +134,15 @@ struct Locator {
 const RESCAN_MISSED: Duration = Duration::from_secs(30);
 
 impl Locator {
+    fn new(scan: fn(&Path) -> HashMap<AgentId, PathBuf>) -> Self {
+        Self {
+            scan,
+            paths: HashMap::new(),
+            missed: HashSet::new(),
+            last_scan: None,
+        }
+    }
+
     fn find(&mut self, id: AgentId, root: &Path, now: Instant) -> Option<PathBuf> {
         if let Some(p) = self.paths.get(&id) {
             return Some(p.clone());
@@ -132,7 +154,7 @@ impl Locator {
             return None;
         }
         self.last_scan = Some(now);
-        self.paths = scan(root);
+        self.paths = (self.scan)(root);
         self.missed.retain(|m| !self.paths.contains_key(m));
         let found = self.paths.get(&id).cloned();
         if found.is_none() {
@@ -173,6 +195,44 @@ fn scan(root: &Path) -> HashMap<AgentId, PathBuf> {
     out
 }
 
+/// Every rollout under Codex's `sessions/YYYY/MM/DD/`, keyed as pixtuoid keys
+/// Codex agents: by the UUID that ends `rollout-<time>-<UUID>.jsonl`.
+fn scan_codex(root: &Path) -> HashMap<AgentId, PathBuf> {
+    fn walk(dir: &Path, depth: u8, out: &mut HashMap<AgentId, PathBuf>) {
+        let Ok(items) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for item in items.flatten() {
+            let p = item.path();
+            if item.file_type().is_ok_and(|t| t.is_dir()) {
+                if depth < 3 {
+                    walk(&p, depth + 1, out);
+                }
+            } else if let Some(id) = codex_rollout_id(&p) {
+                out.insert(AgentId::from_parts(CODEX_SOURCE, id), p);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(root, 0, &mut out);
+    out
+}
+
+/// The session UUID a rollout's file name ends in.
+fn codex_rollout_id(path: &Path) -> Option<&str> {
+    if path.extension()? != "jsonl" {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?.strip_prefix("rollout-")?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    let b = id.as_bytes();
+    let uuid = b.iter().enumerate().all(|(i, &c)| match i {
+        8 | 13 | 18 | 23 => c == b'-',
+        _ => c.is_ascii_hexdigit(),
+    });
+    uuid.then_some(id)
+}
+
 /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`, as Claude Code resolves it.
 pub fn claude_dir() -> Option<PathBuf> {
     pixtuoid_core::source::claude_code::claude_config_dir()
@@ -183,9 +243,9 @@ pub fn projects_root() -> Option<PathBuf> {
     claude_dir().map(|d| d.join("projects"))
 }
 
-/// The task log agent-office's dsh plugin keeps for `session_id`, named the
-/// way the plugin names it.
-fn dsh_log(dir: &Path, session_id: &str) -> PathBuf {
+/// The task log agent-office keeps for `session_id` (its dsh plugin, its
+/// Cursor forwarder), named the way the plugin names it.
+pub fn task_log(dir: &Path, session_id: &str) -> PathBuf {
     let safe: String = session_id
         .chars()
         .map(|c| {
@@ -218,8 +278,11 @@ async fn run(
 ) {
     let root = projects_root();
     let dsh_dir = crate::dsh::transcripts_dir();
+    let cursor_dir = crate::cursor::transcripts_dir();
     let mut entries: HashMap<AgentId, Entry> = HashMap::new();
-    let mut locator = Locator::default();
+    let codex_root = pixtuoid_core::source::codex::codex_home().join("sessions");
+    let mut locator = Locator::new(scan);
+    let mut codex_locator = Locator::new(scan_codex);
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, Option<String>)>();
     let mut tick = tokio::time::interval(Duration::from_millis(700));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -254,13 +317,17 @@ async fn run(
                     continue;
                 }
                 if !entries.contains_key(id) {
-                    let path = if &*slot.source == crate::dsh::SOURCE {
-                        dsh_dir
+                    let path = match &*slot.source {
+                        crate::dsh::SOURCE => dsh_dir
                             .as_deref()
-                            .map(|d| dsh_log(d, &slot.session_id))
-                            .filter(|p| p.is_file())
-                    } else {
-                        root.as_deref().and_then(|r| locator.find(*id, r, now))
+                            .map(|d| task_log(d, &slot.session_id))
+                            .filter(|p| p.is_file()),
+                        CURSOR_SOURCE => cursor_dir
+                            .as_deref()
+                            .map(|d| task_log(d, &slot.session_id))
+                            .filter(|p| p.is_file()),
+                        CODEX_SOURCE => codex_locator.find(*id, &codex_root, now),
+                        _ => root.as_deref().and_then(|r| locator.find(*id, r, now)),
                     };
                     let Some(path) = path else {
                         continue;
@@ -421,18 +488,38 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// pixtuoid keys a Codex agent by the UUID its rollout's name ends in,
+    /// so the reader must key it the same, or a Codex figure never gets its
+    /// task line; anything else under `sessions/` is not a rollout.
+    #[test]
+    fn codex_rollouts_are_keyed_by_their_session_uuid() {
+        let root =
+            std::env::temp_dir().join(format!("agent-office-codex-scan-{}", std::process::id()));
+        let day = root.join("2026/11/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let uuid = "019e7762-9ded-7e33-be41-946ecf105bf4";
+        let rollout = day.join(format!("rollout-2026-11-05T09-30-15-{uuid}.jsonl"));
+        std::fs::write(&rollout, "").unwrap();
+        std::fs::write(day.join("history.jsonl"), "").unwrap();
+        std::fs::write(day.join("rollout-2026-11-05T09-30-15-notauuid.jsonl"), "").unwrap();
+        let found = scan_codex(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[&AgentId::from_parts(CODEX_SOURCE, uuid)], rollout);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// The plugin and the reader must agree on the file name, or a dsh
     /// session never gets a task line.
     #[test]
     fn a_dsh_log_is_named_the_way_the_plugin_names_it() {
         let dir = Path::new("/t");
         assert_eq!(
-            dsh_log(dir, "session-209513f0-7740"),
+            task_log(dir, "session-209513f0-7740"),
             Path::new("/t/session-209513f0-7740.jsonl")
         );
         // The plugin's `replace(/[^A-Za-z0-9._-]/gu, "_")`: per code point,
         // as `chars()` is, so a non-BMP character is one `_` on both sides.
-        assert_eq!(dsh_log(dir, "../a/b c🙂"), Path::new("/t/.._a_b_c_.jsonl"));
+        assert_eq!(task_log(dir, "../a/b c🙂"), Path::new("/t/.._a_b_c_.jsonl"));
         let plugin = include_str!("../dsh_plugin.mjs");
         assert!(plugin.contains(r#"sessionId.replace(/[^A-Za-z0-9._-]/gu, "_") + ".jsonl""#));
     }
