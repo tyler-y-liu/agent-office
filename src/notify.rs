@@ -89,11 +89,14 @@ impl Notifier {
             let slot = &scene.agents[&id];
             let view = views.get(&id);
             let (subtitle, body) = match wait {
-                Wait::Prompt => ("等你确认", view.and_then(|v| v.line.clone())),
+                Wait::Prompt => (
+                    crate::i18n::t("等你确认", "Needs approval"),
+                    view.and_then(|v| v.line.clone()),
+                ),
                 Wait::Reply => (
-                    "问你",
+                    crate::i18n::t("问你", "Asking you"),
                     view.and_then(|v| v.outcome.as_deref())
-                        .map(|o| o.trim_start_matches("问：").to_owned()),
+                        .map(|o| crate::i18n::strip_ask(o).unwrap_or(o).to_owned()),
                 ),
             };
             tick.alerts.push(Alert {

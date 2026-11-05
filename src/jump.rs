@@ -26,7 +26,10 @@ pub const NEEDS_INPUT: &str = "claude://code/needs-input";
 /// Open the session `id` belongs to; a subagent opens its root's. `Ok` is the
 /// footer's note on where it went, the error what to tell the user.
 pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, String> {
-    let mut slot = scene.agents.get(&id).ok_or("这个 agent 已经走了")?;
+    let mut slot = scene
+        .agents
+        .get(&id)
+        .ok_or(crate::i18n::t("这个 agent 已经走了", "this agent has left"))?;
     // At most one step per agent, so a parent cycle cannot hang the window.
     for _ in 0..scene.agents.len() {
         match slot.parent_id.and_then(|p| scene.agents.get(&p)) {
@@ -38,26 +41,36 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
         crate::pipeline::CC_SOURCE => {
             let dir = crate::tasks::projects_root()
                 .and_then(|root| registry_dir(&root))
-                .ok_or("找不到 ~/.claude/sessions")?;
+                .ok_or(crate::i18n::t(
+                    "找不到 ~/.claude/sessions",
+                    "cannot find ~/.claude/sessions",
+                ))?;
             let (pid, entry) = registry_entry(&dir, &slot.session_id)?;
             if let Some(url) = url_for(&entry).map_err(str::to_owned)? {
-                return open_url(&url).map(|()| "已在 Claude 打开");
+                return open_url(&url)
+                    .map(|()| crate::i18n::t("已在 Claude 打开", "opened in Claude"));
             }
             pid
         }
         // Codex is read from its rollouts, so no hook carries its pid: the
         // process holding the rollout open is found at click time.
-        crate::pipeline::CODEX_SOURCE => codex_pid(&slot.session_id).ok_or(GONE)?,
+        crate::pipeline::CODEX_SOURCE => codex_pid(&slot.session_id).ok_or_else(gone)?,
         // dsh's plugin and Cursor's hook stamp the CLI's pid on its events.
         _ => stamped_pid(slot, pixtuoid_core::source::pid_start_marker)?,
     };
     if !cfg!(target_os = "macos") {
-        return Err("只有 macOS 上能切到终端".to_owned());
+        return Err(crate::i18n::t(
+            "只有 macOS 上能切到终端",
+            "switching to a terminal works only on macOS",
+        )
+        .to_owned());
     }
     focus_terminal(&OsProcessTable, &OsTmux, pid, activate_os, select_tab_os)
 }
 
-const GONE: &str = "这个会话的进程已经不在了";
+fn gone() -> &'static str {
+    crate::i18n::t("这个会话的进程已经不在了", "this session's process is gone")
+}
 
 fn codex_pid(session_id: &str) -> Option<i32> {
     let source = crate::pipeline::CODEX_SOURCE;
@@ -73,16 +86,17 @@ fn codex_pid(session_id: &str) -> Option<i32> {
 /// when it was stamped, or the jump would raise some unrelated app.
 fn stamped_pid(slot: &AgentSlot, marker: impl Fn(i32) -> Option<u64>) -> Result<i32, String> {
     if slot.exiting_at.is_some() {
-        return Err(GONE.to_owned());
+        return Err(gone().to_owned());
     }
-    let stamp = slot
-        .pid
-        .ok_or("这个会话还没报过进程号，等它下次调用工具再试")?;
+    let stamp = slot.pid.ok_or(crate::i18n::t(
+        "这个会话还没报过进程号，等它下次调用工具再试",
+        "this session has not reported its pid yet; try again after its next tool call",
+    ))?;
     if stamp
         .started
         .is_some_and(|started| marker(stamp.pid) != Some(started))
     {
-        return Err(GONE.to_owned());
+        return Err(gone().to_owned());
     }
     Ok(stamp.pid)
 }
@@ -157,26 +171,27 @@ fn ancestors(table: &impl ProcessTable, start: i32) -> Vec<i32> {
 /// the pane's session is used as it is, so no one's view of another session
 /// is pulled away; with none, the first client is switched over.
 fn show_tmux_pane(table: &impl ProcessTable, tmux: &impl Tmux, pid: i32) -> Result<Client, String> {
-    const NOT_IN_TMUX: &str = "找不到它所在的终端";
+    let not_in_tmux = crate::i18n::t("找不到它所在的终端", "cannot find the terminal it runs in");
     let up = ancestors(table, pid);
     let pane = tmux
         .panes()
-        .ok_or(NOT_IN_TMUX)?
+        .ok_or(not_in_tmux)?
         .into_iter()
         .find(|p| up.contains(&p.pid))
-        .ok_or(NOT_IN_TMUX)?;
+        .ok_or(not_in_tmux)?;
     let clients = tmux.clients();
     let (client, tty) = match clients.iter().find(|c| c.session == pane.session) {
         Some(c) => (c, None),
         None => {
-            let c = clients
-                .first()
-                .ok_or("它在 tmux 里，但没有终端连着 tmux（先 tmux attach）")?;
+            let c = clients.first().ok_or(crate::i18n::t(
+                "它在 tmux 里，但没有终端连着 tmux（先 tmux attach）",
+                "it runs in tmux, but no terminal is attached to tmux (tmux attach first)",
+            ))?;
             (c, Some(c.tty.as_str()))
         }
     };
     if !tmux.show(&pane.id, tty) {
-        return Err("tmux 没切过去".to_owned());
+        return Err(crate::i18n::t("tmux 没切过去", "tmux did not switch to it").to_owned());
     }
     Ok(client.clone())
 }
@@ -191,15 +206,30 @@ fn focus_terminal(
     select_tab: impl FnOnce(Terminal, String),
 ) -> Result<&'static str, String> {
     let (app, tty, note) = match terminal_of(table, pid) {
-        Some(app) => (app, table.tty(pid), "已切到它所在的终端"),
+        Some(app) => (
+            app,
+            table.tty(pid),
+            crate::i18n::t("已切到它所在的终端", "switched to its terminal"),
+        ),
         None => {
             let client = show_tmux_pane(table, tmux, pid)?;
-            let app = terminal_of(table, client.pid).ok_or("找不到连着 tmux 的那个终端")?;
-            (app, Some(client.tty), "已切到它所在的 tmux 窗格")
+            let app = terminal_of(table, client.pid).ok_or(crate::i18n::t(
+                "找不到连着 tmux 的那个终端",
+                "cannot find the terminal attached to tmux",
+            ))?;
+            (
+                app,
+                Some(client.tty),
+                crate::i18n::t("已切到它所在的 tmux 窗格", "switched to its tmux pane"),
+            )
         }
     };
     if !activate(app) {
-        return Err("macOS 没让终端切到前台".to_owned());
+        return Err(crate::i18n::t(
+            "macOS 没让终端切到前台",
+            "macOS did not bring the terminal forward",
+        )
+        .to_owned());
     }
     if let (Some(term), Some(tty)) = (table.name(app).as_deref().and_then(Terminal::of), tty) {
         select_tab(term, tty);
@@ -455,7 +485,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
     let mut child = std::process::Command::new("open")
         .arg(url)
         .spawn()
-        .map_err(|e| format!("open 失败：{e}"))?;
+        .map_err(|e| crate::tr!("open 失败：{e}", "open failed: {e}"))?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -464,11 +494,21 @@ pub fn open_url(url: &str) -> Result<(), String> {
 
 /// The live pid of CC session `session_id` and its registry entry.
 fn registry_entry(dir: &Path, session_id: &str) -> Result<(i32, serde_json::Value), String> {
-    let live = live_cc_session_ids(dir).ok_or("读不了 ~/.claude/sessions")?;
-    let pid = *live.pid_of.get(session_id).ok_or(GONE)?;
-    let bytes = std::fs::read(dir.join(format!("{pid}.json")))
-        .map_err(|e| format!("读不了会话登记：{e}"))?;
-    let entry = serde_json::from_slice(&bytes).map_err(|_| "会话登记不是 JSON".to_owned())?;
+    let live = live_cc_session_ids(dir).ok_or(crate::i18n::t(
+        "读不了 ~/.claude/sessions",
+        "cannot read ~/.claude/sessions",
+    ))?;
+    let pid = *live.pid_of.get(session_id).ok_or_else(gone)?;
+    let bytes = std::fs::read(dir.join(format!("{pid}.json"))).map_err(|e| {
+        crate::tr!(
+            "读不了会话登记：{e}",
+            "cannot read the session registry: {e}"
+        )
+    })?;
+    let entry = serde_json::from_slice(&bytes).map_err(|_| {
+        crate::i18n::t("会话登记不是 JSON", "the session registry is not JSON").to_owned()
+    })?;
+
     Ok((pid, entry))
 }
 
@@ -479,7 +519,10 @@ fn url_for(entry: &serde_json::Value) -> Result<Option<String>, &'static str> {
     if field("entrypoint") != Some("claude-desktop") {
         return Ok(None);
     }
-    let host = field("hostSessionId").ok_or("桌面会话没有 hostSessionId")?;
+    let host = field("hostSessionId").ok_or(crate::i18n::t(
+        "桌面会话没有 hostSessionId",
+        "the desktop session has no hostSessionId",
+    ))?;
     // The app drops a link whose id is not `^local_[A-Za-z0-9-]{1,64}$`; a
     // bad one is caught here so the user is told, not ignored.
     let tail = host.strip_prefix("local_").unwrap_or_default();
@@ -487,7 +530,10 @@ fn url_for(entry: &serde_json::Value) -> Result<Option<String>, &'static str> {
         || tail.len() > 64
         || !tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        return Err("hostSessionId 格式认不出");
+        return Err(crate::i18n::t(
+            "hostSessionId 格式认不出",
+            "unrecognized hostSessionId format",
+        ));
     }
     Ok(Some(format!("claude://code/continue?session={host}")))
 }

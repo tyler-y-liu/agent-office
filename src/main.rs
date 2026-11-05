@@ -10,6 +10,7 @@ mod dsh;
 mod floating;
 mod fun;
 mod hook;
+mod i18n;
 mod jump;
 mod notify;
 mod panel;
@@ -49,9 +50,10 @@ fn main() -> Result<()> {
                 ("disconnect", Some(&"cursor")) => cursor::disconnect(),
                 // A typo must not touch Claude Code's hooks instead.
                 (_, Some(other)) => {
-                    anyhow::bail!(
-                        "不认识 {other}：只有 {cmd}、{cmd} dsh、{cmd} codex、{cmd} cursor"
-                    )
+                    anyhow::bail!(crate::tr!(
+                        "不认识 {other}：只有 {cmd}、{cmd} dsh、{cmd} codex、{cmd} cursor",
+                        "unknown {other}: only {cmd}, {cmd} dsh, {cmd} codex, {cmd} cursor"
+                    ))
                 }
                 _ => unreachable!(),
             };

@@ -17,7 +17,7 @@
 - **一键跳回**：双击小人或卡片，在 Claude 桌面 app 里打开那个会话，或者把它所在的终端切到前台。
 - **多种 agent**：Claude Code、Codex、Cursor（`cursor-agent`）和 DeepSeek Harness（dsh）。
 
-界面文字是中文。
+界面有简体中文和英文两种，默认跟随 macOS 的系统语言，也可以用 `AGENT_OFFICE_LANG` 指定。
 
 ## 环境要求
 
@@ -103,6 +103,7 @@ AGENT_OFFICE_MODEL=your-model
 |---|---|
 | `AGENT_OFFICE_API_BASE` / `_API_KEY` / `_MODEL` | 摘要接口。三个都配了才开启摘要 |
 | `AGENT_OFFICE_SUMMARY=off` | 不发任何内容出去，任务栏显示原始指令 |
+| `AGENT_OFFICE_LANG` | 界面和摘要的语言：`zh` 或 `en`。默认看 macOS 的系统语言，其次看 `LANG`；不是中文就用英文 |
 | `AGENT_OFFICE_NOTIFY=off` | 不弹系统通知、Dock 图标不跳；角标照常显示 |
 | `AGENT_OFFICE_SOUND=on` | 打开音效（默认关）：有人开始等你批准时「叮」一声，撒彩纸时「啵」一声 |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | 「可能卡住」的门槛：连续失败次数（默认 3），干活时几分钟没动静（默认 5），长调用时几分钟（默认 20）。`doctor` 显示当前值 |

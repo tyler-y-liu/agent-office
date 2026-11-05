@@ -525,7 +525,7 @@ impl Floating<'_> {
                 caps_size: None,
                 pets: vec![Pet {
                     kind: PetKind::Cat,
-                    name: "店长".to_string(),
+                    name: crate::i18n::t("店长", "Manager").to_string(),
                 }],
             },
             on_top: false,
@@ -604,7 +604,10 @@ impl Win {
                 &mut canvas,
                 16,
                 base,
-                "窗口太小，放大后显示办公室",
+                crate::i18n::t(
+                    "窗口太小，放大后显示办公室",
+                    "Window too small: enlarge it to see the office",
+                ),
                 TEXT,
                 g.px,
             );
@@ -796,12 +799,15 @@ impl Win {
                 (
                     "t",
                     if self.on_top {
-                        "取消置顶"
+                        crate::i18n::t("取消置顶", "unpin")
                     } else {
-                        "置顶"
+                        crate::i18n::t("置顶", "pin on top")
                     },
                 ),
-                ("", "点门牌看说明"),
+                (
+                    "",
+                    crate::i18n::t("点门牌看说明", "click a sign to learn more"),
+                ),
             ],
         );
         canvas.fill(0, i64::from(oh), w.get(), h.get() - oh, PANEL_BG);
@@ -1045,7 +1051,7 @@ impl Win {
         {
             // Your office's sign opens whoever sits in its guest chair; with
             // no one waiting it says what the room is for, like any sign.
-            if text == OFFICE_SIGN && self.core.next_waiting().is_some() {
+            if text == office_sign() && self.core.next_waiting().is_some() {
                 self.core.act(Action::OpenNext, &mut self.office);
                 return;
             }
@@ -1244,7 +1250,7 @@ impl Win {
                 }
             }
             Reaction::Cat(x, y) => {
-                lively::meow(canvas, &mut self.faces, stage, (x, y), crate::fun::MEOW);
+                lively::meow(canvas, &mut self.faces, stage, (x, y), crate::fun::meow());
             }
         }
     }
@@ -1287,7 +1293,7 @@ impl Win {
                 RoomStyle::Boss => {
                     let door = signs
                         .iter()
-                        .find(|s| s.text == OFFICE_SIGN)
+                        .find(|s| s.text == office_sign())
                         .map(|s| &s.area);
                     rooms::sea_window(canvas, room, door, frame.clock.hour, stage.ms);
                 }
@@ -1351,7 +1357,7 @@ impl Win {
             }
         }
         if let Some(ago) = self.core.watch.boss_at_door(now)
-            && let Some(door) = signs.iter().find(|s| s.text == "你的办公室")
+            && let Some(door) = signs.iter().find(|s| s.text == office_sign())
         {
             let stay = crate::fun::stats::BOSS_FOR;
             lively::boss(canvas, &mut self.faces, stage, door, ago, stay);
@@ -1897,40 +1903,52 @@ pub(crate) struct DoorSign {
     ink: u32,
 }
 
-/// The Chinese for a zone pixtuoid signs in ASCII, the art font having no
-/// Chinese.
-fn door_sign_zh(text: &str) -> Option<&'static str> {
+/// A zone pixtuoid signs in ASCII, in the office's language and the
+/// readable faces: the art font's 8px English is all but unreadable, and it
+/// has no Chinese.
+fn door_sign(text: &str) -> Option<&'static str> {
+    use crate::i18n::t;
     Some(match text {
-        "MTG A" => "会议室 A",
-        "MTG B" => "会议室 B",
-        "PANTRY" => "茶水间",
-        "WAIT" => "等候区",
-        "OFFICE" => OFFICE_SIGN,
-        "ROOF" => "天台",
+        "MTG A" => t("会议室 A", "Meeting A"),
+        "MTG B" => t("会议室 B", "Meeting B"),
+        "PANTRY" => t("茶水间", "Pantry"),
+        "WAIT" => t("等候区", "Waiting"),
+        "OFFICE" => office_sign(),
+        "ROOF" => t("天台", "Rooftop"),
         _ => return None,
     })
 }
 
 /// Your office's door sign, which a click on opens the head of the line.
-const OFFICE_SIGN: &str = "你的办公室";
+pub(crate) fn office_sign() -> &'static str {
+    crate::i18n::t("你的办公室", "Your office")
+}
 
 /// What a zone pixtuoid signs in ASCII is for: who is in there, and what
 /// moves them on, so the office reads without the README.
 fn zone_about(text: &str) -> Option<&'static str> {
+    use crate::i18n::t;
     Some(match text {
-        "MTG A" | "MTG B" => "子 agent 跑满 15 秒的会话，和它的子 agent 一起在这儿开会。",
-        "PANTRY" => {
-            "刚做完、你还没看的会话在这儿等你看结果。双击打开看过，或者做完满 15 分钟，就上天台。"
-        }
-        "WAIT" => {
-            "等你批准超过 20 秒，或者做完了在问你问题的会话，在这儿排队：等你批准的排前面，同类按先后。排第一个的坐你办公室的访客椅。你处理完它就回工位。"
-        }
-        "OFFICE" => {
-            "访客椅上坐的是该先处理的会话：等你批准的优先，其次是在问你问题的，同类等得久的先。有人等你时，点这块门牌或按 n 直接打开它。"
-        }
-        "ROOF" => {
-            "闲着、不用你管的会话：做完超过 15 分钟，或者你已经打开看过。你给它发新消息它就回工位。"
-        }
+        "MTG A" | "MTG B" => t(
+            "子 agent 跑满 15 秒的会话，和它的子 agent 一起在这儿开会。",
+            "A session whose subagents have run for 15 seconds meets here with them.",
+        ),
+        "PANTRY" => t(
+            "刚做完、你还没看的会话在这儿等你看结果。双击打开看过，或者做完满 15 分钟，就上天台。",
+            "Sessions that just finished and you have not read wait here for you. Once you open one with a double-click, or 15 minutes after it finished, it goes up to the rooftop.",
+        ),
+        "WAIT" => t(
+            "等你批准超过 20 秒，或者做完了在问你问题的会话，在这儿排队：等你批准的排前面，同类按先后。排第一个的坐你办公室的访客椅。你处理完它就回工位。",
+            "Sessions waiting over 20 seconds for your approval, or finished and asking you a question, queue here: approvals first, then by arrival. The first in line sits in your office's guest chair. Once you deal with one it goes back to its desk.",
+        ),
+        "OFFICE" => t(
+            "访客椅上坐的是该先处理的会话：等你批准的优先，其次是在问你问题的，同类等得久的先。有人等你时，点这块门牌或按 n 直接打开它。",
+            "The guest chair holds the session to deal with first: approvals before questions, the longest waiting first. While someone waits, click this sign or press n to open it.",
+        ),
+        "ROOF" => t(
+            "闲着、不用你管的会话：做完超过 15 分钟，或者你已经打开看过。你给它发新消息它就回工位。",
+            "Idle sessions that need nothing from you: finished over 15 minutes ago, or already opened. Send one a new message and it goes back to its desk.",
+        ),
         _ => return None,
     })
 }
@@ -1941,25 +1959,55 @@ const ABOUT_PT: f64 = 10.5;
 
 /// How long a sign's explanation stays up unless clicked away.
 const ABOUT_FOR: Duration = Duration::from_secs(10);
-/// Cells an explanation's line may take.
-const ABOUT_CELLS: u32 = 26;
+/// Cells an explanation's line may take: English takes about twice the
+/// cells Chinese does to say the same.
+fn about_cells() -> u32 {
+    if crate::i18n::is_zh() { 26 } else { 36 }
+}
 const ABOUT_BG: u32 = 0x0024_2833;
 const ABOUT_EDGE: u32 = 0x005a_6070;
 
-/// `s` broken into lines of at most `max` cells, at any character: the
-/// explanations are Chinese, which breaks anywhere.
+/// `s` broken into lines of at most `max` cells: Chinese breaks at any
+/// character, an ASCII word only at a space, which the break drops. A word
+/// longer than a line is cut where it must be.
 fn wrap_cells(s: &str, max: u32) -> Vec<String> {
     let max = max.max(2);
     let mut lines = vec![String::new()];
     let mut used = 0;
-    for c in s.chars() {
-        let w = Faces::cells(&c.to_string());
-        if used + w > max {
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        let len = if c.is_ascii() && c != ' ' {
+            rest.find(|c: char| !c.is_ascii() || c == ' ')
+                .unwrap_or(rest.len())
+        } else {
+            c.len_utf8()
+        };
+        let (token, after) = rest.split_at(len);
+        rest = after;
+        let w = Faces::cells(token);
+        if token == " " && (used == 0 || used + w > max) {
+            // A break's space would only push the line past its width.
+            if used + w > max {
+                lines.push(String::new());
+                used = 0;
+            }
+            continue;
+        }
+        if used + w > max && used > 0 {
+            let line = lines.last_mut().expect("never empty");
+            line.truncate(line.trim_end().len());
             lines.push(String::new());
             used = 0;
         }
-        used += w;
-        lines.last_mut().expect("never empty").push(c);
+        for c in token.chars() {
+            let cw = Faces::cells(&c.to_string());
+            if used + cw > max {
+                lines.push(String::new());
+                used = 0;
+            }
+            used += cw;
+            lines.last_mut().expect("never empty").push(c);
+        }
     }
     lines
 }
@@ -1977,7 +2025,7 @@ fn paint_about(
     let pad = 2 * tag_pad(scale_factor);
     let cell = faces.cell_w(px).max(1);
     let fit = bounds.0.saturating_sub(2 * pad + 2) / cell;
-    let lines = wrap_cells(sign.about, ABOUT_CELLS.min(fit));
+    let lines = wrap_cells(sign.about, about_cells().min(fit));
     let line_h = px + px / 3;
     let widest = lines.iter().map(|l| Faces::cells(l)).max().unwrap_or(0);
     let w = widest * cell + 2 * pad;
@@ -2018,10 +2066,10 @@ fn door_signs(
         .filter(|r| set_readable(r.role))
         .filter_map(|r| {
             let text: String = r.spans.iter().map(|s| s.text().to_owned()).collect();
-            let zh = door_sign_zh(&text)?.to_owned();
+            let shown = door_sign(&text)?.to_owned();
             let cx = i64::from(u32::from(r.at.x) * d) * i64::from(u);
             let cy = (i64::from(u32::from(r.at.y) * d) + cell / 2) * i64::from(u);
-            let w = Faces::cells(&zh) * faces.cell_w(px) + 2 * pad;
+            let w = Faces::cells(&shown) * faces.cell_w(px) + 2 * pad;
             let h = px + 2 * pad;
             Some(DoorSign {
                 area: Area {
@@ -2031,7 +2079,7 @@ fn door_signs(
                     h,
                 },
                 about: zone_about(&text)?,
-                text: zh,
+                text: shown,
                 plate: r.plate.map_or(PANEL_BG, to_u32),
                 ink: r.spans.first().map_or(TEXT, |s| to_u32(s.ink)),
             })
@@ -2395,10 +2443,10 @@ mod tests {
         );
     }
 
-    /// Every zone pixtuoid signs reads in Chinese in the window: a sign the
-    /// map missed would vanish, not fall back to ASCII.
+    /// Every zone pixtuoid signs reads in the office's language in the
+    /// window: a sign the map missed would vanish, not fall back to ASCII.
     #[test]
-    fn every_door_sign_has_its_chinese() {
+    fn every_door_sign_has_its_words() {
         for (ascii, zh) in [
             ("MTG A", "会议室 A"),
             ("MTG B", "会议室 B"),
@@ -2407,9 +2455,19 @@ mod tests {
             ("OFFICE", "你的办公室"),
             ("ROOF", "天台"),
         ] {
-            assert_eq!(door_sign_zh(ascii), Some(zh));
+            assert_eq!(door_sign(ascii), Some(zh));
         }
-        assert_eq!(door_sign_zh("LOBBY"), None);
+        assert_eq!(door_sign("LOBBY"), None);
+        let en = crate::i18n::with(crate::i18n::Lang::En, || {
+            ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"].map(door_sign)
+        });
+        // The office sign is found by its words: a click on it opens the
+        // head of the line, so it must match in either language.
+        assert_eq!(
+            en[4],
+            crate::i18n::with(crate::i18n::Lang::En, || Some(office_sign()))
+        );
+        assert!(en.iter().all(|s| s.is_some_and(|s| s.is_ascii())), "{en:?}");
     }
 
     /// Clicking any zone's sign must say what the zone is for: a sign the
@@ -2419,25 +2477,43 @@ mod tests {
     fn every_door_sign_says_what_its_zone_is_for() {
         for ascii in ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"] {
             assert!(zone_about(ascii).is_some_and(|s| !s.is_empty()), "{ascii}");
+            let en = crate::i18n::with(crate::i18n::Lang::En, || zone_about(ascii));
+            assert!(en.is_some_and(|s| s.is_ascii()), "{ascii}: {en:?}");
         }
         assert_eq!(zone_about("LOBBY"), None);
     }
 
     /// An explanation is set on a plate of bounded width: a line wider than
     /// asked would run off the office or under the panel, and losing or
-    /// reordering a character would change what it says.
+    /// reordering a character would change what it says. Only the spaces
+    /// it breaks at go.
     #[test]
     fn an_explanation_wraps_within_its_width_and_keeps_every_character() {
-        let s = zone_about("WAIT").expect("signed");
-        for max in [3, 10, 26] {
-            let lines = wrap_cells(s, max);
-            assert!(
-                lines.iter().all(|l| Faces::cells(l) <= max),
-                "{max}: {lines:?}"
-            );
-            assert_eq!(lines.concat(), s, "{max}");
+        use crate::i18n::{Lang, with};
+        for lang in [Lang::Zh, Lang::En] {
+            let s = with(lang, || zone_about("WAIT")).expect("signed");
+            for max in [3, 10, 26, 36] {
+                let lines = wrap_cells(s, max);
+                assert!(
+                    lines.iter().all(|l| Faces::cells(l) <= max),
+                    "{max}: {lines:?}"
+                );
+                assert_eq!(lines.concat().replace(' ', ""), s.replace(' ', ""), "{max}");
+            }
         }
         assert_eq!(wrap_cells("短", 26), vec!["短".to_owned()]);
+    }
+
+    /// English breaks between words: "approval" cut into "appro" and
+    /// "val" reads as two words.
+    #[test]
+    fn english_wraps_between_words() {
+        assert_eq!(
+            wrap_cells("queue here for your approval", 12),
+            vec!["queue here", "for your", "approval"]
+        );
+        // A word longer than the line is still cut, not run off the plate.
+        assert_eq!(wrap_cells("abcdefgh", 3), vec!["abc", "def", "gh"]);
     }
 
     /// A crowd's two-line tags piled over each other and ran off the
