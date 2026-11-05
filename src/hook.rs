@@ -117,6 +117,16 @@ fn send(raw: &str, source: Option<&str>, socket: &std::path::Path) -> Option<()>
             source.into(),
         );
     }
+    // The router keeps this pid on the session for a double-click to walk up
+    // to its terminal from. dsh's plugin stamps its own; Claude Code and Codex
+    // are found from their own files.
+    if source == Some(crate::pipeline::CURSOR_SOURCE)
+        && let Some(pid) = cli_pid(std::process::id() as i32, crate::jump::ps_row)
+    {
+        v.as_object_mut()?
+            .entry(pixtuoid_core::source::decoder::PID_STAMP)
+            .or_insert(pid.into());
+    }
     #[cfg(unix)]
     {
         let mut s = std::os::unix::net::UnixStream::connect(socket).ok()?;
@@ -124,6 +134,28 @@ fn send(raw: &str, source: Option<&str>, socket: &std::path::Path) -> Option<()>
         writeln!(s, "{v}").ok()?;
     }
     Some(())
+}
+
+/// Shells a CLI may run its hook through, by image name.
+const SHELLS: [&str; 7] = ["sh", "bash", "zsh", "dash", "ksh", "fish", "busybox"];
+
+/// The CLI that ran the hook process `me`: its first ancestor that is not a
+/// shell. Cursor `eval`s a hook inside a shell that exits after it, which a
+/// click would find gone (pixtuoid-hook's `cli_pid`, MIT, pixtuoid authors).
+fn cli_pid(me: i32, row_of: impl Fn(i32) -> Option<(i32, String)>) -> Option<i32> {
+    let mut pid = me;
+    // A real chain has a shell or two in it; the bound ends a corrupt one.
+    for _ in 0..8 {
+        let (parent, _) = row_of(pid)?;
+        if parent <= 1 {
+            return None;
+        }
+        if !SHELLS.contains(&row_of(parent)?.1.as_str()) {
+            return Some(parent);
+        }
+        pid = parent;
+    }
+    None
 }
 
 fn settings_path() -> Result<PathBuf> {
@@ -344,5 +376,22 @@ mod tests {
             "{evs:?}"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Cursor runs the hook in a shell that exits right after; stamping that
+    /// shell would send a double-click to a dead pid. The CLI above it is
+    /// what the session's terminal is found from.
+    #[test]
+    fn the_cli_pid_skips_the_shell_the_hook_ran_in() {
+        let rows = std::collections::HashMap::from([
+            (50, (40, "agent-office".to_owned())),
+            (40, (30, "zsh".to_owned())),
+            (30, (20, "cursor-agent".to_owned())),
+            (20, (1, "login".to_owned())),
+        ]);
+        let row_of = |pid| rows.get(&pid).cloned();
+        assert_eq!(cli_pid(50, row_of), Some(30));
+        // Started straight from launchd: nobody's CLI.
+        assert_eq!(cli_pid(20, row_of), None);
     }
 }

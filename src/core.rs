@@ -207,7 +207,7 @@ impl Core {
             Action::Open => {
                 let scene = self.scene();
                 let done = match self.ui.selected {
-                    Some(id) => jump::open_agent(&scene, id).inspect(|()| {
+                    Some(id) => jump::open_agent(&scene, id).inspect(|_| {
                         // The session opened is the root's: all of it is read.
                         let now = SystemTime::now();
                         let mut at = Some(id);
@@ -222,13 +222,15 @@ impl Core {
                 };
                 self.note_result(done);
             }
-            Action::OpenWaiting => self.note_result(jump::open_url(jump::NEEDS_INPUT)),
+            Action::OpenWaiting => {
+                self.note_result(jump::open_url(jump::NEEDS_INPUT).map(|()| "已在 Claude 打开"))
+            }
         }
         false
     }
 
-    fn note_result(&mut self, done: Result<(), String>) {
-        let text = done.map_or_else(|e| format!("跳转：{e}"), |()| "已在 Claude 打开".to_owned());
+    fn note_result(&mut self, done: Result<&str, String>) {
+        let text = done.map_or_else(|e| format!("跳转：{e}"), str::to_owned);
         self.note = Some((text, Instant::now()));
     }
 

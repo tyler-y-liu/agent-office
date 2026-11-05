@@ -30,6 +30,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "objc2-app-kit",
  "pixtuoid-core",
  "pixtuoid-scene",
  "png",

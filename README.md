@@ -1,6 +1,6 @@
 # agent-office
 
-An always-on-top pixel office on Victoria Harbour for your Claude Code sessions: every session is a little worker, with a one-line AI summary of its current task over its head and in the side panel. It flags sessions waiting for your approval or likely stuck, and a double-click jumps back to that session in the Claude desktop app. macOS; Claude Code, plus DeepSeek Harness, Codex and Cursor (`cursor-agent`) sessions; the UI is in Chinese.
+An always-on-top pixel office on Victoria Harbour for your Claude Code sessions: every session is a little worker, with a one-line AI summary of its current task over its head and in the side panel. It flags sessions waiting for your approval or likely stuck, and a double-click jumps back to that session in the Claude desktop app, or brings forward the terminal it runs in. macOS; Claude Code, plus DeepSeek Harness, Codex and Cursor (`cursor-agent`) sessions; the UI is in Chinese.
 
 ![agent-office](docs/screenshot.png)
 
@@ -32,7 +32,7 @@ DeepSeek Harness（dsh）的会话也能进办公室：
 agent-office connect dsh   # 往 $DSH_HOME（默认 ~/.dsh）写插件，并挂进 cordis.patch.yml；新开的 dsh 进程生效
 ```
 
-插件把会话事件发给 `agent-office hook --source dsh`，另外在 `$DSH_HOME/agent-office/transcripts/` 为每个会话记一份任务日志（你的指令、它的回复、todo、每次工具调用的路径/命令，不含文件内容和工具输出），摘要和卡点检测就读这份日志。`agent-office disconnect dsh` 卸掉插件，日志保留。dsh 会话双击跳不过去。可以和 pixtuoid 的 dsh 插件同时挂。
+插件把会话事件发给 `agent-office hook --source dsh`，另外在 `$DSH_HOME/agent-office/transcripts/` 为每个会话记一份任务日志（你的指令、它的回复、todo、每次工具调用的路径/命令，不含文件内容和工具输出），摘要和卡点检测就读这份日志。`agent-office disconnect dsh` 卸掉插件，日志保留。可以和 pixtuoid 的 dsh 插件同时挂。
 
 Codex 的会话不用接入也会进办公室：摘要和卡点读 `$CODEX_HOME/sessions`（默认 `~/.codex/sessions`）里的会话记录。要看到「等你确认」再接 hooks：
 
@@ -48,7 +48,7 @@ Cursor 的 `cursor-agent` 只能靠 hooks：
 agent-office connect cursor  # 往 Cursor 配置目录（默认 ~/.cursor）的 hooks.json 加 hooks（先备份）；新开的 cursor-agent 生效
 ```
 
-Cursor 自己的会话记录里没有工具调用，所以 hook 另外在 `~/.config/agent-office/cursor/transcripts/` 为每个会话记一份任务日志（内容同 dsh），摘要和卡点检测读它。`agent-office disconnect cursor` 移除 hooks，日志保留。Codex 和 Cursor 的会话双击都跳不过去。
+Cursor 自己的会话记录里没有工具调用，所以 hook 另外在 `~/.config/agent-office/cursor/transcripts/` 为每个会话记一份任务日志（内容同 dsh），摘要和卡点检测读它。`agent-office disconnect cursor` 移除 hooks，日志保留。
 
 `agent-office disconnect` 移除 hooks。hooks 指向 `connect` 时这个程序所在的位置，移动或重装到别处后要重新 `connect`。
 
@@ -75,7 +75,7 @@ agent-office --shot out.png    # 跑 20 秒后把画面存成 PNG 并退出
 ## 限制
 
 - 只在 macOS 上用过。
-- 跳转只支持 Claude 桌面 app 里的会话；终端里跑的会话和 dsh、Codex、Cursor 会话会在页脚提示跳不过去。
+- 跳转：Claude 桌面 app 里的会话直接打开那个会话；终端里跑的会话（Claude Code、dsh、Codex、Cursor）只能把它所在的终端程序切到前台，到不了具体标签页。在 tmux 里跑的会话找不到终端，跳不过去。Cursor 会话要等它调用过一次工具才能跳。
 - 只显示 Claude Code、dsh、Codex 和 Cursor（`cursor-agent`）会话。
 - 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
 
