@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 
 use crate::fun::{self, Clock, hko::Outlook, stats::Watch};
 use crate::panel::{self, PanelState};
-use crate::{jump, pipeline, tasks, text};
+use crate::{jump, notify, pipeline, tasks, text};
 
 /// An office that has floors to move between.
 pub trait Floors {
@@ -63,6 +63,8 @@ pub struct Core {
     /// The day's tally, the repositories' records and the boss's comings.
     pub watch: Watch,
     outlook_rx: tokio::sync::watch::Receiver<Outlook>,
+    notifier: notify::Notifier,
+    banners: bool,
 }
 
 /// One frame's worth of state.
@@ -209,6 +211,8 @@ impl Core {
             force_tx,
             watch: Watch::load(),
             outlook_rx,
+            notifier: notify::Notifier::default(),
+            banners: notify::banners_on(),
         }
     }
 
@@ -251,6 +255,38 @@ impl Core {
             labels,
             clock,
             outlook,
+        }
+    }
+
+    /// Tell the OS who waits on you: a banner per new wait, the Dock's badge.
+    /// Run on its own clock, not per frame, since a covered window draws
+    /// none and that is when word matters most.
+    pub fn watch_waits(&mut self, focused: bool) {
+        let views = self.views_rx.borrow().clone();
+        let tick = self.notifier.tick(
+            &self.scene(),
+            &views,
+            &self.ui.seen,
+            SystemTime::now(),
+            focused,
+        );
+        if self.banners {
+            tick.alerts.iter().for_each(notify::post);
+        }
+        if let Some(n) = tick.badge {
+            notify::set_badge(n);
+        }
+    }
+
+    /// The window came back in front: after a banner, select who waits
+    /// first, so `o` or Enter goes straight to it.
+    pub fn focus_gained(&mut self, floors: &mut impl Floors) {
+        if std::mem::take(&mut self.notifier.unseen)
+            && let Some(id) = self.next_waiting()
+        {
+            self.ui.selected = Some(id);
+            self.ui.reveal = true;
+            self.follow(floors);
         }
     }
 

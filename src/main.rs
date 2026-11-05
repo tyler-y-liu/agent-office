@@ -10,6 +10,7 @@ mod floating;
 mod fun;
 mod hook;
 mod jump;
+mod notify;
 mod panel;
 mod pipeline;
 mod tasks;

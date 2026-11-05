@@ -26,7 +26,9 @@ rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The version winit already pulls in; raises the terminal a session runs in.
-objc2-app-kit = { version = "0.2.2", features = ["NSRunningApplication", "libc"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSRunningApplication", "libc", "NSApplication", "NSResponder", "NSDockTile"] }
+# The Dock badge's label and the main-thread proof AppKit asks for.
+objc2-foundation = { version = "0.2.2", features = ["NSString", "NSThread"] }
 
 # Idle agents lounge instead of cycling desk ↔ waypoint; see vendor/pixtuoid-scene/src/walk/mod.rs.
 # The scene is also agent-office's own look (theme, sign, art), and core is
