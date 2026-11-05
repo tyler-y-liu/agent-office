@@ -563,6 +563,11 @@ pub struct SceneState {
     pub agents: BTreeMap<AgentId, AgentSlot>,
     /// Desk capacity per floor, indexed by floor (`0..MAX_FLOORS`).
     pub floor_capacities: [usize; MAX_FLOORS],
+    /// agent-office: per floor, the bench each floor-local desk sits on, as
+    /// the scene lays them out (`pixtuoid_scene::floor::floor_benches`). A
+    /// desk past its floor's list falls back to [`BENCH_SEATS`] in a row.
+    #[serde(default)]
+    pub floor_benches: [Vec<u16>; MAX_FLOORS],
     /// Daemon-style sources rendered as wandering mascots, keyed source →
     /// instance so instance A's stop/expiry can't touch instance B. Empty for
     /// an all-agent scene.
@@ -710,6 +715,7 @@ impl SceneState {
         Self {
             agents: BTreeMap::new(),
             floor_capacities,
+            floor_benches: Default::default(),
             daemons: DaemonRoster::default(),
         }
     }
@@ -779,13 +785,19 @@ impl SceneState {
     /// already sits, else the first seat of an empty bench on the floor the
     /// lowest free desk is on, else that desk. A new repository never opens a
     /// floor while this one has a seat, since only one floor shows at a time.
-    /// A bench is [`BENCH_SEATS`] floor-local desks in a row, the way the scene
-    /// deals a pod's desks.
+    /// A bench is the scene's ([`Self::floor_benches`]): a partial pod column
+    /// deals fewer than [`BENCH_SEATS`] desks a row, so counting indices in
+    /// fours would seat a repository on another's row.
     pub fn next_free_desk_for(&self, cwd: &Path) -> Option<GlobalDeskIndex> {
         let offsets = self.cumulative_offsets();
         let bench = |i: usize| {
             let floor = self.floor_of_with_offsets(GlobalDeskIndex(i), &offsets);
-            (floor, (i - offsets[floor]) / BENCH_SEATS)
+            let local = i - offsets[floor];
+            let id = match self.floor_benches[floor].get(local) {
+                Some(&b) => (false, usize::from(b)),
+                None => (true, local / BENCH_SEATS),
+            };
+            (floor, id)
         };
         let root = project_root(cwd);
         let mut taken = std::collections::BTreeSet::new();

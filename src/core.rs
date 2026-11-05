@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use pixtuoid_core::state::MAX_FLOORS;
 use pixtuoid_core::{AgentId, SceneState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -96,8 +95,9 @@ pub fn as_seen(
 }
 
 impl Core {
-    /// Start the sources and the task loop on `rt`, the floors seating `caps`.
-    pub fn start(rt: &tokio::runtime::Runtime, caps: [usize; MAX_FLOORS]) -> Self {
+    /// Start the sources and the task loop on `rt`, the floors seated for an
+    /// office `buf_w`×`buf_h`.
+    pub fn start(rt: &tokio::runtime::Runtime, buf_w: u16, buf_h: u16) -> Self {
         let summarizer = tasks::client::Summarizer::from_env();
         let summary_note = match &summarizer {
             Some(s) => format!("摘要 {}", s.model()),
@@ -105,7 +105,7 @@ impl Core {
         };
         let socket = crate::hook::socket_path();
         let (pipe, views_rx, force_tx) = rt.block_on(async {
-            let pipe = pipeline::spawn(socket, caps);
+            let pipe = pipeline::spawn(socket, buf_w, buf_h);
             let (views_rx, force_tx) = tasks::spawn(pipe.scene_rx.clone(), summarizer);
             (pipe, views_rx, force_tx)
         });
