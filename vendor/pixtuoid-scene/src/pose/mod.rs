@@ -610,6 +610,9 @@ fn wander_pose(
                 None => desk_leg_endpoint(desk, layout),
             };
             let settle = Settle::from_pair(chair_settle, seat);
+            // agent-office: one done with its turn takes a milk tea with it
+            // from its desk to the pantry.
+            let carrying_coffee = wf.from.is_none() && wf.kind.carries_coffee();
             route_walking_pose(
                 slot,
                 now,
@@ -619,7 +622,7 @@ fn wander_pose(
                     from,
                     to: dest,
                     progress: wf.progress,
-                    carrying_coffee: false,
+                    carrying_coffee,
                 },
                 settle,
             )

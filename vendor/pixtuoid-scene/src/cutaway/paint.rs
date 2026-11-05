@@ -4702,9 +4702,15 @@ mod tests {
             let scale = RenderScale::from(pack.max_density_variant());
             let dense = crate::pack::densest_frame(pack, PackPiece::Walking, 0, scale);
             let id = pixtuoid_core::AgentId::from_transcript_path(&format!("/style/{i}.jsonl"));
-            let style =
-                crate::character::dress_for(pack, id, dense.frame, dense.head, dense.density)
-                    .and_then(|d| d.style);
+            let style = crate::character::dress_for(
+                pack,
+                id.raw(),
+                None,
+                dense.frame,
+                dense.head,
+                dense.density,
+            )
+            .and_then(|d| d.style);
             let Some(style) = style.filter(|s| !worn.contains(s)) else {
                 continue;
             };

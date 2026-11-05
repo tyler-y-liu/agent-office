@@ -2429,3 +2429,38 @@ fn the_resurrect_check_reads_the_same_compressed_clock_as_the_exit_render() {
          honest origin, and raw elapsed would resume it mid-corridor"
     );
 }
+
+/// agent-office: one done with its turn carries a milk tea from its desk to
+/// the pantry, so a finished worker reads as off for a break on the way, not
+/// only once it sits down; the later move to the rooftop goes empty-handed.
+#[test]
+fn a_finished_worker_carries_milk_tea_to_the_pantry_only() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let l = layout();
+    let mut slot = running_slot(now, now - Duration::from_secs(120));
+    slot.state = ActivityState::Idle;
+    let mut rig = RouteRig::new(StubRouter::straight());
+    // Each frame's walking pose, if any, and whether it carries the tea.
+    let walk = |from_ms: u64, to_ms: u64, rig: &mut RouteRig<_>| {
+        let mut carried = Vec::new();
+        let mut t = from_ms;
+        while t < to_ms {
+            let at = now + Duration::from_millis(t);
+            if let Some(Pose::Walking {
+                carrying_coffee, ..
+            }) = derive_with_routing(&slot, at, &l, &mut rig.rctx())
+            {
+                carried.push(carrying_coffee);
+            }
+            t += PAINT_FRAME_MS;
+        }
+        carried
+    };
+    let to_pantry = walk(0, 60_000, &mut rig);
+    assert!(!to_pantry.is_empty(), "it walks to the pantry");
+    assert!(to_pantry.iter().all(|&c| c), "tea in hand all the way");
+    let rooftop_at = crate::pose::IDLE_ROOFTOP_MS;
+    let to_rooftop = walk(rooftop_at - 1_000, rooftop_at + 60_000, &mut rig);
+    assert!(!to_rooftop.is_empty(), "it walks on to the rooftop");
+    assert!(to_rooftop.iter().all(|&c| !c), "and leaves the tea behind");
+}

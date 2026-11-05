@@ -27,6 +27,41 @@ pub struct Stats {
     pub tokens: u64,
     /// Turns ever finished at each repository, by its directory's name.
     pub repos: BTreeMap<String, u32>,
+    /// Turns finished today in each hour of the office's clock: the replay's
+    /// day as it went.
+    #[serde(default)]
+    pub hours: [u32; 24],
+    /// Turns finished today by each worker, by the name its badge shows.
+    #[serde(default)]
+    pub by_worker: BTreeMap<String, u32>,
+    /// Each worker's longest stuck spell today, in seconds.
+    #[serde(default)]
+    pub stuck_longest: BTreeMap<String, u64>,
+}
+
+/// The day's honours the replay hands out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recap {
+    /// Who finished the most turns, and how many.
+    pub most: Option<(String, u32)>,
+    /// Who was stuck longest at a stretch, and for how many seconds.
+    pub stuck: Option<(String, u64)>,
+}
+
+impl Stats {
+    /// Today's honours; a tie goes to the name first in order, so the trophy
+    /// does not flicker between them.
+    pub fn recap(&self) -> Recap {
+        fn top<T: Copy + Ord>(m: &BTreeMap<String, T>) -> Option<(String, T)> {
+            m.iter()
+                .max_by_key(|(name, n)| (**n, std::cmp::Reverse(*name)))
+                .map(|(name, n)| (name.clone(), *n))
+        }
+        Recap {
+            most: top(&self.by_worker),
+            stuck: top(&self.stuck_longest).filter(|(_, s)| *s > 0),
+        }
+    }
 }
 
 /// A repository's standing, by turns finished there: each tier dresses its
@@ -81,6 +116,8 @@ const SAVE_EVERY: Duration = Duration::from_secs(10);
 #[derive(Debug, Default)]
 pub struct Watch {
     seen: HashMap<AgentId, Seen>,
+    /// When each agent stuck now got stuck.
+    stuck_since: HashMap<AgentId, SystemTime>,
     pub stats: Stats,
     /// When you last let a waiting agent go on.
     pub approved_at: Option<SystemTime>,
@@ -136,6 +173,8 @@ impl Watch {
             }
         }
         self.seen.retain(|id, _| scene.agents.contains_key(id));
+        self.stuck_since
+            .retain(|id, _| self.seen.get(id).is_some_and(|s| s.stuck));
     }
 
     fn count(&mut self, slot: &AgentSlot, was: Seen, is: Seen, now: SystemTime) {
@@ -146,12 +185,29 @@ impl Watch {
             if let Some(repo) = repo_of(slot) {
                 *self.stats.repos.entry(repo).or_default() += 1;
             }
+            let hour = Clock::now(now).hour as usize;
+            self.stats.hours[hour.min(23)] += 1;
+            *self
+                .stats
+                .by_worker
+                .entry(String::from(&*slot.label))
+                .or_default() += 1;
         }
         if was.state == Doing::Waiting && is.state == Doing::Working {
             self.approved_at = Some(now);
         }
         if !was.stuck && is.stuck {
             self.stats.stuck += 1;
+        }
+        if is.stuck {
+            let since = *self.stuck_since.entry(slot.agent_id).or_insert(now);
+            let secs = now.duration_since(since).unwrap_or_default().as_secs();
+            let longest = self
+                .stats
+                .stuck_longest
+                .entry(String::from(&*slot.label))
+                .or_default();
+            *longest = (*longest).max(secs);
         }
         self.stats.tokens += is.tokens.saturating_sub(was.tokens);
         self.unsaved |= self.stats != before;
@@ -328,5 +384,64 @@ mod tests {
             [0, 9, 10, 49, 50, 199, 200].map(tier),
             [0, 0, 1, 1, 2, 2, 3]
         );
+    }
+
+    /// The replay's honours come from today's own record: who finished most,
+    /// and whose stuck spell ran longest, measured from when it began, not
+    /// summed over frames, or a long-open office would inflate every spell.
+    #[test]
+    fn the_day_names_who_finished_most_and_who_was_stuck_longest() {
+        use crate::tasks::{Stuck, TaskView};
+        let (mut scene, ids) = scene_with(&[("a", "/src/shop"), ("b", "/src/blog")]);
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_100);
+        let mut w = watch();
+        let none = TaskViews::default();
+        let label = |scene: &SceneState, i: usize| String::from(&*scene.agents[&ids[i]].label);
+        let set =
+            |scene: &mut SceneState, i: usize, s| scene.agents.get_mut(&ids[i]).unwrap().state = s;
+        let run = ActivityState::Running { item: None };
+        set(&mut scene, 0, run.clone());
+        set(&mut scene, 1, run.clone());
+        w.observe_on("d", &scene, &none, t0);
+        // a finishes twice, b once.
+        for _ in 0..2 {
+            set(&mut scene, 0, ActivityState::Idle);
+            w.observe_on("d", &scene, &none, t0);
+            set(&mut scene, 0, run.clone());
+            w.observe_on("d", &scene, &none, t0);
+        }
+        set(&mut scene, 1, ActivityState::Idle);
+        w.observe_on("d", &scene, &none, t0);
+        // b, working again, is stuck for five minutes.
+        set(&mut scene, 1, run.clone());
+        let stuck: TaskViews = Arc::new(HashMap::from([(
+            ids[1],
+            TaskView {
+                stuck: Some(Stuck::Quiet(5)),
+                ..TaskView::default()
+            },
+        )]));
+        for m in 0..=5 {
+            w.observe_on("d", &scene, &stuck, t0 + Duration::from_secs(60 * m));
+        }
+        w.observe_on("d", &scene, &none, t0 + Duration::from_secs(400));
+        let recap = w.stats.recap();
+        assert_eq!(recap.most, Some((label(&scene, 0), 2)));
+        assert_eq!(recap.stuck, Some((label(&scene, 1), 300)));
+        assert_eq!(
+            w.stats.hours.iter().sum::<u32>(),
+            3,
+            "each turn in its hour"
+        );
+    }
+
+    /// A record written before the replay existed still loads, its repository
+    /// stars kept: a parse failure would reset every bench to nothing.
+    #[test]
+    fn an_older_record_still_loads() {
+        let old = r#"{"day":"2026-11-04","turns":3,"stuck":1,"tokens":9,"repos":{"shop":12}}"#;
+        let stats: Stats = serde_json::from_str(old).expect("loads");
+        assert_eq!(stats.repos.get("shop"), Some(&12));
+        assert_eq!(stats.recap().most, None);
     }
 }
