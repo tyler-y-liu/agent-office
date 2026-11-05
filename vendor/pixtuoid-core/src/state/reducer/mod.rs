@@ -603,6 +603,23 @@ impl Reducer {
                 .as_ref()
                 .map_or(ToolKind::Other, ToolKind::from_detail),
         };
+        // agent-office: a live hook call proves a CC turn is open even when
+        // its prompt went unseen (agent-office restarted mid-turn); without
+        // one every call's end idled the figure until the turn's `Stop`.
+        // Hook-only: a transcript replay is history, not a live turn.
+        if from == Transport::Hook
+            && self.corr.turns.open(&agent_id).is_none()
+            && scene
+                .agents
+                .get(&agent_id)
+                .is_some_and(|s| {
+                    &*s.source == crate::source::claude_code::SOURCE_NAME
+                        && s.exiting_at.is_none()
+                })
+        {
+            let turn = crate::source::claude_code::fresh_turn();
+            self.apply_turn_start(scene, agent_id, turn, from, now);
+        }
         if let Some(call) = tool_use_id.as_deref()
             && scene.agents.contains_key(&agent_id)
         {
