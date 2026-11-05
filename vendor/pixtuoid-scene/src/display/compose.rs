@@ -1044,6 +1044,19 @@ fn push_desk(
             0.0
         },
         theme,
+    )
+    // agent-office: the host's picture of its occupant's phase.
+    .with_show(
+        crate::sim::desk_occupant(&frame.agents, i)
+            .and_then(|a| crate::desk_show::desk_show(a.agent_id))
+            .map(|show| {
+                let ms = moment
+                    .timing
+                    .now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                (show, crate::desk_show::step_at(ms, d.x))
+            }),
     );
     let span = desk_span(pack, desk, d, scale).with_depth(depth);
     order.push((

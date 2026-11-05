@@ -60,7 +60,11 @@ pub(crate) const DESCRIPTOR: SourceDescriptor = SourceDescriptor {
             // consumer unloads before its provider
             // (`packages/session/session-persistence-jsonl/src/index.ts:1814-1817`,
             // same tag), so the plugin never sees that end.
-            brackets_turns: false,
+            // agent-office: brackets anyway (`turn_start` from our plugin), so
+            // the figure stays at its desk while the model thinks between
+            // calls; that lost end closes at the next prompt or the shutdown
+            // sweep's `session_end`.
+            brackets_turns: true,
         },
         // The plugin runs in-process (a cordis plugin in the launcher's one
         // root context; no worker mode exists for plugins), so its stamped
@@ -77,6 +81,8 @@ pub(crate) const DESCRIPTOR: SourceDescriptor = SourceDescriptor {
 const SESSION_START: &str = "session_start";
 const SESSION_END: &str = "session_end";
 const TURN_END: &str = "turn_end";
+/// agent-office: our plugin forwards `turn/start` too.
+const TURN_START: &str = "turn_start";
 const TOOL_CALL: &str = "tool_call";
 const TOOL_RESULT: &str = "tool_result";
 const APPROVAL_ASKED: &str = "approval_asked";
@@ -105,6 +111,14 @@ const OUTCOME_ALLOWED: &str = "allowed-once";
 /// allowlist forwards only `callId`/`toolName` for a tool call, so no
 /// argument — spoofed or real — ever reaches this decoder.
 const SUBAGENT_TOOLS: &[&str] = &["subagent", "subagent_fork"];
+
+/// agent-office: each `turn_start` mints its own key: dsh's turn number
+/// restarts with a new process, and the ledger never reopens a closed key.
+fn fresh_turn() -> crate::state::TurnKey {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::state::TurnKey::Id(format!("ds-{n}").into())
+}
 
 /// Decode one plugin payload into `AgentEvent`s (`HookDecoding::ClaimsAll`).
 ///
@@ -173,6 +187,14 @@ pub fn decode_dsh_payload(
             as_child: parent_id.is_some(),
         }]),
         TURN_END => Ok(vec![identity(), AgentEvent::turn_end(agent_id)]),
+        // agent-office: a turn spans the prompt's every step and call.
+        TURN_START => Ok(vec![
+            identity(),
+            AgentEvent::TurnStart {
+                agent_id,
+                turn: fresh_turn(),
+            },
+        ]),
         TOOL_CALL => {
             if non_empty(obj, "callId").is_none() {
                 crate::source::drift::missing_field(SOURCE_NAME, TOOL_CALL, "callId");

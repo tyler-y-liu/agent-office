@@ -332,8 +332,10 @@ pub(crate) fn agent_overrides(
     glow_tint: Option<Rgb>,
     burn: crate::burn::BurnTier,
 ) -> [(char, Pixel); 4] {
-    let id_seed = agent.agent_id.raw();
+    // agent-office: hair and skin follow the repository as the outfit does,
+    // so a repository's workers always look alike, whichever session.
     let outfit_seed = outfit_seed_for(agent);
+    let id_seed = outfit_seed;
     let outfit = OUTFITS[crate::spread(outfit_seed, OUTFITS.len())];
     let hair = if burn == crate::burn::BurnTier::Normal {
         HAIR_PRESETS[crate::spread(id_seed / 7, HAIR_PRESETS.len())]
@@ -516,10 +518,12 @@ mod tests {
             color_of(&b, PANTS_KEY),
             "same cwd should share pants"
         );
-        assert_ne!(
+        // agent-office: a repository's workers look alike, so the eye finds
+        // its bench's people by their look; their badges tell them apart.
+        assert_eq!(
             (color_of(&a, HAIR_KEY), color_of(&a, SKIN_KEY)),
             (color_of(&b, HAIR_KEY), color_of(&b, SKIN_KEY)),
-            "different agents in the same repo must differ in hair/skin"
+            "agents in the same repo share hair/skin"
         );
     }
 
@@ -546,8 +550,11 @@ mod tests {
             color_of(&b, SHIRT_KEY),
             "different cwds should pick different outfits"
         );
-        assert_eq!(color_of(&a, HAIR_KEY), color_of(&b, HAIR_KEY));
-        assert_eq!(color_of(&a, SKIN_KEY), color_of(&b, SKIN_KEY));
+        // agent-office: hair and skin follow the repository too, so the
+        // same session moved to another looks as that repository's do.
+        let c = make_slot_cwd("/p/cccc.jsonl", "/demo/infra", false);
+        assert_eq!(color_of(&b, HAIR_KEY), color_of(&c, HAIR_KEY));
+        assert_eq!(color_of(&b, SKIN_KEY), color_of(&c, SKIN_KEY));
     }
 
     /// Pins `MAX_RAMP_LEVEL` against the colors a recolor feeds a ramp: every

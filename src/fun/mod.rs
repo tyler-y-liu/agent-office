@@ -3,6 +3,7 @@
 //! takes it, what the chitchat says, the day's tally and Hong Kong's weather.
 
 pub mod hko;
+pub mod sound;
 pub mod stats;
 
 use std::time::{Duration, SystemTime};
@@ -185,6 +186,35 @@ pub fn live_cheer(view: Option<&TaskView>, now: SystemTime) -> Option<(Cheer, Du
     (ago < CHEER_FOR).then_some((cheer, ago))
 }
 
+/// How long a screen flashes green after the tests pass.
+pub const PASS_FLASH_FOR: Duration = Duration::from_secs(2);
+
+/// What `slot`'s screen shows at `now`: the green flash just after its tests
+/// pass, else the picture of the phase its card names. Only a call under way
+/// has a phase on its card, so the screen shows one then too.
+pub fn desk_show(
+    slot: &AgentSlot,
+    view: Option<&TaskView>,
+    now: SystemTime,
+) -> Option<pixtuoid_scene::desk_show::DeskShow> {
+    use pixtuoid_scene::desk_show::DeskShow;
+    if let Some((Cheer::TestsPassed, ago)) = live_cheer(view, now)
+        && ago < PASS_FLASH_FOR
+    {
+        return Some(DeskShow::Passed);
+    }
+    let ActivityState::Running { item: Some(_) } = slot.state else {
+        return None;
+    };
+    Some(match view?.phase? {
+        Phase::Code => DeskShow::Code,
+        Phase::Test => DeskShow::Test,
+        Phase::Research => DeskShow::Browse,
+        Phase::Run => DeskShow::Terminal,
+        Phase::Delegate => return None,
+    })
+}
+
 /// A working turn this long is overtime whatever the hour.
 pub const OVERTIME_TURN: Duration = Duration::from_secs(30 * 60);
 
@@ -328,6 +358,37 @@ pub fn chitchat(
     }
 }
 
+/// How an idle worker takes a click: a stretch, or a word back in Cantonese.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poke {
+    Stretch,
+    Say(&'static str),
+}
+
+const POKED_TALK: &[&str] = &[
+    "做紧嘢啊！",
+    "咪搞我啦",
+    "唞下先…",
+    "有咩吩咐？",
+    "饮紧奶茶呀",
+    "得闲先讲",
+    "老细早晨！",
+    "我好忙㗎！",
+];
+
+/// What `agent` does on its `nth` click: every third a stretch, else a line,
+/// so clicking on gets something new each time.
+pub fn poke(agent: AgentId, nth: u64) -> Poke {
+    if nth % 3 == 2 {
+        return Poke::Stretch;
+    }
+    let seed = mix(agent.raw() ^ nth.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    Poke::Say(POKED_TALK[(seed % POKED_TALK.len() as u64) as usize])
+}
+
+/// What the shop cat says when clicked.
+pub const MEOW: &str = "喵～";
+
 /// A cheap, well-spread hash (splitmix64's finaliser).
 pub fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -338,6 +399,55 @@ pub fn mix(mut x: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen is how you tell a desk's work apart without its label, so
+    /// it must show the phase the card names, flash green the moment the
+    /// tests pass, and show nothing a card doesn't claim.
+    #[test]
+    fn a_screen_shows_the_phase_on_its_card() {
+        use pixtuoid_core::ToolUse;
+        use pixtuoid_core::state::ToolKind;
+        use pixtuoid_scene::desk_show::DeskShow;
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        use pixtuoid_core::source::{AgentEvent, Transport};
+        use pixtuoid_core::{Reducer, SceneState};
+        let id = AgentId::from_parts("claude-code", "s");
+        let mut scene = SceneState::uniform(4);
+        Reducer::new().apply(
+            &mut scene,
+            AgentEvent::SessionStart {
+                agent_id: id,
+                source: "claude-code".into(),
+                session_id: "s".into(),
+                cwd: "/repo".into(),
+                parent_id: None,
+            },
+            now,
+            Transport::Hook,
+        );
+        let slot = scene.agents.get_mut(&id).unwrap();
+        slot.state = ActivityState::Running {
+            item: Some(ToolUse {
+                tool_use_id: None,
+                detail: None,
+                kind: ToolKind::Bash,
+            }),
+        };
+        let mut view = TaskView {
+            phase: Some(Phase::Test),
+            ..TaskView::default()
+        };
+        assert_eq!(desk_show(slot, Some(&view), now), Some(DeskShow::Test));
+        view.phase = Some(Phase::Research);
+        assert_eq!(desk_show(slot, Some(&view), now), Some(DeskShow::Browse));
+        view.cheer = Some((Cheer::TestsPassed, now - Duration::from_secs(1)));
+        assert_eq!(desk_show(slot, Some(&view), now), Some(DeskShow::Passed));
+        view.cheer = Some((Cheer::TestsPassed, now - PASS_FLASH_FOR));
+        assert_eq!(desk_show(slot, Some(&view), now), Some(DeskShow::Browse));
+        // Thinking between calls: the card names no phase, the screen none.
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(desk_show(slot, Some(&view), now), None);
+    }
 
     fn at(y: i64, mo: u32, d: u32, h: u32, mi: u32) -> SystemTime {
         let secs = days_from_civil(y, mo, d) * 86_400 + i64::from(h * 3600 + mi * 60);
@@ -473,5 +583,23 @@ mod tests {
         assert!(overtime(slot, Some(&long), &day, now));
         slot.state = ActivityState::Idle;
         assert!(!overtime(slot, Some(&long), &night, now));
+    }
+
+    /// A click always gets a reaction, and clicking on varies it: a stretch
+    /// comes round, and the lines change, or the joke would wear thin at once.
+    #[test]
+    fn a_poked_worker_stretches_or_answers_back() {
+        let id = AgentId::from_parts("claude-code", "a");
+        let pokes: Vec<Poke> = (0..12).map(|n| poke(id, n)).collect();
+        assert!(pokes.contains(&Poke::Stretch));
+        let said: std::collections::HashSet<_> = pokes
+            .iter()
+            .filter_map(|p| match p {
+                Poke::Say(l) => Some(*l),
+                Poke::Stretch => None,
+            })
+            .collect();
+        assert!(said.len() > 2, "the answers vary: {said:?}");
+        assert!(said.iter().all(|l| POKED_TALK.contains(l)));
     }
 }

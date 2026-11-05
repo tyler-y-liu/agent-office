@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 
 use crate::pipeline::CURSOR_SOURCE;
 
-/// The events pixtuoid's Cursor decoder reads, and the prompt and the
-/// agent's reply, which only the task log keeps (the decoder does not take them).
+/// The events pixtuoid's Cursor decoder reads (the prompt opens a turn), and
+/// the agent's reply, which only the task log keeps.
 const EVENTS: [&str; 8] = [
     "sessionStart",
     "beforeSubmitPrompt",
