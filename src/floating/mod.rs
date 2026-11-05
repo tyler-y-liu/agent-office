@@ -480,7 +480,7 @@ impl Floating<'_> {
     fn open(&self, el: &ActiveEventLoop) -> Result<Win> {
         let attrs = Window::default_attributes()
             .with_title("agent-office")
-            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_window_level(WindowLevel::Normal)
             .with_inner_size(LogicalSize::new(1180, 620))
             .with_min_inner_size(LogicalSize::new(720, 360));
         let window = Rc::new(el.create_window(attrs)?);
@@ -511,7 +511,7 @@ impl Floating<'_> {
                     name: "店长".to_string(),
                 }],
             },
-            on_top: true,
+            on_top: false,
             cursor: PhysicalPosition::default(),
             wheel_px: 0.0,
             last: None,
