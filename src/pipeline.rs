@@ -4,8 +4,8 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use pixtuoid_core::source::claude_code::ClaudeCodeSource;
@@ -29,7 +29,16 @@ pub fn is_shown_source(source: &str) -> bool {
     SHOWN_SOURCES.contains(&source)
 }
 
-pub type FloorCaps = Arc<[AtomicUsize; MAX_FLOORS]>;
+pub type FloorCaps = Arc<Floors>;
+
+/// What the window's office seats, shared with the reducer: each floor's desk
+/// count, and the bench each desk sits on so a repository's sessions sit on
+/// one row as the office draws it.
+pub struct Floors {
+    caps: [AtomicUsize; MAX_FLOORS],
+    /// A new layout's benches, until the reducer takes them.
+    benches: Mutex<Option<[Vec<u16>; MAX_FLOORS]>>,
+}
 
 pub struct Pipeline {
     pub scene_rx: watch::Receiver<Arc<SceneState>>,
@@ -37,8 +46,13 @@ pub struct Pipeline {
 }
 
 /// Must run inside a tokio runtime: it spawns the reducer and the sources.
-pub fn spawn(socket_path: PathBuf, boot_caps: [usize; MAX_FLOORS]) -> Pipeline {
-    let floor_caps: FloorCaps = Arc::new(std::array::from_fn(|i| AtomicUsize::new(boot_caps[i])));
+/// `buf_w`×`buf_h` is the office the first frame will draw.
+pub fn spawn(socket_path: PathBuf, buf_w: u16, buf_h: u16) -> Pipeline {
+    let boot_caps = caps_for(buf_w, buf_h);
+    let floor_caps: FloorCaps = Arc::new(Floors {
+        caps: std::array::from_fn(|i| AtomicUsize::new(boot_caps[i])),
+        benches: Mutex::new(Some(benches_for(buf_w, buf_h))),
+    });
     let (scene_tx, scene_rx) = watch::channel(Arc::new(SceneState::new(boot_caps)));
     let (tx, rx) =
         mpsc::channel::<(Transport, AgentEvent)>(pixtuoid_core::source::EVENT_CHANNEL_CAPACITY);
@@ -70,14 +84,18 @@ async fn reducer_task(
     floor_caps: FloorCaps,
 ) {
     let mut reducer = Reducer::new();
-    let caps: [usize; MAX_FLOORS] = std::array::from_fn(|i| floor_caps[i].load(Ordering::Relaxed));
+    let caps: [usize; MAX_FLOORS] =
+        std::array::from_fn(|i| floor_caps.caps[i].load(Ordering::Relaxed));
     let mut scene = SceneState::new(caps);
     let connected: HashSet<String> = SHOWN_SOURCES.iter().map(|s| s.to_string()).collect();
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        for (i, a) in floor_caps.iter().enumerate() {
+        for (i, a) in floor_caps.caps.iter().enumerate() {
             scene.floor_capacities[i] = a.load(Ordering::Relaxed);
+        }
+        if let Some(benches) = floor_caps.benches.lock().ok().and_then(|mut b| b.take()) {
+            scene.floor_benches = benches;
         }
         tokio::select! {
             event = rx.recv() => {
@@ -129,9 +147,20 @@ pub fn caps_for(buf_w: u16, buf_h: u16) -> [usize; MAX_FLOORS] {
 /// must stop taking agents, who would sit there unseen (pixtuoid's floating
 /// `sync_floor_caps` stores for the same reason).
 pub fn store_caps(caps: &FloorCaps, buf_w: u16, buf_h: u16) {
-    for (slot, cap) in caps.iter().zip(caps_for(buf_w, buf_h)) {
+    for (slot, cap) in caps.caps.iter().zip(caps_for(buf_w, buf_h)) {
         slot.store(cap, Ordering::Relaxed);
     }
+    if let Ok(mut b) = caps.benches.lock() {
+        *b = Some(benches_for(buf_w, buf_h));
+    }
+}
+
+/// The bench each desk of each floor sits on, for an office `buf_w`×`buf_h`.
+fn benches_for(buf_w: u16, buf_h: u16) -> [Vec<u16>; MAX_FLOORS] {
+    std::array::from_fn(|i| {
+        let seed = pixtuoid_scene::floor::floor_seed(i);
+        pixtuoid_scene::floor::floor_benches(buf_w, buf_h, seed)
+    })
 }
 
 #[cfg(test)]

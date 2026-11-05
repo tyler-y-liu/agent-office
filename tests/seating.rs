@@ -24,6 +24,14 @@ impl Office {
         }
     }
 
+    /// The ground floor of a `w`×`h` office, seated by the rows it draws.
+    fn drawn(w: u16, h: u16) -> Self {
+        let seed = pixtuoid_scene::floor::floor_seed(0);
+        let mut o = Self::new(pixtuoid_scene::floor::floor_capacity(w, h, seed));
+        o.scene.floor_benches[0] = pixtuoid_scene::floor::floor_benches(w, h, seed);
+        o
+    }
+
     /// Start a session in `cwd` and return the desk it was given.
     fn start(&mut self, sid: &str, cwd: &str) -> usize {
         let id = AgentId::from_parts("claude-code", sid);
@@ -110,4 +118,26 @@ fn a_worktree_session_sits_and_is_named_with_its_repository() {
         o.label("a"),
         "the bench plate and label read the repo name"
     );
+}
+
+/// A new repository takes a row of its own while the office draws an empty
+/// one, so a bench's plate names everyone on it. At 168×120 a partial pod
+/// column deals one desk to each of two rows (desks 16 and 17); counting
+/// indices in fours took them for one bench, so once 16 was taken the next
+/// repository sat beside another's on desk 1 while 17's row stood empty.
+#[test]
+fn a_new_repository_takes_an_empty_drawn_row_while_there_is_one() {
+    let mut o = Office::drawn(168, 120);
+    let rows = o.scene.floor_benches[0].clone();
+    assert_ne!(
+        rows[16], rows[17],
+        "the partial column's desks sit on two rows"
+    );
+    let mut on_row = std::collections::BTreeMap::new();
+    for repo in ["a", "b", "c", "d", "e", "f"] {
+        let desk = o.start(repo, &format!("/src/{repo}"));
+        if let Some(other) = on_row.insert(rows[desk], repo) {
+            panic!("{repo} sat on {other}'s row, desk {desk}");
+        }
+    }
 }

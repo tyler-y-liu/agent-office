@@ -396,7 +396,7 @@ impl Floating<'_> {
         Ok(Win {
             window,
             surface,
-            core: Core::start(self.rt, crate::pipeline::caps_for(logical.w, logical.h)),
+            core: Core::start(self.rt, logical.w, logical.h),
             office: Office {
                 session: OfficeSession::new(Arc::clone(&self.pack)),
                 caps_size: None,

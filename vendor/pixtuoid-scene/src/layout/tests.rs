@@ -1342,3 +1342,54 @@ fn your_office_has_its_bookshelf_and_quote_screen() {
         "a quote screen"
     );
 }
+
+/// agent-office: the reducer seats a repository's sessions by these ids and
+/// the plates name benches by them, so they must be the rows the office
+/// draws: one id is one row with no aisle in it, and a desk a stride from its
+/// neighbour shares its id. A partial pod column deals rows shorter than
+/// POD_COLS, so `index / POD_COLS` is not a bench at many window sizes.
+#[test]
+fn bench_ids_are_the_drawn_rows() {
+    let stride = DESK_W + INTRA_POD_GAP_X;
+    let mut partial = 0;
+    for h in (120..=260u16).step_by(20) {
+        for w in (120..=420u16).step_by(8) {
+            let Some(l) = SceneLayout::compute_with_seed(w, h, None, 0) else {
+                continue;
+            };
+            let ids = l.bench_ids();
+            let d = &l.home_desks;
+            assert_eq!(ids.len(), d.len(), "{w}x{h}: one id a desk");
+            for i in 0..d.len() {
+                for j in 0..d.len() {
+                    let (a, b) = (d[i].at, d[j].at);
+                    if ids[i] == ids[j] {
+                        assert_eq!(a.y, b.y, "{w}x{h}: bench {} spans rows", ids[i]);
+                        let lo = a.x.min(b.x);
+                        let hi = a.x.max(b.x);
+                        let between = d
+                            .iter()
+                            .filter(|c| c.at.y == a.y && (lo..=hi).contains(&c.at.x));
+                        assert_eq!(
+                            between.count() as u16,
+                            (hi - lo) / stride + 1,
+                            "{w}x{h}: bench {} has a gap",
+                            ids[i]
+                        );
+                    } else if a.y == b.y {
+                        assert!(a.x.abs_diff(b.x) > stride, "{w}x{h}: neighbours split");
+                    }
+                }
+            }
+            if d.chunks(POD_COLS as usize)
+                .any(|c| c.iter().any(|x| x.at.y != c[0].at.y))
+            {
+                partial += 1;
+            }
+        }
+    }
+    assert!(
+        partial > 0,
+        "the sweep reaches a partial column, the case at issue"
+    );
+}

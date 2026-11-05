@@ -532,6 +532,29 @@ impl SceneLayout {
         self.home_desks.get(i.0).copied()
     }
 
+    /// agent-office: the bench each home desk sits on, by index. A bench is a
+    /// row of desks a desk's stride apart; an aisle parts two in a row. The
+    /// ids are not `index / POD_COLS`: a partial pod column deals fewer than
+    /// `POD_COLS` desks a row, so the reducer seats by these and the plates
+    /// name by them, the one grouping both read.
+    pub fn bench_ids(&self) -> Vec<u16> {
+        let stride = DESK_W + INTRA_POD_GAP_X;
+        let mut order: Vec<usize> = (0..self.home_desks.len()).collect();
+        order.sort_by_key(|&i| (self.home_desks[i].at.y, self.home_desks[i].at.x));
+        let mut ids = vec![0; self.home_desks.len()];
+        let mut bench = 0;
+        let mut prev: Option<Point> = None;
+        for i in order {
+            let at = self.home_desks[i].at;
+            if prev.is_some_and(|p| p.y != at.y || at.x - p.x > stride) {
+                bench += 1;
+            }
+            ids[i] = bench;
+            prev = Some(at);
+        }
+        ids
+    }
+
     /// Is `p` clear of the furniture sprites that PAINT OVER it? Walkable is the
     /// GROUND rule (invariant #6), so the cell in front of a desk is legitimately
     /// walkable AND legitimately covered — fine to walk THROUGH, wrong to park in.

@@ -47,6 +47,15 @@ pub fn floor_capacity(buf_w: u16, buf_h: u16, floor_seed: u64) -> usize {
         .unwrap_or(0)
 }
 
+/// agent-office: the bench each of that floor's desks sits on
+/// ([`crate::layout::SceneLayout::bench_ids`]), for the reducer to seat a
+/// repository's sessions together; empty where [`floor_capacity`] is `0`.
+pub fn floor_benches(buf_w: u16, buf_h: u16, floor_seed: u64) -> Vec<u16> {
+    crate::layout::SceneLayout::compute_with_seed(buf_w, buf_h, None, floor_seed)
+        .map(|l| l.bench_ids())
+        .unwrap_or_default()
+}
+
 /// How many home desks a floor fits when `buf_w × buf_h` PIXELS are painted at
 /// `scale` — i.e. the capacity of the logical office those pixels cover.
 ///

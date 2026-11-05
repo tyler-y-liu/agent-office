@@ -371,44 +371,45 @@ impl TextRun {
 
     /// agent-office: a plate over each bench naming the repository its
     /// sitters work in, on that repository's colour ([`crate::badge::repo_hues`]),
-    /// so the benches read as projects; a bench shared by several names its
-    /// first sitter's, and an empty bench has none. `agents` are the floor's.
+    /// so the benches read as projects. Only a bench whose sitters all work in
+    /// one repository is named: a plate over a shared bench would name some of
+    /// them wrongly. An empty bench has none. `agents` are the floor's.
     pub(crate) fn bench_plates(
         layout: &crate::layout::SceneLayout,
         agents: &[pixtuoid_core::AgentSlot],
     ) -> Vec<Self> {
+        use pixtuoid_core::state::project_root;
         let hues = crate::badge::repo_hues(agents);
-        // A bench is a row of desks a desk's stride apart, facing one way;
-        // an aisle parts two in a row, and a pod's two rows face each other.
-        let stride = crate::layout::DESK_W + crate::layout::INTRA_POD_GAP_X;
-        let mut desks: Vec<crate::layout::HomeDesk> = layout.home_desks.clone();
-        desks.sort_by_key(|d| (d.at.y, d.at.x));
+        let ids = layout.bench_ids();
         let mut benches: Vec<(u16, u16, crate::layout::HomeDesk)> = Vec::new();
-        for d in desks {
-            match benches.last_mut() {
-                Some((_, last, first)) if first.at.y == d.at.y && d.at.x - *last <= stride => {
-                    *last = d.at.x;
-                }
-                _ => benches.push((d.at.x, d.at.x, d)),
+        for (i, d) in layout.home_desks.iter().enumerate() {
+            let id = usize::from(ids[i]);
+            if benches.len() <= id {
+                benches.resize(id + 1, (d.at.x, d.at.x, *d));
             }
+            let (x0, x1, first) = &mut benches[id];
+            if d.at.x < *x0 {
+                (*x0, *first) = (d.at.x, *d);
+            }
+            *x1 = (*x1).max(d.at.x);
         }
         benches
             .into_iter()
-            .filter_map(|(x0, x1, first)| {
-                let sitter = agents
-                    .iter()
-                    .filter(|a| {
-                        layout
-                            .home_desk(a.desk_index.single_floor_local())
-                            .is_some_and(|d| d.at.y == first.at.y && (x0..=x1).contains(&d.at.x))
-                    })
-                    .min_by_key(|a| (a.created_at, a.agent_id))?;
+            .enumerate()
+            .filter_map(|(id, (x0, x1, first))| {
+                let mut sitters = agents.iter().filter(|a| {
+                    ids.get(a.desk_index.single_floor_local().0)
+                        .is_some_and(|&b| usize::from(b) == id)
+                });
+                let sitter = sitters.next()?;
+                // A sitter whose directory is unknown may be anyone's.
+                let root = (!sitter.unknown_cwd).then(|| project_root(&sitter.cwd))?;
+                if sitters.any(|a| a.unknown_cwd || project_root(&a.cwd) != root) {
+                    return None;
+                }
                 // The repository's own name, as its directory has it (a
                 // worktree is its repository's).
-                let repo = pixtuoid_core::state::project_root(&sitter.cwd)
-                    .file_name()?
-                    .to_string_lossy()
-                    .into_owned();
+                let repo = root.file_name()?.to_string_lossy().into_owned();
                 let plate = crate::badge::repo_hue(sitter, &hues)?;
                 Some(Self {
                     // On the sitters' side of the screens: over a row facing
@@ -619,6 +620,54 @@ mod tests {
         assert!(
             plate.at.x.abs_diff(desk.at.x) < 4 * (crate::layout::DESK_W + 4),
             "over its own bench"
+        );
+    }
+
+    /// agent-office: a plate over a bench claims every sitter for its
+    /// repository, so a bench shared by two repositories, or with a sitter
+    /// whose directory is unknown, has none: naming the first sitter's put a
+    /// myclaw session under a toolhub-studio plate. A bench all of one
+    /// repository keeps its plate.
+    #[test]
+    fn only_a_bench_of_one_repository_is_named() {
+        use crate::character::test_support::make_slot;
+        let l = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+        let ids = l.bench_ids();
+        let mate = (1..ids.len())
+            .find(|&i| ids[i] == ids[0])
+            .expect("a bench of two");
+        let sitter = |name: &str, cwd: &str, desk: usize| {
+            let mut a = make_slot(
+                pixtuoid_core::AgentId::from_transcript_path(name),
+                pixtuoid_core::state::ActivityState::Idle,
+            );
+            a.cwd = std::sync::Arc::from(std::path::Path::new(cwd));
+            a.desk_index = pixtuoid_core::state::GlobalDeskIndex(desk);
+            a
+        };
+        let plates = |agents: &[pixtuoid_core::AgentSlot]| {
+            super::TextRun::bench_plates(&l, agents)
+                .iter()
+                .map(|p| p.text())
+                .collect::<Vec<_>>()
+        };
+        let a = sitter("/p/a.jsonl", "/w/toolhub-studio", 0);
+        let b = sitter("/p/b.jsonl", "/w/myclaw", mate);
+        assert!(
+            plates(&[a.clone(), b]).is_empty(),
+            "two repositories, no plate"
+        );
+        let mut lost = sitter("/p/c.jsonl", "/", mate);
+        lost.unknown_cwd = true;
+        assert!(
+            plates(&[a.clone(), lost]).is_empty(),
+            "an unknown sitter, no plate"
+        );
+        let a2 = sitter("/p/a2.jsonl", "/w/toolhub-studio/.claude/worktrees/x", mate);
+        assert_eq!(
+            plates(&[a, a2]),
+            ["toolhub-studio"],
+            "one repository, its plate"
         );
     }
 
