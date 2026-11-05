@@ -263,6 +263,9 @@ pub fn without_long_idle(
     for id in gone {
         kept.agents.remove(&id);
     }
+    // The reducer still holds their desks, so the ones shown sat upstairs
+    // past them; seat those as if the hidden were not there.
+    kept.settle_floors();
     Arc::new(kept)
 }
 
@@ -1051,5 +1054,55 @@ mod tests {
             shown.agents.contains_key(&ids[0]),
             "new work: back in the office"
         );
+    }
+
+    /// A hidden session still holds its desk in the reducer, so with the
+    /// ground floor full of sessions you were done with, the ones you can see
+    /// were seated upstairs: three floors for a dozen people, and no way to
+    /// tell why. The office as drawn seats only those it draws.
+    #[test]
+    fn hidden_sessions_do_not_push_the_shown_ones_upstairs() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(5 * 3600);
+        let mut scene = SceneState::uniform(2);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["old-1", "old-2", "new-1", "new-2"]
+            .iter()
+            .map(|sid| {
+                let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+                r.apply(
+                    &mut scene,
+                    AgentEvent::SessionStart {
+                        agent_id: id,
+                        source: pipeline::CC_SOURCE.into(),
+                        session_id: (*sid).into(),
+                        cwd: "/repo".into(),
+                        parent_id: None,
+                    },
+                    t0,
+                    Transport::Hook,
+                );
+                id
+            })
+            .collect();
+        for id in &ids[..2] {
+            let s = scene.agents.get_mut(id).unwrap();
+            s.state = pixtuoid_core::ActivityState::Idle;
+            s.state_started_at = now - Duration::from_secs(2 * 3600);
+        }
+        for id in &ids[2..] {
+            scene.agents.get_mut(id).unwrap().state =
+                pixtuoid_core::ActivityState::Running { item: None };
+        }
+        assert_eq!(scene.agents[&ids[2]].floor_idx, 1, "the reducer seats it upstairs");
+
+        let shown = without_long_idle(&Arc::new(scene), &tasks::TaskViews::default(), &HashMap::new(), now);
+        for id in &ids[2..] {
+            let s = &shown.agents[id];
+            assert_eq!(s.floor_idx, 0, "{id:?} is drawn on the ground floor");
+            assert_eq!(shown.floor_of(s.desk_index), 0);
+        }
+        assert_ne!(shown.agents[&ids[2]].desk_index, shown.agents[&ids[3]].desk_index);
+        assert_eq!(shown.floors_in_use(), 1, "one floor is all it needs");
     }
 }
