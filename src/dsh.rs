@@ -184,7 +184,7 @@ pub fn connect() -> Result<()> {
     ))?;
     std::fs::create_dir_all(&transcripts)
         .with_context(|| crate::tr!("建 {} 失败", "could not create {}", transcripts.display()))?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = crate::hook::exe_for_hooks()?;
     let plugin = plugin_path(&dir);
     std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing)?)
         .with_context(|| crate::tr!("写 {} 失败", "could not write {}", plugin.display()))?;

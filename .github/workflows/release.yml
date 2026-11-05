@@ -1,0 +1,68 @@
+name: release
+
+# Push a tag like v0.1.0: builds a universal macOS binary, attaches it to a
+# GitHub release, and points the Homebrew tap at it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo.toml $version"; exit 1; }
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist/agent-office
+          lipo -create -output dist/agent-office/agent-office \
+            target/aarch64-apple-darwin/release/agent-office \
+            target/x86_64-apple-darwin/release/agent-office
+          # The linker ad-hoc signs only the arm64 slice; sign both so codesign -v passes.
+          codesign --force --sign - dist/agent-office/agent-office
+          cp LICENSE README.md dist/agent-office/
+          tar -C dist -czf "agent-office-$GITHUB_REF_NAME-macos-universal.tar.gz" agent-office
+          shasum -a 256 agent-office-*.tar.gz | tee agent-office.sha256
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            agent-office-*.tar.gz agent-office.sha256
+
+      - name: Update Homebrew tap
+        if: env.TAP_TOKEN != ''
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          sha=$(cut -d' ' -f1 agent-office.sha256)
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/tyler-y-liu/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256@/$sha/g" \
+            packaging/agent-office.rb.in > tap/Formula/agent-office.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-office.rb
+          git commit -m "agent-office $version"
+          git push

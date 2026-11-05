@@ -181,7 +181,7 @@ pub fn connect() -> Result<()> {
         "找不到 Cursor 配置目录",
         "cannot find the Cursor config directory",
     ))?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = crate::hook::exe_for_hooks()?;
     let quoted = exe.display().to_string().replace('\'', "'\\''");
     let command = format!("'{quoted}' hook --source {CURSOR_SOURCE}");
     let (raw, mut doc) = read_hooks(&path)?;

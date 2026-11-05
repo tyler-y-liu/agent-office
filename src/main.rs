@@ -59,6 +59,11 @@ fn main() -> Result<()> {
             };
         }
         Some(&"doctor") => return doctor::run(),
+        // Lets `brew test` and bug reports check the install without opening the window.
+        Some(&"--version") => {
+            println!("agent-office {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         _ => {}
     }
     let socket = hook::socket_path();

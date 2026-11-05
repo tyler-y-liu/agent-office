@@ -22,16 +22,18 @@
 ## 环境要求
 
 - macOS（目前只在 macOS 上用过）
-- Rust 1.95 或更新
+- Rust 1.95 或更新（只有从源码编译才需要）
 - 可选：一个 OpenAI 兼容的 chat completions 接口，用来生成摘要。不配也能用，任务栏会显示原始指令。
 
 ## 快速开始
 
 ```bash
-cargo install --git https://github.com/tyler-y-liu/agent-office
+brew install tyler-y-liu/tap/agent-office
 agent-office connect      # 往 ~/.claude/settings.json 加 hooks（会先备份），新开的 Claude 会话生效
 agent-office
 ```
+
+也可以从源码编译：`cargo install --git https://github.com/tyler-y-liu/agent-office`。每个 [release](https://github.com/tyler-y-liu/agent-office/releases) 也附了 universal 二进制（Apple Silicon 和 Intel 通用）。
 
 开启摘要：在 `~/.config/agent-office/env` 里写上（或者设成同名环境变量）：
 

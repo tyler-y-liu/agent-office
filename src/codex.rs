@@ -128,7 +128,7 @@ fn cached_hooks() -> PathBuf {
 /// `agent-office connect codex`.
 pub fn connect() -> Result<()> {
     let root = root().context(crate::i18n::t("找不到 HOME", "HOME is not set"))?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = crate::hook::exe_for_hooks()?;
     for (rel, content) in layout(&hook_command(&exe))? {
         let path = root.join(rel);
         if let Some(dir) = path.parent() {
