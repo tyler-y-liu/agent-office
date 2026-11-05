@@ -299,6 +299,8 @@ impl Reducer {
             .retain(|id, _| scene.agents.contains_key(id));
         self.pending_b1_cascades
             .retain(|id, _| scene.agents.contains_key(id));
+        // agent-office: the sweeps above may have freed a lower floor's desk.
+        scene.move_idle_agents_down();
         // agent-office: the sweeps above may have let a repository go.
         scene.assign_repo_hues();
     }
@@ -1326,12 +1328,32 @@ impl Reducer {
             cwd,
         } = ctx;
         // agent-office: a session with a real cwd sits with its repository.
-        let desk = if cwd.file_name().is_some() {
-            scene.next_free_desk_for(cwd)
-        } else {
-            scene.next_free_desk()
+        let cwd_known = cwd.file_name().is_some().then_some(cwd);
+        let parent_floor = parent_id
+            .and_then(|p| scene.agents.get(&p))
+            .map(|p| p.floor_idx);
+        let desk = match parent_floor {
+            // agent-office: a sub-agent sits on its parent's floor, else on a
+            // floor already open; it never opens one. Many of them are not
+            // drawn (a brief one is a "+N" on the parent's badge), so a burst
+            // of them that opened floors left the ground floor looking empty
+            // with a lone figure upstairs. With nowhere to sit it waits
+            // unseated, as when every desk is taken.
+            Some(pf) => {
+                let open = scene.floors_in_use();
+                scene
+                    .free_desk_where(cwd_known, |f| f == pf)
+                    .or_else(|| scene.free_desk_where(cwd_known, |f| f < open))
+            }
+            None => scene.free_desk_where(cwd_known, |_| true),
         };
         let Some(desk_index) = desk else {
+            // agent-office: a sub-agent kept off a closed floor is by design,
+            // not a full building; it retries on its next hook event.
+            if parent_floor.is_some() {
+                tracing::debug!(?agent_id, "sub-agent unseated: its floor and the open ones are full");
+                return false;
+            }
             tracing::warn!(
                 ?agent_id,
                 cwd = ?cwd,

@@ -858,6 +858,70 @@ impl SceneState {
     /// deals fewer than [`BENCH_SEATS`] desks a row, so counting indices in
     /// fours would seat a repository on another's row.
     pub fn next_free_desk_for(&self, cwd: &Path) -> Option<GlobalDeskIndex> {
+        self.free_desk_where(Some(cwd), |_| true)
+    }
+
+    /// agent-office: the floors up to the highest one an agent stays on (at
+    /// least one); one walking out does not hold its floor open.
+    pub fn floors_in_use(&self) -> usize {
+        self.agents
+            .values()
+            .filter(|a| a.exiting_at.is_none())
+            .map(|a| a.floor_idx + 1)
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// agent-office: move each idle agent upstairs to a free desk on a lower
+    /// floor. A floor's seat is frozen at allocation, so once the ground
+    /// floor emptied, one who had overflowed kept a whole floor open by
+    /// itself. Only an idle session moves: one at work or at a permission
+    /// prompt stays where you may be watching it, and a team stays together
+    /// (a sub-agent keeps its parent's floor; a parent with sub-agents still
+    /// there waits for them). Lowest floors first, oldest first, so the move
+    /// is stable from tick to tick.
+    pub fn move_idle_agents_down(&mut self) {
+        let with_team: std::collections::HashSet<AgentId> = self
+            .agents
+            .values()
+            .filter(|a| a.exiting_at.is_none())
+            .filter_map(|a| a.parent_id)
+            .collect();
+        let mut upstairs: Vec<(usize, SystemTime, AgentId)> = self
+            .agents
+            .values()
+            .filter(|a| {
+                a.floor_idx > 0
+                    && a.exiting_at.is_none()
+                    && a.state == ActivityState::Idle
+                    && a.parent_id.is_none()
+                    && !with_team.contains(&a.agent_id)
+            })
+            .map(|a| (a.floor_idx, a.created_at, a.agent_id))
+            .collect();
+        upstairs.sort();
+        for (floor, _, id) in upstairs {
+            let Some(a) = self.agents.get(&id) else { continue };
+            let cwd = (!a.unknown_cwd && a.cwd.file_name().is_some()).then(|| Arc::clone(&a.cwd));
+            let Some(desk) = self.free_desk_where(cwd.as_deref(), |f| f < floor) else {
+                continue;
+            };
+            let to = self.floor_of(desk);
+            if let Some(a) = self.agents.get_mut(&id) {
+                a.desk_index = desk;
+                a.floor_idx = to;
+            }
+        }
+    }
+
+    /// agent-office: [`Self::next_free_desk_for`] (or, with no `cwd`,
+    /// [`Self::next_free_desk`]) over only the desks on a floor `allowed`
+    /// accepts, so a caller can keep a seat off a floor it must not open.
+    pub fn free_desk_where(
+        &self,
+        cwd: Option<&Path>,
+        allowed: impl Fn(usize) -> bool,
+    ) -> Option<GlobalDeskIndex> {
         let offsets = self.cumulative_offsets();
         let bench = |i: usize| {
             let floor = self.floor_of_with_offsets(GlobalDeskIndex(i), &offsets);
@@ -868,7 +932,7 @@ impl SceneState {
             };
             (floor, id)
         };
-        let root = project_root(cwd);
+        let root = cwd.map(project_root);
         let mut taken = std::collections::BTreeSet::new();
         let mut busy = std::collections::BTreeSet::new();
         let mut ours = std::collections::BTreeSet::new();
@@ -876,11 +940,17 @@ impl SceneState {
             let i = a.desk_index.0;
             taken.insert(i);
             busy.insert(bench(i));
-            if !a.unknown_cwd && project_root(&a.cwd) == root {
+            if !a.unknown_cwd && Some(project_root(&a.cwd)) == root {
                 ours.insert(bench(i));
             }
         }
-        let free = || (0..self.total_capacity()).filter(|i| !taken.contains(i));
+        let free = || {
+            (0..self.total_capacity())
+                .filter(|i| !taken.contains(i) && allowed(bench(*i).0))
+        };
+        if root.is_none() {
+            return free().next().map(GlobalDeskIndex);
+        }
         let lowest = free().next()?;
         let floor = bench(lowest).0;
         free()
