@@ -69,6 +69,43 @@ fn the_line_keeps_waiting_order() {
     );
 }
 
+/// agent-office: a prompt holds its session mid-turn, while a question to
+/// you comes from one whose turn is done; so a prompt takes the guest chair
+/// ahead of a question asked earlier, and questions keep their own order.
+#[test]
+fn a_prompt_goes_ahead_of_a_question() {
+    let l = office();
+    let asking = |name: &str, desk: usize, ms: u64| {
+        let mut s = waiter(name, desk, ms);
+        s.state = ActivityState::RequiresAction {
+            reason: Some(REPLY_REASON.into()),
+        };
+        s
+    };
+    let agents = [
+        asking("old question", 0, 300_000),
+        waiter("new prompt", 1, 25_000),
+        asking("new question", 2, 60_000),
+    ];
+    let line = waiting_line(&agents, t0(), &l);
+    let seat = |i: usize| {
+        let WanderKind::Named { wp_idx, .. } = line[&agents[i].agent_id].kind else {
+            panic!("a seat for {i}: {line:?}")
+        };
+        l.waypoints[wp_idx]
+    };
+    let boss = l
+        .meeting_rooms
+        .iter()
+        .position(|r| r.style == RoomStyle::Boss);
+    assert_eq!(seat(1).room_id, boss, "the prompt sits at your desk");
+    let (a, b) = (seat(0).pos, seat(2).pos);
+    assert!(
+        (std::cmp::Reverse(a.x), a.y) < (std::cmp::Reverse(b.x), b.y),
+        "the older question nearer your office"
+    );
+}
+
 /// With the seats taken, the rest still line up, standing by the entrance,
 /// rather than go uncounted.
 #[test]
