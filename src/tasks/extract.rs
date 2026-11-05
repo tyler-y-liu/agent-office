@@ -29,6 +29,9 @@ pub struct Transcript {
     pub prompts: VecDeque<String>,
     /// The in-progress todo's `activeForm` (or content).
     pub todo_active: Option<String>,
+    /// The whole todo list as last written, in its order: a PM's list is
+    /// its team's plan, which the meeting room's board shows.
+    pub todos: Vec<(TodoState, String)>,
     /// Oldest first, each `Tool target`.
     pub recent_tools: VecDeque<String>,
     pub tool_calls: u32,
@@ -52,6 +55,13 @@ pub struct Transcript {
     /// The post its prompt's `[office:<id>]` marker gave it; a later prompt
     /// without one keeps it, one with another changes it.
     pub role: Option<Role>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoState {
+    Pending,
+    Doing,
+    Done,
 }
 
 /// Something the agent just pulled off that the office cheers.
@@ -413,7 +423,10 @@ impl Transcript {
             self.phase = Some(p);
         }
         match name {
-            "TodoWrite" | "todo_write" => self.todo_active = active_todo(input),
+            "TodoWrite" | "todo_write" => {
+                self.todo_active = active_todo(input);
+                self.todos = all_todos(input);
+            }
             "update_plan" => self.todo_active = active_plan_step(input),
             _ => {}
         }
@@ -671,6 +684,23 @@ fn patched_file(patch: &str) -> Option<&str> {
             .find_map(|p| l.strip_prefix(p))
             .map(str::trim)
     })
+}
+
+fn all_todos(input: &Value) -> Vec<(TodoState, String)> {
+    let Some(todos) = input.get("todos").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    todos
+        .iter()
+        .filter_map(|t| {
+            let state = match t.get("status").and_then(Value::as_str)? {
+                "completed" => TodoState::Done,
+                "in_progress" => TodoState::Doing,
+                _ => TodoState::Pending,
+            };
+            Some((state, one_line(t.get("content")?.as_str()?)))
+        })
+        .collect()
 }
 
 fn active_todo(input: &Value) -> Option<String> {
@@ -1397,6 +1427,29 @@ mod tests {
         assert_eq!(
             (t.role, t.latest_prompt()),
             (Some(Role::Backend), Some("加个接口"))
+        );
+    }
+
+    /// The board shows a PM's whole plan, done and still to do: keeping
+    /// only the running item, as the task line does, would hide the rest.
+    #[test]
+    fn a_todo_list_keeps_every_item_not_just_the_running_one() {
+        let mut t = Transcript::default();
+        t.feed(&tool(
+            "TodoWrite",
+            json!({"todos":[
+                {"content":"后端：加接口","status":"completed","activeForm":"加接口中"},
+                {"content":"测试：跑测试","status":"in_progress","activeForm":"跑测试中"},
+                {"content":"审查：看改动","status":"pending","activeForm":"看改动中"}]}),
+        ));
+        assert_eq!(t.todo_active.as_deref(), Some("跑测试中"));
+        assert_eq!(
+            t.todos,
+            [
+                (TodoState::Done, "后端：加接口".to_owned()),
+                (TodoState::Doing, "测试：跑测试".to_owned()),
+                (TodoState::Pending, "审查：看改动".to_owned()),
+            ]
         );
     }
 

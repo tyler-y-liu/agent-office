@@ -96,7 +96,41 @@ const TREE: &[&str] = &[
     "...b...",
 ];
 
-/// A figure's centre column and top row, in window pixels.
+/// A ticket being handed over: a slip with writing on it.
+const TICKET: &[&str] = &["wwwwww", "wkkkkw", "wwwwww", "wkkwww", "wwwwww"];
+
+/// When a subagent first shows in the meeting room, after this long; the
+/// scene's `team::TEAM_AFTER_MS`, which it keeps to itself.
+const SHOWS_AFTER: Duration = Duration::from_secs(15);
+/// How long its ticket takes to fly over from whoever handed it the work.
+const HANDOFF_FOR: Duration = Duration::from_secs(3);
+
+/// How far along a subagent's ticket is, 0 to 1, while it flies: from the
+/// moment the figure shows (before, there is no one to land on) for
+/// [`HANDOFF_FOR`]; `None` before and after.
+pub(super) fn handoff_progress(created_at: SystemTime, now: SystemTime) -> Option<f32> {
+    let since = now.duration_since(created_at + SHOWS_AFTER).ok()?;
+    (since < HANDOFF_FOR).then(|| since.as_secs_f32() / HANDOFF_FOR.as_secs_f32())
+}
+
+/// The ticket `t` of the way from `from`'s head to `to`'s, on a low arc,
+/// with a stripe of the role it goes to.
+pub(super) fn handoff(canvas: &mut Canvas, s: Stage, from: &Tag, to: &Tag, t: f32, stripe: u32) {
+    let ((fx, fy), (tx, ty)) = (figure(from), figure(to));
+    let t = f64::from(t.clamp(0.0, 1.0));
+    let lerp = |a: i64, b: i64| a as f64 + (b - a) as f64 * t;
+    let lift = (t * (1.0 - t) * 4.0) * (figure_h(s.u) as f64);
+    // Twice the art's scale: a slip in flight at one art pixel a letter is
+    // a speck nobody follows.
+    let u = 2 * s.u;
+    let w = sprite_w(TICKET) * u;
+    let x = lerp(fx, tx) as i64 - w / 2;
+    let y = (lerp(fy, ty) - lift) as i64 - 2 * u;
+    sprite(canvas, x, y, u, TICKET);
+    canvas.fill(x, y, u32::try_from(w).unwrap_or(0), u32::try_from(u).unwrap_or(1), stripe);
+}
+
+/// A figure's centre column and top row, in window pixels./// A figure's centre column and top row, in window pixels.
 fn figure(t: &Tag) -> (i64, i64) {
     (t.badge.x + i64::from(t.badge.w / 2), t.figure_top)
 }
@@ -878,5 +912,20 @@ mod tests {
                 .iter()
                 .all(|l| crate::text::cells(l) <= 20)
         );
+    }
+
+    /// The ticket flies only once the subagent is drawn (a sub is hidden
+    /// for its first 15 seconds) and lands: a ticket flying forever, or to
+    /// a figure not there yet, would say nothing about who got the work.
+    #[test]
+    fn a_handoff_ticket_flies_once_the_sub_shows_and_lands() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let at = |s: f32| t0 + Duration::from_secs_f32(s);
+        assert_eq!(handoff_progress(t0, at(10.0)), None, "not shown yet");
+        assert_eq!(handoff_progress(t0, at(15.0)), Some(0.0));
+        let mid = handoff_progress(t0, at(16.5)).unwrap();
+        assert!((mid - 0.5).abs() < 0.01, "{mid}");
+        assert_eq!(handoff_progress(t0, at(18.0)), None, "landed");
+        assert_eq!(handoff_progress(t0, t0), None);
     }
 }

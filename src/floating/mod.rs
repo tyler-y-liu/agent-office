@@ -1358,6 +1358,26 @@ impl Win {
                 }
             }
         }
+        // A PM handing a role its part: a ticket flies to the new figure.
+        for t in tags {
+            let Some(slot) = frame.scene.agents.get(&t.agent) else {
+                continue;
+            };
+            let (Some(parent), Some(role)) = (
+                slot.parent_id,
+                frame.views.get(&t.agent).and_then(|v| v.role),
+            ) else {
+                continue;
+            };
+            let (Some(from), Some(p)) = (
+                tags.iter().find(|o| o.agent == parent),
+                lively::handoff_progress(slot.created_at, now),
+            ) else {
+                continue;
+            };
+            lively::handoff(canvas, stage, from, t, p, to_u32(role.post().ink));
+            self.quick = true;
+        }
         let occasion = if frame.outlook.typhoon() {
             Occasion::Typhoon
         } else if frame.clock.lunch() {

@@ -41,6 +41,8 @@ pub struct TaskView {
     /// Its post in the office: a subagent's `office-*` type, else the role
     /// its prompt's marker gave the session.
     pub role: Option<crate::roles::Role>,
+    /// Its whole todo list, in order.
+    pub todos: Vec<(extract::TodoState, String)>,
     pub phase: Option<Phase>,
     pub stuck: Option<Stuck>,
     /// When the current turn began: the human's last prompt.
@@ -678,6 +680,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         recent_tools: t.recent_tools.iter().cloned().collect(),
         agent_type: e.sub.as_ref().and_then(|s| s.agent_type.clone()),
         role: role_of(e),
+        todos: t.todos.clone(),
         phase: t.phase,
         stuck: stuck(t, working, now.duration_since(e.grew_at), stuck_limits()),
         turn_started: t.turn_started,

@@ -83,6 +83,28 @@ pub(super) fn board_lines(
 }
 
 fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Vec<String> {
+    // A PM in the room puts up its plan: who does what, and how far along.
+    let plan = here
+        .iter()
+        .filter_map(|id| scene.agents.get(id))
+        .filter(|s| s.parent_id.is_none())
+        .filter_map(|s| views.get(&s.agent_id))
+        .find(|v| v.role == Some(crate::roles::Role::Pm) && !v.todos.is_empty());
+    if let Some(v) = plan {
+        use crate::tasks::extract::TodoState;
+        return v
+            .todos
+            .iter()
+            .map(|(state, what)| {
+                let mark = match state {
+                    TodoState::Done => "✓",
+                    TodoState::Doing => "▸",
+                    TodoState::Pending => "·",
+                };
+                format!("{mark} {what}")
+            })
+            .collect();
+    }
     let mut subs: Vec<_> = here
         .iter()
         .filter_map(|id| scene.agents.get(id))
@@ -498,6 +520,47 @@ mod tests {
                 "测试：跑全量测试".to_owned()
             ]
         );
+    }
+
+    /// With a PM at the head of the table the board is its plan: each
+    /// post's part and where it stands, which the subagents' own lines
+    /// (only those running now) cannot show.
+    #[test]
+    fn the_pms_board_shows_each_roles_todo_and_its_state() {
+        use crate::tasks::extract::TodoState;
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let pm = AgentId::from_parts(CC_SOURCE, "pm");
+        r.apply(
+            &mut scene,
+            AgentEvent::SessionStart {
+                agent_id: pm,
+                source: CC_SOURCE.into(),
+                session_id: "pm".into(),
+                cwd: PathBuf::from("/repo"),
+                parent_id: None,
+            },
+            t0,
+            Transport::Hook,
+        );
+        let mut view = TaskView {
+            role: Some(crate::roles::Role::Pm),
+            todos: vec![
+                (TodoState::Done, "后端：加接口".into()),
+                (TodoState::Doing, "测试：跑测试".into()),
+                (TodoState::Pending, "审查：看改动".into()),
+            ],
+            ..TaskView::default()
+        };
+        let views = |v: &TaskView| std::sync::Arc::new([(pm, v.clone())].into_iter().collect());
+        assert_eq!(
+            board_lines_of(&[pm], &scene, &views(&view)),
+            ["✓ 后端：加接口", "▸ 测试：跑测试", "· 审查：看改动"]
+        );
+        // Any other session's todos are its own business, not the board's.
+        view.role = Some(crate::roles::Role::Frontend);
+        assert!(board_lines_of(&[pm], &scene, &views(&view)).is_empty());
     }
 
     /// The machine shows the length of the line in two digits, and a line
