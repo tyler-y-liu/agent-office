@@ -94,8 +94,14 @@ async fn reducer_task(
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        let before = scene.floor_capacities;
         for (i, a) in floor_caps.caps.iter().enumerate() {
             scene.floor_capacities[i] = a.load(Ordering::Relaxed);
+        }
+        // A resize rereads every seat's desk against new floors; settle them
+        // before the next arrival is seated against the stale reading.
+        if scene.floor_capacities != before {
+            scene.settle_floors();
         }
         if let Some(benches) = floor_caps.benches.lock().ok().and_then(|mut b| b.take()) {
             scene.floor_benches = benches;
