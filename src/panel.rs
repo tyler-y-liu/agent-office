@@ -322,7 +322,7 @@ fn status(
     }
     // Waiting on the user says what to do; a stuck verdict is for one working.
     if let Some(s) = crate::tasks::stuck_at_work(slot, view) {
-        return (format!("⚠ {}", s.describe()), STUCK);
+        return (format!("{STUCK_MARK} {}", s.describe()), STUCK);
     }
     match &slot.state {
         ActivityState::RequiresAction { .. } => ("! 等你确认".into(), WAIT),
@@ -446,6 +446,10 @@ fn wrap(text: &str, w: u16) -> Vec<String> {
     out
 }
 
+/// What a stuck agent is marked with, on its chip and by its badge in the
+/// office alike, so the two read as one state.
+pub const STUCK_MARK: &str = "⚠";
+
 struct Card {
     id: AgentId,
     lines: Vec<Line<'static>>,
@@ -468,7 +472,7 @@ pub struct Drawn {
     /// Each drawn avatar: its row and first cell, whose head it shows, and
     /// whether its card is faded.
     pub avatars: Vec<(u16, u16, AgentId, bool)>,
-    /// The rows (first, last) of each card drawn in outline: done, waiting
+    /// The rows (first, last) of each card marked with a bar: done, waiting
     /// for you to read it.
     pub outlines: Vec<(u16, u16)>,
 }
