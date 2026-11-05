@@ -78,6 +78,9 @@ pub fn spawn(socket_path: PathBuf, buf_w: u16, buf_h: u16) -> Pipeline {
     }
 }
 
+/// The most events folded into one publish.
+const BURST: usize = 256;
+
 async fn reducer_task(
     mut rx: TaggedReceiver,
     tx: watch::Sender<Arc<SceneState>>,
@@ -97,11 +100,25 @@ async fn reducer_task(
         if let Some(benches) = floor_caps.benches.lock().ok().and_then(|mut b| b.take()) {
             scene.floor_benches = benches;
         }
+        // Whether there is anything new to publish: a copy of the whole
+        // scene per event would be most of the work during a replay or a
+        // burst of hooks.
+        let mut changed = false;
         tokio::select! {
             event = rx.recv() => {
                 let Some((transport, ev)) = event else { break };
+                let now = SystemTime::now();
                 if is_shown(&scene, &ev) {
-                    reducer.apply(&mut scene, ev, SystemTime::now(), transport);
+                    reducer.apply(&mut scene, ev, now, transport);
+                    changed = true;
+                }
+                // The rest of a burst goes into the same publish.
+                for _ in 0..BURST {
+                    let Ok((transport, ev)) = rx.try_recv() else { break };
+                    if is_shown(&scene, &ev) {
+                        reducer.apply(&mut scene, ev, now, transport);
+                        changed = true;
+                    }
                 }
             }
             _ = sweep.tick() => {
@@ -109,9 +126,10 @@ async fn reducer_task(
                 // Walks out a slot that slipped the gate with a blank source.
                 reducer.reconcile_connected(&mut scene, &connected, now);
                 reducer.tick(&mut scene, now);
+                changed = true;
             }
         }
-        if tx.send(Arc::new(scene.clone())).is_err() {
+        if changed && tx.send(Arc::new(scene.clone())).is_err() {
             break;
         }
     }
@@ -396,7 +414,13 @@ mod tests {
         let mut r = Reducer::new();
         let mut now = SystemTime::UNIX_EPOCH;
         let mut states = Vec::new();
-        for ty in ["session_start", "turn_start", "tool_call", "tool_result", "turn_end"] {
+        for ty in [
+            "session_start",
+            "turn_start",
+            "tool_call",
+            "tool_result",
+            "turn_end",
+        ] {
             let v = json!({
                 "type": ty, "sessionId": sid, "cwd": "/repo",
                 "callId": "c1", "toolName": "bash", "_pid": 4242,

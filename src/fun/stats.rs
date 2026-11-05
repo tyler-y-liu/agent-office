@@ -109,7 +109,8 @@ impl Doing {
 
 /// How long the boss stays at the door after you approve something.
 pub const BOSS_FOR: Duration = Duration::from_secs(4);
-/// The record is written at most this often.
+/// The record is written at most this often; [`Watch::flush`] writes the
+/// rest on the way out.
 const SAVE_EVERY: Duration = Duration::from_secs(10);
 
 /// Counts the scene's turns as they happen.
@@ -177,10 +178,12 @@ impl Watch {
             .retain(|id, _| self.seen.get(id).is_some_and(|s| s.stuck));
     }
 
+    // Marks `unsaved` at each change rather than comparing a copy of the
+    // stats, since this runs for every agent on every frame.
     fn count(&mut self, slot: &AgentSlot, was: Seen, is: Seen, now: SystemTime) {
-        let before = self.stats.clone();
         // A subagent's work is its parent's turn, counted once there.
         if was.state != Doing::Idle && is.state == Doing::Idle && slot.parent_id.is_none() {
+            self.unsaved = true;
             self.stats.turns += 1;
             if let Some(repo) = repo_of(slot) {
                 *self.stats.repos.entry(repo).or_default() += 1;
@@ -197,6 +200,7 @@ impl Watch {
             self.approved_at = Some(now);
         }
         if !was.stuck && is.stuck {
+            self.unsaved = true;
             self.stats.stuck += 1;
         }
         if is.stuck {
@@ -207,10 +211,16 @@ impl Watch {
                 .stuck_longest
                 .entry(String::from(&*slot.label))
                 .or_default();
-            *longest = (*longest).max(secs);
+            if secs > *longest {
+                *longest = secs;
+                self.unsaved = true;
+            }
         }
-        self.stats.tokens += is.tokens.saturating_sub(was.tokens);
-        self.unsaved |= self.stats != before;
+        let spent = is.tokens.saturating_sub(was.tokens);
+        if spent > 0 {
+            self.stats.tokens += spent;
+            self.unsaved = true;
+        }
     }
 
     fn save(&mut self) {
@@ -227,6 +237,20 @@ impl Watch {
                 let _ = std::fs::rename(&tmp, path);
             }
         }
+    }
+
+    /// Write what changed since the last write, on the way out: counts
+    /// since then would otherwise be lost on quit.
+    pub fn flush(&mut self) {
+        if self.unsaved {
+            self.save();
+        }
+    }
+
+    /// Whether a change is waiting for the next write.
+    #[cfg(test)]
+    fn unsaved(&self) -> bool {
+        self.unsaved
     }
 
     /// Whether the boss is at the door at `now`.
@@ -313,6 +337,28 @@ mod tests {
         w.observe_on("2026-11-06", &scene, &views, now);
         assert_eq!(w.stats.turns, 0);
         assert_eq!(w.stats.repos.get("shop"), Some(&1));
+    }
+
+    /// The record is written only when a count moved: frames where nothing
+    /// changed must not keep the disk busy, and a finished turn must not
+    /// be left unwritten.
+    #[test]
+    fn only_a_change_marks_the_record_for_writing() {
+        let (mut scene, ids) = scene_with(&[("a", "/src/shop")]);
+        let views = TaskViews::default();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_100);
+        let mut w = watch();
+        scene.agents.get_mut(&ids[0]).unwrap().state = ActivityState::Running { item: None };
+        w.observe_on("2026-11-05", &scene, &views, now);
+        w.observe_on("2026-11-05", &scene, &views, now);
+        assert!(!w.unsaved(), "nothing happened between the two frames");
+        scene.agents.get_mut(&ids[0]).unwrap().tokens_used += 10;
+        w.observe_on("2026-11-05", &scene, &views, now);
+        assert!(w.unsaved(), "tokens were spent");
+        w.unsaved = false;
+        scene.agents.get_mut(&ids[0]).unwrap().state = ActivityState::Idle;
+        w.observe_on("2026-11-05", &scene, &views, now);
+        assert!(w.unsaved(), "a turn finished");
     }
 
     /// Letting a waiting agent go on brings the boss to the door for a

@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod extract;
+pub mod memo;
 pub mod trigger;
 
 use std::collections::{HashMap, HashSet};
@@ -182,6 +183,10 @@ struct Entry {
     outcome_in_flight: bool,
     /// After a failed outcome request, when to try again.
     outcome_retry_at: Option<Instant>,
+    /// Outcome requests failed in a row, for the backoff.
+    outcome_failures: u32,
+    /// When to read the subagent's meta.json again for a description.
+    sub_meta_at: Instant,
     /// When the transcript last gained a line.
     grew_at: Instant,
 }
@@ -198,6 +203,10 @@ struct Locator {
 }
 
 const RESCAN_MISSED: Duration = Duration::from_secs(30);
+/// The least time between two scans, however many sessions are new.
+const SCAN_GAP: Duration = Duration::from_secs(1);
+/// How often a subagent's meta.json is read again while it has no description.
+const SUB_META_EVERY: Duration = Duration::from_secs(5);
 
 impl Locator {
     fn new(scan: fn(&Path) -> HashMap<AgentId, PathBuf>) -> Self {
@@ -217,6 +226,14 @@ impl Locator {
             .last_scan
             .is_none_or(|t| now.duration_since(t) >= RESCAN_MISSED);
         if self.missed.contains(&id) && !stale {
+            return None;
+        }
+        // Several new sessions in one tick share a scan: one not found yet
+        // is looked for again next tick, not marked missed for a while.
+        if self
+            .last_scan
+            .is_some_and(|t| now.duration_since(t) < SCAN_GAP)
+        {
             return None;
         }
         self.last_scan = Some(now);
@@ -325,6 +342,27 @@ pub fn task_log(dir: &Path, session_id: &str) -> PathBuf {
     dir.join(format!("{safe}.jsonl"))
 }
 
+/// How long a task log agent-office writes is kept after its last line.
+const TASK_LOG_KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Remove the task logs in `dir` untouched for [`TASK_LOG_KEEP`]: they are
+/// only ever appended to, one per session, and a session that quiet is gone.
+fn prune_task_logs(dir: &Path, now: SystemTime) {
+    let Ok(items) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for item in items.flatten() {
+        let p = item.path();
+        let old = item
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| now.duration_since(t).is_ok_and(|d| d >= TASK_LOG_KEEP));
+        if old && p.extension().is_some_and(|e| e == "jsonl") {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Spawn the loop; the views it publishes, and where to ask for a re-summary.
 pub fn spawn(
     scene_rx: watch::Receiver<Arc<SceneState>>,
@@ -349,16 +387,26 @@ async fn run(
     let codex_root = pixtuoid_core::source::codex::codex_home().join("sessions");
     let mut locator = Locator::new(scan);
     let mut codex_locator = Locator::new(scan_codex);
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, Option<String>)>();
-    // Each outcome reply with the agent reply it was asked for.
+    let mut memo = tokio::task::block_in_place(|| {
+        for dir in [&dsh_dir, &cursor_dir].into_iter().flatten() {
+            prune_task_logs(dir, SystemTime::now());
+        }
+        memo::Memo::load()
+    });
+    // Each reply with the memo key of the request it answers.
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, String, Option<String>)>();
+    // Each outcome reply with the agent reply it was asked for, and its key.
     let (outcome_tx, mut outcome_rx) =
-        mpsc::unbounded_channel::<(AgentId, String, Option<String>)>();
+        mpsc::unbounded_channel::<(AgentId, String, String, Option<String>)>();
     let mut tick = tokio::time::interval(Duration::from_millis(700));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = tick.tick() => {}
-            Some((id, out)) = done_rx.recv() => {
+            Some((id, key, out)) = done_rx.recv() => {
+                if let Some(line) = &out {
+                    memo.insert(key, line.clone());
+                }
                 if let Some(e) = entries.get_mut(&id) {
                     // A failed refresh keeps the last good line.
                     match out {
@@ -370,15 +418,23 @@ async fn run(
                     }
                 }
             }
-            Some((id, reply, out)) = outcome_rx.recv() => {
+            Some((id, reply, key, out)) = outcome_rx.recv() => {
+                if let Some(line) = &out {
+                    memo.insert(key, line.clone());
+                }
                 if let Some(e) = entries.get_mut(&id) {
                     e.outcome_in_flight = false;
                     match out {
                         Some(line) => {
                             e.outcome = Some((reply, line));
                             e.outcome_retry_at = None;
+                            e.outcome_failures = 0;
                         }
-                        None => e.outcome_retry_at = Some(Instant::now() + trigger::RETRY_AFTER),
+                        None => {
+                            e.outcome_failures += 1;
+                            e.outcome_retry_at =
+                                Some(Instant::now() + trigger::retry_after(e.outcome_failures));
+                        }
                     }
                 }
             }
@@ -393,6 +449,7 @@ async fn run(
         entries.retain(|id, _| scene.agents.contains_key(id));
         // Transcript reads and directory scans are blocking file I/O.
         tokio::task::block_in_place(|| {
+            memo.save_due(now);
             for (id, slot) in &scene.agents {
                 if !is_shown_source(&slot.source) {
                     continue;
@@ -425,6 +482,8 @@ async fn run(
                             outcome: None,
                             outcome_in_flight: false,
                             outcome_retry_at: None,
+                            outcome_failures: 0,
+                            sub_meta_at: now + SUB_META_EVERY,
                             grew_at: now,
                         },
                     );
@@ -438,21 +497,29 @@ async fn run(
                 if let Some(s) = &summarizer
                     && let Some(reply) = outcome_due(e, slot, SystemTime::now(), now)
                 {
-                    e.outcome_in_flight = true;
                     let input = OutcomeInput {
                         project: project_of(&slot.cwd),
                         task: e.transcript.latest_prompt().map(str::to_owned),
                         reply: reply.clone(),
                     };
-                    let (s, tx, id) = (s.clone(), outcome_tx.clone(), *id);
-                    tokio::spawn(async move {
-                        let out = s.summarize_outcome(&input).await;
-                        debug_log(id, "outcome", &out);
-                        let _ = tx.send((id, reply, out.ok()));
-                    });
+                    let key = s.outcome_key(&input);
+                    if let Some(line) = memo.get(&key) {
+                        e.outcome = Some((reply, line.to_owned()));
+                    } else {
+                        e.outcome_in_flight = true;
+                        let (s, tx, id) = (s.clone(), outcome_tx.clone(), *id);
+                        tokio::spawn(async move {
+                            let out = s.summarize_outcome(&input).await;
+                            debug_log(id, "outcome", &out);
+                            let _ = tx.send((id, reply, key, out.ok()));
+                        });
+                    }
                 }
-                // Claude Code may write a subagent's meta.json after its transcript.
-                if e.sub.as_ref().is_none_or(|s| s.description.is_none()) {
+                // Claude Code may write a subagent's meta.json after its
+                // transcript; one that has none yet is looked at again
+                // now and then, not every tick.
+                if e.sub.as_ref().is_none_or(|s| s.description.is_none()) && now >= e.sub_meta_at {
+                    e.sub_meta_at = now + SUB_META_EVERY;
                     e.sub = extract::sub_meta(&e.tail.path).or(e.sub.take());
                 }
                 // A subagent's description is already a summary its parent wrote.
@@ -463,18 +530,33 @@ async fn run(
                     continue;
                 };
                 let Some(s) = &summarizer else { continue };
-                let basis = format!(
-                    "{prompt}\u{1f}{}",
-                    e.transcript.todo_active.as_deref().unwrap_or("")
-                );
-                e.trigger.observe(&basis, e.transcript.tool_calls, now);
+                // Long idle, the office does not draw it, so no line is worth
+                // asking for until it gets new work; unless it is still drawn
+                // for the question it asked you. `r` still asks (`force`).
+                let asks = e
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|(_, line)| line.starts_with("问："));
+                if asks || !crate::core::idle_long(slot, SystemTime::now()) {
+                    let basis = format!(
+                        "{prompt}\u{1f}{}",
+                        e.transcript.todo_active.as_deref().unwrap_or("")
+                    );
+                    e.trigger.observe(&basis, e.transcript.tool_calls, now);
+                }
                 if e.trigger.take_due(e.transcript.tool_calls, now) {
                     let input = summary_input(&e.transcript, &slot.cwd);
+                    let key = s.summary_key(&input);
+                    if let Some(line) = memo.get(&key) {
+                        e.trigger.finished();
+                        e.summary = Some(line.to_owned());
+                        continue;
+                    }
                     let (s, tx, id) = (s.clone(), done_tx.clone(), *id);
                     tokio::spawn(async move {
                         let out = s.summarize(&input).await;
                         debug_log(id, "task", &out);
-                        let _ = tx.send((id, out.ok()));
+                        let _ = tx.send((id, key, out.ok()));
                     });
                 }
             }
@@ -764,8 +846,57 @@ mod tests {
             outcome: None,
             outcome_in_flight: false,
             outcome_retry_at: None,
+            outcome_failures: 0,
+            sub_meta_at: Instant::now(),
             grew_at: Instant::now(),
         }
+    }
+
+    /// Old task logs go, recent ones and anything that is not a task log
+    /// stay: the directory is only ever appended to.
+    #[test]
+    fn only_task_logs_a_month_quiet_are_removed() {
+        let dir = std::env::temp_dir().join(format!("agent-office-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("s.jsonl");
+        let other = dir.join("notes.txt");
+        std::fs::write(&log, "{}\n").unwrap();
+        std::fs::write(&other, "x").unwrap();
+        prune_task_logs(&dir, SystemTime::now());
+        assert!(log.exists(), "a fresh log stays");
+        prune_task_logs(&dir, SystemTime::now() + TASK_LOG_KEEP);
+        assert!(!log.exists(), "a month quiet goes");
+        assert!(other.exists(), "not a task log");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    static SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_scan(_: &Path) -> HashMap<AgentId, PathBuf> {
+        SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        HashMap::new()
+    }
+
+    /// Dozens of sessions showing up at once (the office opening) cost one
+    /// directory scan, not one each: the projects tree holds thousands of
+    /// transcripts. One not found is still looked for again shortly.
+    #[test]
+    fn new_sessions_in_one_tick_share_a_scan() {
+        let mut l = Locator::new(counting_scan);
+        let now = Instant::now();
+        let root = Path::new("/nowhere");
+        for i in 0..20 {
+            let id = AgentId::from_parts(CC_SOURCE, &format!("s{i}"));
+            assert_eq!(l.find(id, root, now), None);
+        }
+        assert_eq!(SCANS.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let late = AgentId::from_parts(CC_SOURCE, "s19");
+        l.find(late, root, now + SCAN_GAP);
+        assert_eq!(
+            SCANS.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one the first scan never looked for gets its own a moment later"
+        );
     }
 
     fn idle_slot(since: SystemTime) -> pixtuoid_core::AgentSlot {

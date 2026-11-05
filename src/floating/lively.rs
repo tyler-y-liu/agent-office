@@ -130,9 +130,31 @@ pub(super) fn night_lights(canvas: &mut Canvas, s: Stage, tags: &[Tag], lit: &[A
         .collect();
     let (w, h) = (s.w.min(canvas.w), s.h.min(canvas.h));
     let top = s.floor_top.clamp(0, i64::from(h)) as u32;
+    // Most of the floor is outside every pool and fully dark: those pixels
+    // take a table, the same as `dim(px, 1.0)`, instead of the sums below.
+    let full: [[u32; 256]; 3] = std::array::from_fn(|i| {
+        let shift = [16, 8, 0][i];
+        std::array::from_fn(|c| dim((c as u32) << shift, 1.0))
+    });
+    let mut near = Vec::with_capacity(pools.len());
     for y in top..h {
         let row = (y * canvas.w) as usize;
+        // The pools whose box this row crosses; past them, reach >= 1.
+        near.clear();
+        near.extend(
+            pools
+                .iter()
+                .filter(|&&(_, cy, _, ry)| (f64::from(y) - cy).abs() < ry)
+                .map(|&(cx, _, rx, _)| (cx, rx)),
+        );
         for x in 0..w {
+            if !near.iter().any(|&(cx, rx)| (f64::from(x) - cx).abs() < rx) {
+                let p = &mut canvas.px[row + x as usize];
+                *p = full[0][((*p >> 16) & 0xff) as usize]
+                    | full[1][((*p >> 8) & 0xff) as usize]
+                    | full[2][(*p & 0xff) as usize];
+                continue;
+            }
             // How deep in the nearest pool: 0 at its heart, 1 at its rim.
             let reach = pools
                 .iter()
@@ -778,6 +800,81 @@ mod tests {
             at(180, 110) < 0x0060_6060,
             "the rest of the floor goes dark"
         );
+    }
+
+    /// The fast path for the dark floor must light the night exactly as
+    /// working it out pixel by pixel does, on every colour and round two
+    /// overlapping pools: it is a speed-up, not a new look.
+    #[test]
+    fn the_dark_floor_shortcut_matches_the_pixel_by_pixel_light() {
+        fn by_pixel(canvas: &mut Canvas, s: Stage, pools: &[(f64, f64, f64, f64)]) {
+            let (w, h) = (s.w.min(canvas.w), s.h.min(canvas.h));
+            for y in s.floor_top as u32..h {
+                for x in 0..w {
+                    let reach = pools
+                        .iter()
+                        .map(|&(cx, cy, rx, ry)| {
+                            let (dx, dy) = ((f64::from(x) - cx) / rx, (f64::from(y) - cy) / ry);
+                            dx * dx + dy * dy
+                        })
+                        .fold(f64::MAX, f64::min);
+                    let dark = ((reach - 0.55) / 0.45).clamp(0.0, 1.0);
+                    if dark > 0.0 {
+                        let p = &mut canvas.px[(y * canvas.w + x) as usize];
+                        *p = dim(*p, dark);
+                    }
+                }
+            }
+        }
+        let s = Stage {
+            u: 2,
+            scale_factor: 1.0,
+            w: 220,
+            h: 140,
+            floor_top: 20,
+            ms: 0,
+        };
+        let tag = |n: &str, x: i64, top: i64| Tag {
+            agent: AgentId::from_parts("claude-code", n),
+            badge: Area {
+                x,
+                y: top - 10,
+                w: 20,
+                h: 8,
+            },
+            figure_top: top,
+            label: None,
+            plate: 0,
+            marker: 0,
+            marker_rgb: pixtuoid_core::sprite::Rgb { r: 0, g: 0, b: 0 },
+            name: String::new(),
+            ink: 0,
+            task: None,
+            full: true,
+        };
+        let tags = [tag("a", 40, 50), tag("b", 60, 60), tag("c", 150, 90)];
+        let lit: Vec<AgentId> = tags[..2].iter().map(|t| t.agent).collect();
+        let mut fast = Canvas::new(220, 140, 0);
+        for (i, p) in fast.px.iter_mut().enumerate() {
+            *p = (i as u32).wrapping_mul(2_654_435_761) & 0x00ff_ffff;
+        }
+        let mut slow = Canvas::new(220, 140, 0);
+        slow.px.clone_from(&fast.px);
+        night_lights(&mut fast, s, &tags, &lit);
+        let pools: Vec<_> = tags[..2]
+            .iter()
+            .map(|t| {
+                let (cx, top) = figure(t);
+                (
+                    cx as f64,
+                    (top + figure_h(s.u) * 3 / 5) as f64,
+                    (figure_w(s.u) * 3) as f64,
+                    (figure_h(s.u) * 8 / 5) as f64,
+                )
+            })
+            .collect();
+        by_pixel(&mut slow, s, &pools);
+        assert!(fast.px == slow.px);
     }
 
     /// The board's tally fits its ASCII lines and says what was done.

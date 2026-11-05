@@ -44,6 +44,9 @@ use font::{Canvas, LINE_H, rgb};
 use vector::Faces;
 
 const FRAME: Duration = Duration::from_millis(50);
+/// The office holds one frame per beat while nothing moves between beats
+/// (`OfficeSession::moves_off_beat`), so a calm window repaints on the beat.
+const BEAT_MS: u64 = pixtuoid_scene::anim::FULL_TICK_MS;
 /// How often the waits are checked for the Dock badge and banners: a
 /// second late is still in time, and a covered window wakes no more often.
 const WATCH_EVERY: Duration = Duration::from_secs(1);
@@ -98,6 +101,9 @@ pub fn run(rt: &tokio::runtime::Runtime, shot: Option<std::path::PathBuf>) -> Re
         shot: shot.map(|p| (p, Instant::now() + SHOT_AFTER)),
     };
     event_loop.run_app(&mut app)?;
+    if let Some(win) = app.win.as_mut() {
+        win.core.watch.flush();
+    }
     app.error.map_or(Ok(()), Err)
 }
 
@@ -145,6 +151,9 @@ struct Win {
     /// The sounds, when they are on.
     sound: Option<(crate::fun::sound::Ear, crate::fun::sound::Speaker)>,
     next_frame: Instant,
+    /// Whether the last frame had something moving between beats (a walk,
+    /// a reaction, confetti, the hopping "!"), which wants [`FRAME`].
+    quick: bool,
     occluded: bool,
     focused: bool,
     /// When the waits are next checked for the Dock and banners.
@@ -152,6 +161,12 @@ struct Win {
     /// The frame, and the office at art density before its upscale: kept
     /// between frames so a frame allocates nothing.
     canvas: Canvas,
+    /// Each card's head and when it was drawn: recolouring a figure for its
+    /// head is a whole character frame's work, and a head rarely changes.
+    portraits: HashMap<AgentId, (pixtuoid_core::sprite::Frame, Instant)>,
+    /// Keep the presented frame in `canvas` (copied to the window rather than
+    /// swapped in), for `--shot` to save it.
+    keep_frame: bool,
     art: Canvas,
     faces: Faces,
     hold: ResizeHold,
@@ -213,6 +228,8 @@ enum Reaction {
     Cat(i64, i64),
 }
 
+/// How long a card's drawn head is reused before it is drawn again.
+const PORTRAIT_FOR: Duration = Duration::from_secs(2);
 /// How long a click's reaction stays up.
 const REACTION_FOR: Duration = Duration::from_millis(2_200);
 
@@ -349,8 +366,14 @@ impl ApplicationHandler for Floating<'_> {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => win.click(),
-            WindowEvent::MouseWheel { delta, .. } => win.wheel(delta),
+            } => {
+                win.click();
+                win.next_frame = Instant::now();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                win.wheel(delta);
+                win.next_frame = Instant::now();
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let action = match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => Action::Back,
@@ -383,6 +406,7 @@ impl ApplicationHandler for Floating<'_> {
                 if win.core.act(action, &mut win.office) {
                     el.exit();
                 }
+                win.next_frame = Instant::now();
             }
             _ => {}
         }
@@ -412,7 +436,12 @@ impl ApplicationHandler for Floating<'_> {
         }
         // A hidden widget left running all day should cost nothing.
         if now >= win.next_frame && (!win.occluded || self.shot.is_some()) {
-            win.next_frame = now + FRAME;
+            win.next_frame = now
+                + if win.quick {
+                    FRAME
+                } else {
+                    to_next_beat(SystemTime::now())
+                };
             win.window.request_redraw();
         }
         // Covered, the frame clock stands still, so the waits' clock wakes it.
@@ -424,6 +453,28 @@ impl ApplicationHandler for Floating<'_> {
         el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
+
+/// Give the window the color space softbuffer tags its frames with
+/// (device RGB). Otherwise Core Animation converts every presented frame to
+/// the display's space on the main thread, which was most of a frame's cost;
+/// with the two matching, the window server does it on the GPU instead.
+#[cfg(target_os = "macos")]
+fn match_frame_color_space() {
+    use objc2_app_kit::{NSApplication, NSColorSpace};
+    let Some(mtm) = objc2_foundation::MainThreadMarker::new() else {
+        return;
+    };
+    // SAFETY: AppKit on the main thread, which `mtm` proves.
+    unsafe {
+        let space = NSColorSpace::deviceRGBColorSpace();
+        for w in NSApplication::sharedApplication(mtm).windows() {
+            w.setColorSpace(Some(&space));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn match_frame_color_space() {}
 
 impl Floating<'_> {
     fn open(&self, el: &ActiveEventLoop) -> Result<Win> {
@@ -442,6 +493,7 @@ impl Floating<'_> {
             .map_err(|e| anyhow::anyhow!("softbuffer context: {e}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone())
             .map_err(|e| anyhow::anyhow!("softbuffer surface: {e}"))?;
+        match_frame_color_space();
         // Seat the floors for the office the first frame will draw, so an
         // agent arriving before it lands on a desk that exists.
         let size = window.inner_size();
@@ -470,10 +522,13 @@ impl Floating<'_> {
             replay: None,
             sound: crate::fun::sound::enabled().then(Default::default),
             next_frame: Instant::now(),
+            quick: true,
             occluded: false,
             focused: true,
             next_watch: Instant::now(),
             canvas: Canvas::new(0, 0, 0),
+            keep_frame: self.shot.is_some(),
+            portraits: HashMap::new(),
             art: Canvas::new(0, 0, 0),
             faces,
             hold: ResizeHold::default(),
@@ -498,6 +553,8 @@ impl Win {
         let mut canvas = std::mem::replace(&mut self.canvas, Canvas::new(0, 0, 0));
         canvas.reset(w.get(), h.get(), bg);
         let frame = self.core.frame();
+        // Anything below that moves between beats sets this again.
+        self.quick = false;
 
         let want = fit_for(pack, ow, oh, self.hold.shown);
         let fit = self.hold.fit(want, Instant::now());
@@ -567,6 +624,10 @@ impl Win {
                 },
             )
         } {
+            // A floor slide moves every frame too, and the beat signal does
+            // not count it.
+            self.quick |= self.office.session.moves_off_beat()
+                || self.office.session.nav().transition().is_some();
             canvas.blit_scaled(&self.art, 0, 0, u32::from(fit.upscale()));
             let now = SystemTime::now();
             let stage = lively::Stage {
@@ -599,6 +660,8 @@ impl Win {
                 fit.upscale(),
             );
             if let Some(first) = frame.first_waiting {
+                // Its "!" hops in 700ms, too fast to step on the beat.
+                self.quick |= tags.iter().any(|t| t.agent == first);
                 paint_first_waiting(&mut canvas, &mut self.faces, &tags, first, sf, stage);
             }
             paint_tags(
@@ -610,6 +673,11 @@ impl Win {
             );
             self.paint_goings_on_over(&mut canvas, &frame, &tags, &signs, &speakers, stage, now);
             self.paint_reaction(&mut canvas, &tags, stage);
+            self.quick |= self.reaction.is_some()
+                || self.replay.is_some()
+                || tags
+                    .iter()
+                    .any(|t| crate::fun::live_cheer(frame.views.get(&t.agent), now).is_some());
             let u = i64::from(fit.upscale());
             if frame.clock.evening() {
                 board_hits = boards
@@ -665,17 +733,22 @@ impl Win {
         canvas.fill(i64::from(panel_x), 0, w.get() - panel_x, h.get(), PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &cells, (panel_x, 0), g);
         paint_outlines(&mut canvas, &drawn.outlines, (panel_x, cols), g, sf);
+        let at = Instant::now();
+        self.portraits.retain(|id, (_, made)| {
+            at.duration_since(*made) < PORTRAIT_FOR && frame.scene.agents.contains_key(id)
+        });
         for &(row, col, id, faded) in &drawn.avatars {
             if let Some(slot) = frame.scene.agents.get(&id) {
-                paint_portrait(
-                    &mut canvas,
-                    pack,
-                    slot,
-                    &cells,
-                    (row, col),
-                    (panel_x, g),
-                    faded,
-                );
+                let Some(scale) = pixtuoid_scene::render_scale::RenderScale::new(4) else {
+                    continue;
+                };
+                let (head, _) = self.portraits.entry(id).or_insert_with(|| {
+                    (
+                        pixtuoid_scene::portrait(slot, pack, scale, SystemTime::now()),
+                        at,
+                    )
+                });
+                paint_portrait(&mut canvas, head, &cells, (row, col), (panel_x, g), faded);
             }
         }
         let panel_rows = drawn.rows;
@@ -718,7 +791,13 @@ impl Win {
             .surface
             .buffer_mut()
             .map_err(|e| anyhow::anyhow!("buffer: {e}"))?;
-        buffer.copy_from_slice(&canvas.px);
+        if self.keep_frame {
+            buffer.copy_from_slice(&canvas.px);
+        } else {
+            // Swapped in, not copied: the canvas gets an older frame back,
+            // and the next frame's reset paints over all of it.
+            buffer.fill_from(&mut canvas.px);
+        }
         buffer
             .present()
             .map_err(|e| anyhow::anyhow!("present: {e}"))?;
@@ -1294,17 +1373,12 @@ fn paint_outlines(
 /// `faded` sinks it into the panel as its card is.
 fn paint_portrait(
     canvas: &mut Canvas,
-    pack: &OfficeArt,
-    slot: &pixtuoid_core::AgentSlot,
+    head: &pixtuoid_core::sprite::Frame,
     cells: &Buffer,
     (row, col): (u16, u16),
     (panel_x, g): (u32, Grid),
     faded: bool,
 ) {
-    let Some(scale) = pixtuoid_scene::render_scale::RenderScale::new(4) else {
-        return;
-    };
-    let head = pixtuoid_scene::portrait(slot, pack, scale, SystemTime::now());
     let (pw, ph) = (u32::from(head.width()), u32::from(head.height()));
     if pw == 0 || ph == 0 || col >= cells.area.width || row >= cells.area.height {
         return;
@@ -1901,6 +1975,11 @@ fn ring(cx: i64, cy: i64, rx: i64, ry: i64) -> Vec<(i64, i64)> {
 const BREATH_MS: u64 = 2_400;
 /// How long one hop of its "!" takes.
 const HOP_MS: u64 = 700;
+
+/// How long from `now` until the next beat starts.
+fn to_next_beat(now: SystemTime) -> Duration {
+    Duration::from_millis(BEAT_MS - lively::ms_of(now) % BEAT_MS)
+}
 
 /// 0..1 and back over `period` ms, smoothly.
 fn breath(ms: u64, period: u64) -> f64 {

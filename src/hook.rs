@@ -142,17 +142,19 @@ const SHELLS: [&str; 7] = ["sh", "bash", "zsh", "dash", "ksh", "fish", "busybox"
 /// shell. Cursor `eval`s a hook inside a shell that exits after it, which a
 /// click would find gone (pixtuoid-hook's `cli_pid`, MIT, pixtuoid authors).
 fn cli_pid(me: i32, row_of: impl Fn(i32) -> Option<(i32, String)>) -> Option<i32> {
-    let mut pid = me;
+    // Each row is read once: the parent's row read for its name also says
+    // who its parent is. Cursor waits on this hook, once per tool call.
+    let (mut parent, _) = row_of(me)?;
     // A real chain has a shell or two in it; the bound ends a corrupt one.
     for _ in 0..8 {
-        let (parent, _) = row_of(pid)?;
         if parent <= 1 {
             return None;
         }
-        if !SHELLS.contains(&row_of(parent)?.1.as_str()) {
+        let (grandparent, name) = row_of(parent)?;
+        if !SHELLS.contains(&name.as_str()) {
             return Some(parent);
         }
-        pid = parent;
+        parent = grandparent;
     }
     None
 }

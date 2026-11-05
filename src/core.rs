@@ -67,6 +67,26 @@ pub struct Core {
     desktop_rx: tokio::sync::watch::Receiver<desktop::Focus>,
     notifier: notify::Notifier,
     banners: bool,
+    /// Jumps run off the window's thread (a walk up the process tree with
+    /// `ps`, tmux, `open`), their results back here: who, the scene asked
+    /// against, and what happened.
+    jumps: Jumps,
+}
+
+type Jumped = (AgentId, Arc<SceneState>, Result<&'static str, String>);
+
+struct Jumps {
+    tx: std::sync::mpsc::Sender<Jumped>,
+    rx: std::sync::mpsc::Receiver<Jumped>,
+    /// One is out: a second press waits for it rather than race it.
+    out: bool,
+}
+
+impl Default for Jumps {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx, out: false }
+    }
 }
 
 /// One frame's worth of state.
@@ -195,6 +215,16 @@ const HIDE_IDLE_AFTER: Duration = Duration::from_secs(60 * 60);
 /// the office would otherwise fill with ones you are done with. A hidden
 /// session comes back as soon as it gets a new turn; one still waiting on
 /// your reply stays, since hiding it would drop the question.
+/// Whether `slot` has idled [`HIDE_IDLE_AFTER`] or longer at `now`: the
+/// office stops drawing it unless it still waits on your reply.
+pub fn idle_long(slot: &pixtuoid_core::AgentSlot, now: SystemTime) -> bool {
+    slot.state == pixtuoid_core::ActivityState::Idle
+        && slot.exiting_at.is_none()
+        && now
+            .duration_since(slot.state_started_at)
+            .is_ok_and(|d| d >= HIDE_IDLE_AFTER)
+}
+
 pub fn without_long_idle(
     scene: &Arc<SceneState>,
     views: &tasks::TaskViews,
@@ -204,11 +234,7 @@ pub fn without_long_idle(
     let gone: Vec<AgentId> = scene
         .agents
         .values()
-        .filter(|s| s.state == pixtuoid_core::ActivityState::Idle && s.exiting_at.is_none())
-        .filter(|s| {
-            now.duration_since(s.state_started_at)
-                .is_ok_and(|d| d >= HIDE_IDLE_AFTER)
-        })
+        .filter(|s| idle_long(s, now))
         .filter(|s| {
             panel::waits_on_you(s, views.get(&s.agent_id), panel::read_since_idle(s, seen))
                 .is_none()
@@ -259,6 +285,7 @@ impl Core {
             desktop_rx: desktop::spawn(),
             notifier: notify::Notifier::default(),
             banners: notify::banners_on(),
+            jumps: Jumps::default(),
         }
     }
 
@@ -275,6 +302,7 @@ impl Core {
 
     /// The state to draw now; drops a selection whose agent left.
     pub fn frame(&mut self) -> Frame {
+        self.land_jumps();
         let views = self.views_rx.borrow().clone();
         let live = self.live(&views);
         let now = SystemTime::now();
@@ -329,6 +357,7 @@ impl Core {
     /// Run on its own clock, not per frame, since a covered window draws
     /// none and that is when word matters most.
     pub fn watch_waits(&mut self, focused: bool) {
+        self.land_jumps();
         // Here, not per frame: it runs on the main thread, as AppKit's
         // front-app check needs, and while the window is covered too.
         let live = self.pipe.scene_rx.borrow().clone();
@@ -340,6 +369,10 @@ impl Core {
             SystemTime::now(),
         );
         let views = self.views_rx.borrow().clone();
+        // Also counted here: a covered window draws no frames, and a turn
+        // that starts and ends while it is covered still counts.
+        self.watch
+            .observe(&self.live(&views), &views, SystemTime::now());
         let tick = self.notifier.tick(
             &self.scene(),
             &views,
@@ -435,29 +468,44 @@ impl Core {
                 }
                 None => self.note_result(Err("现在没有会话等你".to_owned())),
             },
-            Action::Open => {
-                let scene = self.scene();
-                let done = match self.ui.selected {
-                    Some(id) => jump::open_agent(&scene, id).inspect(|_| {
-                        // The session opened is the root's: all of it is read.
-                        let now = SystemTime::now();
-                        let mut at = Some(id);
-                        // Bounded: a parent cycle in corrupt state must not spin.
-                        for _ in 0..8 {
-                            let Some(a) = at else { break };
-                            self.ui.seen.insert(a, now);
-                            at = scene.agents.get(&a).and_then(|s| s.parent_id);
-                        }
-                    }),
-                    None => Err("先选中一个 agent".to_owned()),
-                };
-                self.note_result(done);
-            }
+            Action::Open => match self.ui.selected {
+                Some(_) if self.jumps.out => {}
+                Some(id) => {
+                    self.jumps.out = true;
+                    self.note_result(Ok("正在打开…"));
+                    let scene = self.scene();
+                    let tx = self.jumps.tx.clone();
+                    std::thread::spawn(move || {
+                        let done = jump::open_agent(&scene, id);
+                        let _ = tx.send((id, scene, done));
+                    });
+                }
+                None => self.note_result(Err("先选中一个 agent".to_owned())),
+            },
             Action::OpenWaiting => {
                 self.note_result(jump::open_url(jump::NEEDS_INPUT).map(|()| "已在 Claude 打开"))
             }
         }
         false
+    }
+
+    /// Take in the jumps that have finished since the last look.
+    fn land_jumps(&mut self) {
+        while let Ok((id, scene, done)) = self.jumps.rx.try_recv() {
+            self.jumps.out = false;
+            if done.is_ok() {
+                // The session opened is the root's: all of it is read.
+                let now = SystemTime::now();
+                let mut at = Some(id);
+                // Bounded: a parent cycle in corrupt state must not spin.
+                for _ in 0..8 {
+                    let Some(a) = at else { break };
+                    self.ui.seen.insert(a, now);
+                    at = scene.agents.get(&a).and_then(|s| s.parent_id);
+                }
+            }
+            self.note_result(done);
+        }
     }
 
     fn note_result(&mut self, done: Result<&str, String>) {
