@@ -168,26 +168,32 @@ pub fn badge_ink(text: &str, tone: BadgeTone, theme: &Theme) -> BadgeInk {
 
 /// How many agents wear each label: an agent sharing its label carries its
 /// session's suffix, even where the namesake is not drawn.
-pub(crate) struct Namesakes<'a>(
-    HashMap<&'a str, usize>,
+pub(crate) struct Namesakes(
+    /// agent-office: each agent sharing its label, numbered from 1 by when
+    /// it started ([`start_order`]).
+    HashMap<pixtuoid_core::AgentId, usize>,
     HashMap<pixtuoid_core::AgentId, usize>,
     /// agent-office: each repository's colour ([`repo_hues`]).
     pub(crate) HashMap<std::path::PathBuf, Rgb>,
 );
 
-impl<'a> Namesakes<'a> {
-    pub(crate) fn of(agents: impl IntoIterator<Item = &'a AgentSlot>) -> Self {
+impl Namesakes {
+    pub(crate) fn of<'a>(agents: impl IntoIterator<Item = &'a AgentSlot>) -> Self {
         let agents: Vec<&AgentSlot> = agents.into_iter().collect();
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for agent in &agents {
             *counts.entry(&*agent.label).or_insert(0) += 1;
         }
-        Self(counts, HashMap::new(), repo_hues(agents))
+        Self(
+            start_order(&agents, &counts),
+            HashMap::new(),
+            repo_hues(agents),
+        )
     }
 
     /// agent-office: also mark each parent's brief sub-agents, which are not
     /// drawn, as "+N" on its badge ([`crate::team::brief_subs`]).
-    pub(crate) fn with_brief_subs(
+    pub(crate) fn with_brief_subs<'a>(
         mut self,
         agents: impl IntoIterator<Item = &'a AgentSlot>,
         now: std::time::SystemTime,
@@ -198,13 +204,11 @@ impl<'a> Namesakes<'a> {
 
     /// `agent`'s badge text, disambiguated and truncated, with no marker.
     pub(crate) fn text(&self, agent: &AgentSlot) -> String {
-        let needs_disambig = self.0.get(&*agent.label).copied().unwrap_or(0) > 1
-            && agent.session_id.chars().count() >= 4;
-        let raw: std::borrow::Cow<'_, str> = if needs_disambig {
-            let id4 = disambig_suffix(&agent.session_id);
-            std::borrow::Cow::Owned(format!("{}{LABEL_SEP}{id4}", agent.label))
-        } else {
-            std::borrow::Cow::Borrowed(&*agent.label)
+        // agent-office: a namesake carries its start order, not a hash of its
+        // session id, so the suffix says which session it is.
+        let raw: std::borrow::Cow<'_, str> = match self.0.get(&agent.agent_id) {
+            Some(n) => std::borrow::Cow::Owned(format!("{}{LABEL_SEP}{n}", agent.label)),
+            None => std::borrow::Cow::Borrowed(&*agent.label),
         };
         let marker = crate::display::text::cells(BADGE_MARKER.encode_utf8(&mut [0; 4]));
         // agent-office: the "+N" is kept whole and the name truncated to fit.
@@ -215,6 +219,33 @@ impl<'a> Namesakes<'a> {
         let room = BADGE_CELLS.saturating_sub(marker + crate::display::text::cells(&team));
         format!("{}{team}", truncate_label(&raw, room))
     }
+}
+
+/// agent-office: the agents among `agents` whose label `counts` says is
+/// shared, each numbered from 1 among its namesakes by when it started (its
+/// session id breaking a tie), so the first session opened in a repository
+/// reads `·1` and the next `·2`.
+fn start_order(
+    agents: &[&AgentSlot],
+    counts: &HashMap<&str, usize>,
+) -> HashMap<pixtuoid_core::AgentId, usize> {
+    let mut shared: Vec<&AgentSlot> = agents
+        .iter()
+        .copied()
+        .filter(|a| counts.get(&*a.label).copied().unwrap_or(0) > 1)
+        .collect();
+    shared.sort_by(|a, b| {
+        (&*a.label, a.created_at, &*a.session_id).cmp(&(&*b.label, b.created_at, &*b.session_id))
+    });
+    let mut order = HashMap::new();
+    let mut prev: Option<&str> = None;
+    let mut n = 0;
+    for a in shared {
+        n = if prev == Some(&*a.label) { n + 1 } else { 1 };
+        prev = Some(&*a.label);
+        order.insert(a.agent_id, n);
+    }
+    order
 }
 
 /// `agent`'s badge tone: exiting over whatever it last did.
@@ -408,17 +439,33 @@ mod tests {
         assert_eq!(badge_hue("zz·repo", &crate::theme::NORMAL), None);
     }
 
+    /// agent-office: sessions sharing a repository's name are told apart by
+    /// the order they were opened in, which a person can match to their
+    /// terminals; a hash of the session id matched nothing they could see.
     #[test]
-    fn colliding_labels_get_disambig_suffixes() {
-        let a = slot("cc", "session-aaaa", 0, running());
-        let b = slot("cc", "session-bbbb", 1, running());
-        let s = scene_of(vec![a.clone(), b.clone()]);
+    fn namesakes_are_numbered_by_when_they_started() {
+        let at = |sid: &str, secs: u64, desk: usize| AgentSlot {
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            ..slot("cc\u{b7}repo", sid, desk, running())
+        };
+        // Inserted newest first and with ids sorting against their age, so
+        // only the start time can give this order.
+        let late = at("session-aaaa", 30, 0);
+        let early = at("session-zzzz", 10, 1);
+        let middle = at("session-mmmm", 20, 2);
+        let other = slot("cc\u{b7}other", "session-oooo", 3, running());
+        let s = scene_of(vec![
+            late.clone(),
+            early.clone(),
+            middle.clone(),
+            other.clone(),
+        ]);
         let namesakes = Namesakes::of(s.agents.values());
-        let want_a = format!("cc\u{00b7}{}", disambig_suffix(&a.session_id));
-        let want_b = format!("cc\u{00b7}{}", disambig_suffix(&b.session_id));
-        assert_eq!(namesakes.text(&a), want_a);
-        assert_eq!(namesakes.text(&b), want_b);
-        assert_ne!(want_a, want_b);
+        assert_eq!(namesakes.text(&early), "cc\u{b7}repo\u{b7}1");
+        assert_eq!(namesakes.text(&middle), "cc\u{b7}repo\u{b7}2");
+        assert_eq!(namesakes.text(&late), "cc\u{b7}repo\u{b7}3");
+        // A label no one else wears stays bare.
+        assert_eq!(namesakes.text(&other), "cc\u{b7}other");
     }
 
     #[test]
