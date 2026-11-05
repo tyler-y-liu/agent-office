@@ -4,6 +4,7 @@
 //! as one more agent.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -44,12 +45,17 @@ pub struct SummaryInput {
     pub recent_tools: Vec<String>,
 }
 
+/// Requests out at once, across every session: an office opening on dozens
+/// of sessions, or a gateway failing for all of them, should not flood it.
+const AT_ONCE: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct Summarizer {
     http: reqwest::Client,
     url: String,
     key: String,
     model: String,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Summarizer {
@@ -87,11 +93,22 @@ impl Summarizer {
             url: format!("{base}/v1/chat/completions"),
             key,
             model,
+            slots: Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
         }
     }
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// What [`Self::summarize`] would ask, as a [`memo`](super::memo) key.
+    pub fn summary_key(&self, input: &SummaryInput) -> String {
+        super::memo::key(&[&self.model, SYSTEM, &user_message(input)])
+    }
+
+    /// What [`Self::summarize_outcome`] would ask, as a [`memo`](super::memo) key.
+    pub fn outcome_key(&self, input: &OutcomeInput) -> String {
+        super::memo::key(&[&self.model, OUTCOME_SYSTEM, &outcome_message(input)])
     }
 
     pub async fn summarize(&self, input: &SummaryInput) -> Result<String> {
@@ -103,6 +120,7 @@ impl Summarizer {
     }
 
     async fn ask(&self, system: &str, user: String) -> Result<String> {
+        let _slot = self.slots.acquire().await.context("summary slots closed")?;
         let body = json!({
             "model": self.model,
             "max_tokens": 60,

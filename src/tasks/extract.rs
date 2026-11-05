@@ -207,6 +207,22 @@ impl Transcript {
     /// Fold one JSONL line in; unparseable lines are skipped, as a partial
     /// write or a format change must not stop the rest.
     pub fn feed(&mut self, line: &str) {
+        /// A line's `type` alone, read without building the rest: most of a
+        /// first read is lines of kinds nothing here looks at.
+        #[derive(serde::Deserialize)]
+        struct Kind<'a> {
+            #[serde(rename = "type", borrow)]
+            kind: Option<std::borrow::Cow<'a, str>>,
+        }
+        let wanted = serde_json::from_str::<Kind>(line).is_ok_and(|k| {
+            matches!(
+                k.kind.as_deref(),
+                Some("user" | "assistant" | "event_msg" | "response_item" | "last-prompt")
+            )
+        });
+        if !wanted {
+            return;
+        }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return;
         };
@@ -743,10 +759,15 @@ impl Tail {
 
     /// Feed every complete new line into `t`; whether any arrived.
     pub fn poll(&mut self, t: &mut Transcript) -> std::io::Result<bool> {
-        let mut f = File::open(&self.path)?;
-        let meta = f.metadata()?;
+        // A stat first: polled every tick for every session, most of which
+        // have not grown, so opening the file is left to the ones that have.
+        let meta = std::fs::metadata(&self.path)?;
         self.modified = meta.modified().ok();
         let len = meta.len();
+        if len == self.offset {
+            return Ok(false);
+        }
+        let mut f = File::open(&self.path)?;
         if len < self.offset {
             // Rewritten from scratch: start over.
             *t = Transcript::default();

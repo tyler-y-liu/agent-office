@@ -10,6 +10,16 @@ pub const TOOLS_PER_REFRESH: u32 = 10;
 /// A failed request is tried again after this, so a gateway blip does not
 /// leave an idle agent unsummarized until its next prompt.
 pub const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// The longest wait between retries: each failure in a row doubles it up to
+/// this, so a gateway that stays down is not asked twice a minute per agent.
+pub const RETRY_MAX: Duration = Duration::from_secs(8 * 60);
+
+/// How long to wait after `failures` failed requests in a row.
+pub fn retry_after(failures: u32) -> Duration {
+    RETRY_AFTER
+        .saturating_mul(1 << failures.saturating_sub(1).min(5))
+        .min(RETRY_MAX)
+}
 
 #[derive(Debug, Default)]
 pub struct Trigger {
@@ -17,6 +27,8 @@ pub struct Trigger {
     pending_since: Option<Instant>,
     in_flight: bool,
     tools_at_last: u32,
+    /// Requests failed in a row.
+    failures: u32,
 }
 
 impl Trigger {
@@ -58,14 +70,16 @@ impl Trigger {
 
     pub fn finished(&mut self) {
         self.in_flight = false;
+        self.failures = 0;
     }
 
-    /// The request failed: finished, and due again after [`RETRY_AFTER`]
+    /// The request failed: finished, and due again after [`retry_after`]
     /// unless something newer arms it first.
     pub fn failed(&mut self, now: Instant) {
         self.in_flight = false;
+        self.failures += 1;
         if self.pending_since.is_none() {
-            self.pending_since = Some(now + RETRY_AFTER - DEBOUNCE);
+            self.pending_since = Some(now + retry_after(self.failures) - DEBOUNCE);
         }
     }
 }
@@ -120,6 +134,38 @@ mod tests {
             "no hammering a failing gateway"
         );
         assert!(tr.take_due(0, t0 + DEBOUNCE + RETRY_AFTER));
+    }
+
+    /// A gateway that stays down is asked less and less often, but still
+    /// asked: it may come back.
+    #[test]
+    fn failures_in_a_row_back_off_up_to_a_ceiling() {
+        assert_eq!(retry_after(1), RETRY_AFTER);
+        assert_eq!(retry_after(2), RETRY_AFTER * 2);
+        assert_eq!(retry_after(3), RETRY_AFTER * 4);
+        assert_eq!(retry_after(50), RETRY_MAX);
+        let t0 = Instant::now();
+        let mut tr = Trigger::default();
+        tr.observe("p", 0, t0);
+        assert!(tr.take_due(0, t0 + DEBOUNCE));
+        tr.failed(t0 + DEBOUNCE);
+        let t1 = t0 + DEBOUNCE + RETRY_AFTER;
+        assert!(tr.take_due(0, t1));
+        tr.failed(t1);
+        assert!(
+            !tr.take_due(0, t1 + RETRY_AFTER),
+            "the second wait is longer"
+        );
+        assert!(tr.take_due(0, t1 + RETRY_AFTER * 2));
+        tr.finished();
+        tr.observe("q", 0, t1 + RETRY_AFTER * 2);
+        let t2 = t1 + RETRY_AFTER * 2 + DEBOUNCE;
+        assert!(tr.take_due(0, t2));
+        tr.failed(t2);
+        assert!(
+            tr.take_due(0, t2 + RETRY_AFTER),
+            "a success starts the count over"
+        );
     }
 
     #[test]

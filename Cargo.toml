@@ -27,7 +27,7 @@ rustix = { version = "1", features = ["process"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 # The version winit already pulls in; raises the terminal a session runs in,
 # and tells whether the desktop app is in front.
-objc2-app-kit = { version = "0.2.2", features = ["NSRunningApplication", "libc", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSRunningApplication", "libc", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSWindow", "NSColorSpace", "NSGraphics"] }
 # The Dock badge's label and the main-thread proof AppKit asks for.
 objc2-foundation = { version = "0.2.2", features = ["NSString", "NSThread"] }
 
@@ -37,3 +37,6 @@ objc2-foundation = { version = "0.2.2", features = ["NSString", "NSThread"] }
 [patch.crates-io]
 pixtuoid-scene = { path = "vendor/pixtuoid-scene" }
 pixtuoid-core = { path = "vendor/pixtuoid-core" }
+# Reuses released frame buffers on macOS instead of a fresh zeroed one per frame;
+# see vendor/softbuffer/src/backends/cg.rs.
+softbuffer = { path = "vendor/softbuffer" }
