@@ -297,9 +297,35 @@ fn write_settings(path: &PathBuf, before: Option<&str>, settings: &Value) -> Res
     Ok(())
 }
 
+/// The path hooks call this binary by. A Homebrew install resolves to a
+/// versioned `Cellar/agent-office/<ver>/bin`, which `brew upgrade` deletes;
+/// its `opt` link follows upgrades, so hooks keep working without reconnecting.
+pub fn exe_for_hooks() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    Ok(brew_opt_path(&exe).filter(|p| p.exists()).unwrap_or(exe))
+}
+
+fn brew_opt_path(exe: &std::path::Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    let version = bin.parent()?;
+    let formula = version.parent()?;
+    let cellar = formula.parent()?;
+    if bin.file_name()? != "bin" || cellar.file_name()? != "Cellar" {
+        return None;
+    }
+    Some(
+        cellar
+            .parent()?
+            .join("opt")
+            .join(formula.file_name()?)
+            .join("bin")
+            .join(exe.file_name()?),
+    )
+}
+
 /// `agent-office connect`: hook this binary in, replacing an earlier install.
 pub fn connect() -> Result<()> {
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = exe_for_hooks()?;
     let quoted = exe.display().to_string().replace('\'', "'\\''");
     let command = format!("'{quoted}' hook");
     let (path, raw, mut settings) = read_settings()?;
@@ -327,6 +353,19 @@ pub fn disconnect() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `brew upgrade` removes the old Cellar version, so hooks written with it
+    /// would silently stop firing; they must point at the stable `opt` link.
+    #[test]
+    fn brew_cellar_path_maps_to_opt_link() {
+        let cellar = std::path::Path::new("/opt/homebrew/Cellar/agent-office/0.1.0/bin/agent-office");
+        assert_eq!(
+            brew_opt_path(cellar).unwrap(),
+            std::path::Path::new("/opt/homebrew/opt/agent-office/bin/agent-office")
+        );
+        let cargo = std::path::Path::new("/Users/me/.cargo/bin/agent-office");
+        assert_eq!(brew_opt_path(cargo), None);
+    }
 
     /// The user's own hooks and every other key must come through untouched,
     /// and reconnecting must not stack a second copy of ours.

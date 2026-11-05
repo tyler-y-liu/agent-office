@@ -22,16 +22,18 @@ The UI comes in English and Simplified Chinese, following your macOS language; s
 ## Requirements
 
 - macOS (the only platform it has been used on)
-- Rust 1.95 or newer
+- Rust 1.95 or newer, only when building from source
 - Optional: an OpenAI-compatible chat completions endpoint for summaries. Without one it still works, and the panel shows each session's raw prompt.
 
 ## Quick start
 
 ```bash
-cargo install --git https://github.com/tyler-y-liu/agent-office
+brew install tyler-y-liu/tap/agent-office
 agent-office connect      # adds hooks to ~/.claude/settings.json (backs it up first); applies to new Claude sessions
 agent-office
 ```
+
+You can also build from source with `cargo install --git https://github.com/tyler-y-liu/agent-office`. Each [release](https://github.com/tyler-y-liu/agent-office/releases) also has a universal binary for Apple Silicon and Intel.
 
 To turn on summaries, put these in `~/.config/agent-office/env` (or set them as environment variables):
 
