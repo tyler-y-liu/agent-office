@@ -301,6 +301,23 @@ const OFFICE_TALK: &[&str] = &[
     "下午茶叫外卖？",
 ];
 
+const OFFICE_TALK_EN: &[&str] = &[
+    "Tea break yet?",
+    "Lunch is on you!",
+    "Spec changed again…",
+    "OT till when?",
+    "Dinner plans?",
+    "Boss is back…",
+    "Deadline rush!",
+    "Too many meetings",
+    "Hike this weekend?",
+    "Rain's coming",
+    "So tired…",
+    "Keep going!",
+    "Shipped yet?",
+    "Order afternoon tea?",
+];
+
 const LUNCH_ORDERS: &[&str] = &[
     "A 餐，冻奶茶",
     "菠萝油加牛油",
@@ -310,6 +327,17 @@ const LUNCH_ORDERS: &[&str] = &[
     "餐蛋面！",
     "冻柠茶走甜",
     "西多士一份",
+];
+
+const LUNCH_ORDERS_EN: &[&str] = &[
+    "Set A, iced milk tea",
+    "Pineapple bun, butter",
+    "Breakfast set, no scallion",
+    "Hot lemon tea, less sugar",
+    "Char siu rice, add egg",
+    "Spam and egg noodles!",
+    "Iced lemon tea, no sugar",
+    "French toast, please",
 ];
 
 const MEETING_TALK: &[&str] = &[
@@ -325,6 +353,19 @@ const MEETING_TALK: &[&str] = &[
     "下次再 sync",
 ];
 
+const MEETING_TALK_EN: &[&str] = &[
+    "Let's see the plan",
+    "Who follows up?",
+    "What's next?",
+    "Any questions?",
+    "When's the deadline?",
+    "I'll write it",
+    "Split the work",
+    "Settled, then",
+    "Let me note that",
+    "Sync next time",
+];
+
 const TYPHOON_TALK: &[&str] = &[
     "八号风球喇！",
     "收工返屋企",
@@ -333,14 +374,42 @@ const TYPHOON_TALK: &[&str] = &[
     "记得关窗",
 ];
 
+const TYPHOON_TALK_EN: &[&str] = &[
+    "Signal 8 is up!",
+    "Off home now",
+    "Hurry, last train!",
+    "Star Ferry's stopped",
+    "Shut the windows",
+];
+
+/// `zh` or `en`, by the office's language.
+fn by_lang(zh: &'static [&'static str], en: &'static [&'static str]) -> &'static [&'static str] {
+    if crate::i18n::is_zh() { zh } else { en }
+}
+
 /// What an agent at `phase` has to say about its work.
 fn shop_talk(phase: Phase) -> &'static [&'static str] {
     match phase {
-        Phase::Research => &["睇紧文档", "搵到喇！", "呢个 API 好怪"],
-        Phase::Code => &["快搞掂", "再改少少", "边个写嘅？"],
-        Phase::Test => &["又红咗…", "test 过晒未？", "等 CI 中"],
-        Phase::Run => &["跑紧…", "build 好慢", "等等先"],
-        Phase::Delegate => &["交俾细佬做", "开会讲下", "分工合作"],
+        Phase::Research => by_lang(
+            &["睇紧文档", "搵到喇！", "呢个 API 好怪"],
+            &["Reading docs", "Found it!", "Odd API, this"],
+        ),
+        Phase::Code => by_lang(
+            &["快搞掂", "再改少少", "边个写嘅？"],
+            &["Almost done", "One more tweak", "Who wrote this?"],
+        ),
+        Phase::Test => by_lang(
+            &["又红咗…", "test 过晒未？", "等 CI 中"],
+            &["Red again…", "All tests pass?", "Waiting on CI"],
+        ),
+        Phase::Run => by_lang(
+            &["跑紧…", "build 好慢", "等等先"],
+            &["Running…", "Slow build", "Hold on"],
+        ),
+        Phase::Delegate => by_lang(
+            &["交俾细佬做", "开会讲下", "分工合作"],
+            &["Handing it off", "Let's huddle", "Teamwork"],
+        ),
     }
 }
 
@@ -358,21 +427,21 @@ pub fn chitchat(
     let seed = mix(speaker.raw() ^ turn.wrapping_mul(0x9e37_79b9_7f4a_7c15));
     let pick = |lines: &'static [&'static str]| lines[(seed % lines.len() as u64) as usize];
     match occasion {
-        Occasion::Typhoon => return pick(TYPHOON_TALK),
-        Occasion::Lunch => return pick(LUNCH_ORDERS),
+        Occasion::Typhoon => return pick(by_lang(TYPHOON_TALK, TYPHOON_TALK_EN)),
+        Occasion::Lunch => return pick(by_lang(LUNCH_ORDERS, LUNCH_ORDERS_EN)),
         Occasion::Ordinary | Occasion::Meeting => {}
     }
     if let Some((cheer, _)) = live_cheer(view, now) {
         return match cheer {
-            Cheer::TestsPassed => "全部绿晒！",
-            Cheer::Shipped => "推咗上去喇",
-            Cheer::Recovered => "终于搞掂！",
+            Cheer::TestsPassed => crate::i18n::t("全部绿晒！", "All green!"),
+            Cheer::Shipped => crate::i18n::t("推咗上去喇", "Pushed it!"),
+            Cheer::Recovered => crate::i18n::t("终于搞掂！", "Sorted at last!"),
         };
     }
     let small_talk = if occasion == Occasion::Meeting {
-        MEETING_TALK
+        by_lang(MEETING_TALK, MEETING_TALK_EN)
     } else {
-        OFFICE_TALK
+        by_lang(OFFICE_TALK, OFFICE_TALK_EN)
     };
     match view.and_then(|v| v.phase) {
         Some(p) if seed >> 32 & 1 == 0 => pick(shop_talk(p)),
@@ -380,7 +449,8 @@ pub fn chitchat(
     }
 }
 
-/// How an idle worker takes a click: a stretch, or a word back in Cantonese.
+/// How an idle worker takes a click: a stretch, or a word back in Cantonese
+/// (English in an English office).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Poke {
     Stretch,
@@ -398,6 +468,17 @@ const POKED_TALK: &[&str] = &[
     "我好忙㗎！",
 ];
 
+const POKED_TALK_EN: &[&str] = &[
+    "Busy here!",
+    "Don't bug me",
+    "Quick break…",
+    "Yes, boss?",
+    "Milk tea time",
+    "Talk later",
+    "Morning, boss!",
+    "So busy!",
+];
+
 /// What `agent` does on its `nth` click: every third a stretch, else a line,
 /// so clicking on gets something new each time.
 pub fn poke(agent: AgentId, nth: u64) -> Poke {
@@ -405,11 +486,14 @@ pub fn poke(agent: AgentId, nth: u64) -> Poke {
         return Poke::Stretch;
     }
     let seed = mix(agent.raw() ^ nth.wrapping_mul(0x9e37_79b9_7f4a_7c15));
-    Poke::Say(POKED_TALK[(seed % POKED_TALK.len() as u64) as usize])
+    let lines = by_lang(POKED_TALK, POKED_TALK_EN);
+    Poke::Say(lines[(seed % lines.len() as u64) as usize])
 }
 
 /// What the shop cat says when clicked.
-pub const MEOW: &str = "喵～";
+pub fn meow() -> &'static str {
+    crate::i18n::t("喵～", "Meow~")
+}
 
 /// A cheap, well-spread hash (splitmix64's finaliser).
 pub fn mix(mut x: u64) -> u64 {

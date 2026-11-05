@@ -44,7 +44,12 @@ pub enum Action {
 
 /// The footer's warning while Claude Code's hooks are out: short, since it
 /// sits on the row the key hints need.
-const HOOKS_OUT: &str = "未接 hooks（agent-office connect）";
+fn hooks_out() -> &'static str {
+    crate::i18n::t(
+        "未接 hooks（agent-office connect）",
+        "hooks off (agent-office connect)",
+    )
+}
 
 /// How long a note on what a key did stays in the footer.
 const NOTE_FOR: Duration = Duration::from_secs(5);
@@ -281,9 +286,9 @@ impl Core {
         let summarizer_on = summarizer.is_some();
         let summary_note = match &summarizer {
             // The model's name is long and `doctor` already shows it.
-            Some(_) => "摘要 ✓".to_owned(),
+            Some(_) => crate::i18n::t("摘要 ✓", "summary ✓").to_owned(),
             // Not switched off: no AGENT_OFFICE_API_* to summarize with.
-            None => "摘要未配置".to_owned(),
+            None => crate::i18n::t("摘要未配置", "summary not set up").to_owned(),
         };
         let socket = crate::hook::socket_path();
         let (pipe, views_rx, force_tx, outlook_rx) = rt.block_on(async {
@@ -449,7 +454,10 @@ impl Core {
                 if quits(&mut self.quit_armed, Instant::now()) {
                     return true;
                 }
-                self.note("再按一次 q 退出", Tone::Ok);
+                self.note(
+                    crate::i18n::t("再按一次 q 退出", "press q again to quit"),
+                    Tone::Ok,
+                );
             }
             Action::Back if self.ui.expanded => self.ui.expanded = false,
             Action::Back => self.ui.selected = None,
@@ -487,13 +495,16 @@ impl Core {
                     self.follow(floors);
                     return self.act(Action::Open, floors);
                 }
-                None => self.note("现在没有会话等你", Tone::Failed),
+                None => self.note(
+                    crate::i18n::t("现在没有会话等你", "no session is waiting for you"),
+                    Tone::Failed,
+                ),
             },
             Action::Open => match self.ui.selected {
                 Some(_) if self.jumps.out => {}
                 Some(id) => {
                     self.jumps.out = true;
-                    self.note("正在打开…", Tone::Ok);
+                    self.note(crate::i18n::t("正在打开…", "opening…"), Tone::Ok);
                     let scene = self.scene();
                     let tx = self.jumps.tx.clone();
                     std::thread::spawn(move || {
@@ -501,11 +512,15 @@ impl Core {
                         let _ = tx.send((id, scene, done));
                     });
                 }
-                None => self.note("先选中一个 agent", Tone::Failed),
+                None => self.note(
+                    crate::i18n::t("先选中一个 agent", "select an agent first"),
+                    Tone::Failed,
+                ),
             },
-            Action::OpenWaiting => {
-                self.note_result(jump::open_url(jump::NEEDS_INPUT).map(|()| "已在 Claude 打开"))
-            }
+            Action::OpenWaiting => self.note_result(
+                jump::open_url(jump::NEEDS_INPUT)
+                    .map(|()| crate::i18n::t("已在 Claude 打开", "opened in Claude")),
+            ),
         }
         false
     }
@@ -533,7 +548,10 @@ impl Core {
     fn note_result(&mut self, done: Result<&str, String>) {
         match done {
             Ok(text) => self.note(text, Tone::Ok),
-            Err(e) => self.note(&format!("跳转失败：{e}"), Tone::Failed),
+            Err(e) => self.note(
+                &crate::tr!("跳转失败：{e}", "could not jump: {e}"),
+                Tone::Failed,
+            ),
         }
     }
 
@@ -546,7 +564,7 @@ impl Core {
     fn status_note(&self) -> (String, Option<Tone>) {
         match &self.note {
             Some((text, tone, at)) if at.elapsed() < NOTE_FOR => (text.clone(), Some(*tone)),
-            _ if !self.hooks => (format!("{HOOKS_OUT} · {}", self.summary_note), None),
+            _ if !self.hooks => (format!("{} · {}", hooks_out(), self.summary_note), None),
             _ => (self.summary_note.clone(), None),
         }
     }
@@ -567,36 +585,45 @@ pub fn footer(
     let dim = Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98));
     let key = Style::default().fg(Color::Rgb(0xe6, 0xe6, 0xe6));
     let labels = if core.head_labels {
-        "隐藏任务"
+        crate::i18n::t("隐藏任务", "hide tasks")
     } else {
-        "显示任务"
+        crate::i18n::t("显示任务", "show tasks")
     };
     // In the order shown; kept by `rank`, the lower the more needed.
     let base = [
-        ("↑↓", "选中", 0),
-        ("Enter", "展开", 3),
-        ("o", "打开会话", 0),
-        ("w", "等你的", 4),
-        ("n", "处理下一个", 1),
-        ("r", "重新总结", 7),
+        ("↑↓", crate::i18n::t("选中", "select"), 0),
+        ("Enter", crate::i18n::t("展开", "expand"), 3),
+        ("o", crate::i18n::t("打开会话", "open"), 0),
+        ("w", crate::i18n::t("等你的", "waiting"), 4),
+        ("n", crate::i18n::t("处理下一个", "next waiting"), 1),
+        ("r", crate::i18n::t("重新总结", "resummarize"), 7),
         ("b", labels, 6),
     ];
-    let floors_hint = (floors.n_floors() > 1).then_some(("[ ]", "换楼层", 5));
+    let floors_hint =
+        (floors.n_floors() > 1).then_some(("[ ]", crate::i18n::t("换楼层", "floor"), 5));
     let hints: Vec<(&str, &str, u8)> = base
         .into_iter()
         .chain(floors_hint)
         .chain(extra.iter().map(|&(k, w)| (k, w, 8)))
-        .chain([("q", "退出", 2)])
+        .chain([("q", crate::i18n::t("退出", "quit"), 2)])
         .collect();
     let mut right = Vec::new();
     if waiting > 0 {
         let wait = Style::default().fg(panel::WAIT);
-        right.push(Span::styled(format!("● {waiting} 个等你  "), wait));
+        right.push(Span::styled(
+            crate::tr!("● {waiting} 个等你  ", "● {waiting} waiting  "),
+            wait,
+        ));
     }
     // The floor only where there is more than one to be on.
     if floors.n_floors() > 1 {
         right.push(Span::styled(
-            format!("{}/{} 层  ", floors.current_floor() + 1, floors.n_floors()),
+            crate::tr!(
+                "{}/{} 层  ",
+                "floor {}/{}  ",
+                floors.current_floor() + 1,
+                floors.n_floors()
+            ),
             dim,
         ));
     }

@@ -17,7 +17,7 @@ With several agent sessions running at once, it's hard to keep track of which on
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
 - **Several agents**: Claude Code, Codex, Cursor (`cursor-agent`) and DeepSeek Harness (dsh).
 
-The UI is in Chinese.
+The UI comes in English and Simplified Chinese, following your macOS language; set `AGENT_OFFICE_LANG` to choose.
 
 ## Requirements
 
@@ -83,7 +83,7 @@ The rooftop appears only when the office is at least 200 columns wide. When the 
 | `Enter` | Expand: full prompt + last 5 actions |
 | `Esc` | Collapse, then deselect |
 | `o` / double-click | Open the session |
-| `n` / click "你的办公室" (your office) sign | Open the next one (the one in the visitor chair) |
+| `n` / click the "Your office" sign | Open the next one (the one in the visitor chair) |
 | `w` / click the panel title | Open the Claude desktop app's list of sessions waiting for input |
 | `r` | Summarize again |
 | `b` | Toggle the labels over heads |
@@ -103,6 +103,7 @@ All settings are environment variables. The three summary variables and `AGENT_O
 |---|---|
 | `AGENT_OFFICE_API_BASE` / `_API_KEY` / `_MODEL` | Summary endpoint. Summaries are on only when all three are set |
 | `AGENT_OFFICE_SUMMARY=off` | Send nothing out; the panel shows raw prompts |
+| `AGENT_OFFICE_LANG` | UI and summary language: `en` or `zh`. Default: the macOS UI language, else `LANG`; anything but Chinese gets English |
 | `AGENT_OFFICE_NOTIFY=off` | No system notifications or Dock bounce; the badge still shows |
 | `AGENT_OFFICE_SOUND=on` | Sound effects (off by default): a ding when a session starts waiting for approval, a pop with confetti |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | Stuck thresholds: failures in a row (default 3), quiet minutes while working (default 5), quiet minutes during long calls (default 20). `doctor` shows the current values |
