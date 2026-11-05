@@ -52,6 +52,11 @@ async fn should_seed_at_eof(
     if !mtime_recent && !probe_live {
         return true;
     }
+    // agent-office: an end the source records beside the transcript, which
+    // no vouch outranks either.
+    if finished_per_sidecar(path).await {
+        return true;
+    }
     let Some(tail) = read_tail(path, TAIL_BYTES).await else {
         // An unreadable tail is no evidence that the session is over.
         return false;
@@ -72,6 +77,19 @@ async fn should_seed_at_eof(
         TailActivity::SidecarOnly => true,
         TailActivity::Unknown => false,
     }
+}
+
+/// agent-office: whether `path`'s sidecar `<stem>.meta.json` records the
+/// session finished. CC writes one per subagent and sets `"finished": true`
+/// when it is done, but appends no end line to the transcript, so without
+/// this a restart within the window seated every subagent that had already
+/// finished. No sidecar, or one without the flag, is no evidence of an end.
+async fn finished_per_sidecar(path: &Path) -> bool {
+    let Ok(bytes) = tokio::fs::read(path.with_extension("meta.json")).await else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .is_ok_and(|v| v.get("finished") == Some(&serde_json::Value::Bool(true)))
 }
 
 /// `elapsed()` Errs when `t` is in the FUTURE (APFS nanosecond clock jitter, a

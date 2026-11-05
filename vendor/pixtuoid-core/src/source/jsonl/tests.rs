@@ -2500,6 +2500,48 @@ async fn probe_parent_uuid_does_not_admit_subagent_transcript() {
     );
 }
 
+/// agent-office: CC marks a finished subagent in its sidecar
+/// `agent-<id>.meta.json` and writes no end line, so a restart within the
+/// hour seated every subagent that had already finished: a dozen idle ones
+/// filled the ground floor and pushed live sessions upstairs.
+#[tokio::test]
+async fn a_finished_subagent_does_not_register_on_first_sight() {
+    async fn first_sight(meta: Option<&str>) -> (bool, Option<u64>, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join(LIVE_UUID).join("subagents");
+        tokio::fs::create_dir_all(&sub_dir).await.unwrap();
+        let path = sub_dir.join("agent-a1b2.jsonl");
+        tokio::fs::write(&path, "{\"type\":\"assistant\",\"cwd\":\"/repo\"}\n")
+            .await
+            .unwrap();
+        if let Some(meta) = meta {
+            tokio::fs::write(sub_dir.join("agent-a1b2.meta.json"), meta)
+                .await
+                .unwrap();
+        }
+        let len = tokio::fs::metadata(&path).await.unwrap().len();
+        let cursors = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashMap::new()));
+        let events =
+            walk_once_live(&path, Duration::from_secs(3600), &[LIVE_UUID], &cursors, &seen).await;
+        let started = events
+            .iter()
+            .any(|(_, e)| matches!(e, AgentEvent::SessionStart { .. }));
+        let cursor = cursors.lock().await.get(&path).copied();
+        (started, cursor, len)
+    }
+
+    let (started, cursor, len) =
+        first_sight(Some(r#"{"agentType":"general-purpose","finished":true}"#)).await;
+    assert!(!started, "a finished subagent must not take a desk");
+    assert_eq!(cursor, Some(len), "its backlog is skipped to EOF");
+
+    let (started, _, _) = first_sight(Some(r#"{"agentType":"general-purpose"}"#)).await;
+    assert!(started, "one still running registers");
+    let (started, _, _) = first_sight(None).await;
+    assert!(started, "and so does one with no sidecar at all");
+}
+
 const FILLER_LINE: &str = "{\"type\":\"assistant\"}\n";
 const HEAD_LINE: &str = "{\"type\":\"assistant\",\"cwd\":\"/repo/head\"}\n";
 
