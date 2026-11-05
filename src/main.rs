@@ -7,6 +7,7 @@ mod cursor;
 mod doctor;
 mod dsh;
 mod floating;
+mod fun;
 mod hook;
 mod jump;
 mod panel;
@@ -15,9 +16,6 @@ mod tasks;
 mod text;
 
 use anyhow::Result;
-
-/// Seconds east of UTC.
-const HONG_KONG_UTC_OFFSET: i32 = 8 * 3600;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,12 +65,7 @@ fn main() -> Result<()> {
     }
     // The windows look out on Victoria Harbour, so the sky keeps Hong Kong's
     // time whatever zone the machine is in.
-    let offset = std::env::var("AGENT_OFFICE_UTC_OFFSET")
-        .ok()
-        .and_then(|s| s.parse::<i32>().ok())
-        .filter(|o| o.abs() < 24 * 3600)
-        .unwrap_or(HONG_KONG_UTC_OFFSET);
-    pixtuoid_scene::sky::set_clock_zone(offset);
+    pixtuoid_scene::sky::set_clock_zone(fun::utc_offset());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

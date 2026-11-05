@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::text::{one_line, truncate_cells};
 
 /// `KEY=value` lines read when the variables are not in the environment.
-const ENV_FILE: &str = ".config/agent-office/env";
+pub(crate) const ENV_FILE: &str = ".config/agent-office/env";
 /// What a label may take: twenty CJK characters.
 pub const SUMMARY_CELLS: u16 = 40;
 
@@ -133,7 +133,7 @@ impl Summarizer {
     }
 }
 
-fn env_file_var(file: &str, key: &str) -> Option<String> {
+pub(crate) fn env_file_var(file: &str, key: &str) -> Option<String> {
     file.lines()
         .map(str::trim)
         .filter(|l| !l.starts_with('#'))

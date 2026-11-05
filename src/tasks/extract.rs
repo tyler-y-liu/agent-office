@@ -44,6 +44,48 @@ pub struct Transcript {
     /// The agent's last words to the human since they last spoke: once the
     /// turn is over, its answer, its report, or its question.
     pub last_reply: Option<String>,
+    /// Calls out that earn a cheer if they succeed, as `(tool_use id, cheer)`.
+    pub(super) cheering: Vec<(String, Cheer)>,
+    /// The last thing worth cheering and when its result came in.
+    pub cheer: Option<(Cheer, SystemTime)>,
+}
+
+/// Something the agent just pulled off that the office cheers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cheer {
+    /// A test run came back green.
+    TestsPassed,
+    /// It pushed its work or opened a pull request.
+    Shipped,
+    /// A call went through after a run of failures.
+    Recovered,
+}
+
+/// Failures in a row that make the next success a comeback: the run that
+/// marks an agent stuck.
+const RECOVER_AFTER: u32 = 3;
+
+/// Words in a shell command that mean it runs tests, not lints or builds:
+/// only a test run going green is cheered as one.
+const TEST_WORDS: &[&str] = &["test", "jest", "spec"];
+
+/// What a call is cheered for if it succeeds.
+fn cheer_of(name: &str, input: &Value) -> Option<Cheer> {
+    if name.contains("create_pull_request") {
+        return Some(Cheer::Shipped);
+    }
+    let shell = matches!(name, "Bash" | "bash" | "Shell" | "shell") || CODEX_SHELLS.contains(&name);
+    if !shell {
+        return None;
+    }
+    let cmd = shell_command(input)?.to_lowercase();
+    if cmd.contains("git push") || cmd.contains("gh pr create") {
+        Some(Cheer::Shipped)
+    } else if TEST_WORDS.iter().any(|w| cmd.contains(w)) {
+        Some(Cheer::TestsPassed)
+    } else {
+        None
+    }
 }
 
 /// More calls than this out at once is results lost to a mid-file first read.
@@ -214,6 +256,7 @@ impl Transcript {
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
                     .collect();
                 if !results.is_empty() {
+                    let streak_before = self.fail_streak;
                     for b in &results {
                         if let Some(id) = b.get("tool_use_id").and_then(Value::as_str) {
                             self.outstanding.retain(|(o, _)| o != id);
@@ -227,6 +270,14 @@ impl Transcript {
                     } else if results.iter().all(|b| !rejected(b)) {
                         self.fail_streak = 0;
                     }
+                    let settled: Vec<(&str, bool)> = results
+                        .iter()
+                        .filter_map(|b| {
+                            let id = b.get("tool_use_id").and_then(Value::as_str)?;
+                            Some((id, !failed(b) && !rejected(b)))
+                        })
+                        .collect();
+                    self.cheer_on(&settled, streak_before, line_time(v));
                     return;
                 }
                 blocks
@@ -287,8 +338,39 @@ impl Transcript {
         }
     }
 
+    /// Calls `settled` as `(id, succeeded)`, with the streak of failures
+    /// before them: a comeback outranks whatever the call itself was.
+    fn cheer_on(&mut self, settled: &[(&str, bool)], streak_before: u32, at: Option<SystemTime>) {
+        let mut won = None;
+        for (id, ok) in settled {
+            if let Some(i) = self.cheering.iter().position(|(o, _)| o == id) {
+                let (_, c) = self.cheering.remove(i);
+                if *ok {
+                    won = Some(c);
+                }
+            }
+        }
+        let comeback = streak_before >= RECOVER_AFTER
+            && self.fail_streak == 0
+            && settled.iter().any(|(_, ok)| *ok);
+        let cheer = if comeback {
+            Some(Cheer::Recovered)
+        } else {
+            won
+        };
+        if let (Some(c), Some(at)) = (cheer, at) {
+            self.cheer = Some((c, at));
+        }
+    }
+
     fn tool_call(&mut self, id: Option<&str>, name: &str, input: &Value) {
         self.tool_calls += 1;
+        if let (Some(id), Some(c)) = (id, cheer_of(name, input)) {
+            if self.cheering.len() == KEEP_OUTSTANDING {
+                self.cheering.remove(0);
+            }
+            self.cheering.push((id.to_owned(), c));
+        }
         if let Some(id) = id {
             if self.outstanding.len() == KEEP_OUTSTANDING {
                 self.outstanding.remove(0);
@@ -355,10 +437,15 @@ impl Transcript {
                 if let Some(id) = s("call_id") {
                     self.outstanding.retain(|(o, _)| o != id);
                 }
-                match codex_outcome(p.get("output").unwrap_or(&Value::Null)) {
+                let streak_before = self.fail_streak;
+                let outcome = codex_outcome(p.get("output").unwrap_or(&Value::Null));
+                match outcome {
                     Outcome::Failed => self.fail_streak += 1,
                     Outcome::Rejected => {}
                     Outcome::Ok => self.fail_streak = 0,
+                }
+                if let Some(id) = s("call_id") {
+                    self.cheer_on(&[(id, outcome == Outcome::Ok)], streak_before, line_time(v));
                 }
             }
             _ => {}
@@ -433,6 +520,13 @@ fn human_prompt(text: &str) -> Option<String> {
         return None;
     }
     Some(one_line(t))
+}
+
+/// When a transcript line was written, if it says.
+fn line_time(v: &Value) -> Option<SystemTime> {
+    v.get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
 }
 
 /// An RFC 3339 time as transcripts write it (`2026-11-05T09:30:15.937Z`, or
@@ -967,6 +1061,98 @@ mod tests {
     fn call(id: &str, name: &str, input: Value) -> String {
         json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
             .to_string()
+    }
+
+    fn result_at(id: &str, is_error: bool, ts: &str) -> String {
+        json!({"type":"user","timestamp":ts,"message":{"role":"user","content":
+            [{"type":"tool_result","tool_use_id":id,"is_error":is_error,"content":"x"}]}})
+        .to_string()
+    }
+
+    /// The office cheers what the agent actually pulled off: a green test
+    /// run, a push or a PR, and a call that goes through after it was stuck
+    /// failing. A red run, a build or a plain read is no cheer, or the
+    /// confetti would fly for nothing and mean nothing.
+    #[test]
+    fn a_green_test_run_a_push_and_a_comeback_are_cheered_and_nothing_else() {
+        let ts = "2026-11-05T09:30:15.000Z";
+        let at = parse_timestamp(ts).unwrap();
+        let mut t = Transcript::default();
+        t.feed(&call(
+            "1",
+            "Bash",
+            json!({"command": "cargo test --release"}),
+        ));
+        t.feed(&result_at("1", true, ts));
+        assert_eq!(t.cheer, None, "a red run");
+        t.feed(&call("2", "Bash", json!({"command": "cargo build"})));
+        t.feed(&result_at("2", false, ts));
+        assert_eq!(t.cheer, None, "a build is not a test run");
+        t.feed(&call("3", "Bash", json!({"command": "npm test"})));
+        t.feed(&result_at("3", false, ts));
+        assert_eq!(t.cheer, Some((Cheer::TestsPassed, at)));
+
+        let mut t = Transcript::default();
+        t.feed(&call(
+            "1",
+            "Bash",
+            json!({"command": "git push -u origin main"}),
+        ));
+        t.feed(&result_at("1", false, ts));
+        assert_eq!(t.cheer, Some((Cheer::Shipped, at)));
+        let mut t = Transcript::default();
+        t.feed(&call("1", "mcp__github__create_pull_request", json!({})));
+        t.feed(&result_at("1", false, ts));
+        assert_eq!(t.cheer, Some((Cheer::Shipped, at)), "a PR is shipping too");
+
+        let mut t = Transcript::default();
+        for id in ["1", "2", "3"] {
+            t.feed(&call(id, "Bash", json!({"command": "cargo test"})));
+            t.feed(&result_at(id, true, ts));
+        }
+        t.feed(&call("4", "Read", json!({"file_path": "/a.rs"})));
+        t.feed(&result_at("4", false, ts));
+        assert_eq!(
+            t.cheer,
+            Some((Cheer::Recovered, at)),
+            "out of three failures in a row, even a read is a comeback"
+        );
+        let mut t = Transcript::default();
+        for id in ["1", "2"] {
+            t.feed(&call(id, "Bash", json!({"command": "ls"})));
+            t.feed(&result_at(id, true, ts));
+        }
+        t.feed(&call("3", "Read", json!({"file_path": "/a.rs"})));
+        t.feed(&result_at("3", false, ts));
+        assert_eq!(t.cheer, None, "two failures are not stuck, so no comeback");
+    }
+
+    /// A Codex rollout's test run is cheered as a Claude transcript's is.
+    #[test]
+    fn a_codex_test_run_is_cheered_when_it_exits_zero() {
+        let mut t = Transcript::default();
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"function_call","name":"exec_command",
+            "call_id":"c1","arguments":"{\"cmd\":\"pytest -q\"}"}),
+        ));
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"function_call_output","call_id":"c1",
+            "output":"Process exited with code 1"}),
+        ));
+        assert_eq!(t.cheer, None);
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"function_call","name":"exec_command",
+            "call_id":"c2","arguments":"{\"cmd\":\"pytest -q\"}"}),
+        ));
+        t.feed(&rollout(
+            "response_item",
+            json!({"type":"function_call_output","call_id":"c2",
+            "output":"Process exited with code 0"}),
+        ));
+        assert_eq!(t.cheer.map(|(c, _)| c), Some(Cheer::TestsPassed));
     }
 
     #[test]

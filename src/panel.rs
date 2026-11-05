@@ -33,6 +33,21 @@ pub struct PanelState {
     /// When you last opened each session from here: what it had done by
     /// then is read.
     pub seen: HashMap<AgentId, SystemTime>,
+    /// The first row of cards shown: the wheel moves it, and a new
+    /// selection moves it as far as it takes to show that card.
+    pub scroll: usize,
+    /// Bring the selected card into view on the next draw. Only when the
+    /// selection or its size changes, so the wheel can scroll away from it.
+    pub reveal: bool,
+}
+
+impl PanelState {
+    /// Scroll the cards by `rows`, down when positive; the draw keeps it
+    /// within the cards.
+    pub fn scroll_by(&mut self, rows: isize) {
+        self.scroll = self.scroll.saturating_add_signed(rows);
+        self.reveal = false;
+    }
 }
 
 /// Whether `slot` is idle and was opened since it went idle: its result is
@@ -42,6 +57,37 @@ pub fn read_since_idle(slot: &AgentSlot, seen: &HashMap<AgentId, SystemTime>) ->
         && seen
             .get(&slot.agent_id)
             .is_some_and(|&at| at >= slot.state_started_at)
+}
+
+/// What a session waiting on you waits for, the more urgent first: the
+/// order it lines up for your office in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Wait {
+    /// A prompt: a permission, a dialog. It holds the session mid-turn.
+    Prompt,
+    /// Its turn is done and ended on a question to you (the outcome's
+    /// 「问：」).
+    Reply,
+}
+
+/// What `slot` waits on you for, if anything. `read` says it was opened
+/// since it went idle ([`read_since_idle`]): its question was seen, so it no
+/// longer lines up for it.
+pub fn waits_on_you(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> Option<Wait> {
+    match slot.state {
+        _ if slot.exiting_at.is_some() => None,
+        ActivityState::RequiresAction { .. } => Some(Wait::Prompt),
+        ActivityState::Idle
+            if !read
+                && view.is_some_and(|v| {
+                    v.outcome_summarized
+                        && v.outcome.as_deref().is_some_and(|o| o.starts_with("问："))
+                }) =>
+        {
+            Some(Wait::Reply)
+        }
+        _ => None,
+    }
 }
 
 /// What a session needs from you, which is also where it is in the office.
@@ -66,6 +112,9 @@ impl Group {
         if crate::tasks::stuck_at_work(slot, view).is_some() {
             return Self::Stuck;
         }
+        if waits_on_you(slot, view, read).is_some() {
+            return Self::Waiting;
+        }
         if read {
             return Self::Idle;
         }
@@ -89,7 +138,7 @@ impl Group {
     /// The group's header: what it needs from you, then where they are.
     pub fn title(self) -> &'static str {
         match self {
-            Self::Waiting => "等你批 · 等候区",
+            Self::Waiting => "等你 · 等候区",
             Self::Stuck => "卡住 · 工位",
             Self::Done => "做完待看 · 茶水间",
             Self::Working => "干活 · 工位",
@@ -99,8 +148,9 @@ impl Group {
 }
 
 /// The agents in display order: roots grouped by [`Group`], those waiting on
-/// you in the order they started waiting (the office's waiting line), the
-/// rest oldest first; each followed by its subagents.
+/// you prompts first, each kind in the order it started waiting (the
+/// office's waiting line), the rest oldest first; each followed by its
+/// subagents.
 pub fn order(
     scene: &SceneState,
     views: &TaskViews,
@@ -119,19 +169,50 @@ pub fn order(
         .filter(|s| !s.parent_id.as_ref().is_some_and(is_shown))
         .collect();
     roots.sort_by_key(|s| {
-        let g = Group::of(s, views.get(&s.agent_id), now, read_since_idle(s, seen));
-        let since = if g == Group::Waiting {
-            s.state_started_at
+        let view = views.get(&s.agent_id);
+        let read = read_since_idle(s, seen);
+        let g = Group::of(s, view, now, read);
+        let (wait, since) = if g == Group::Waiting {
+            (waits_on_you(s, view, read), s.state_started_at)
         } else {
-            s.created_at
+            (None, s.created_at)
         };
-        (g, since)
+        (g, wait, since)
     });
     let mut out = Vec::new();
     for r in roots {
         push_tree(&cc, r, 0, &mut out);
     }
     out
+}
+
+/// The session to deal with next: the one in your office's guest chair, so
+/// what opens is who you see there; with the chair empty, the one that will
+/// take it.
+pub fn next_waiting(
+    scene: &SceneState,
+    views: &TaskViews,
+    now: SystemTime,
+    seen: &HashMap<AgentId, SystemTime>,
+) -> Option<AgentId> {
+    let waiting: Vec<&AgentSlot> = order(scene, views, now, seen)
+        .into_iter()
+        .filter(|(_, depth)| *depth == 0)
+        .map(|(id, _)| &scene.agents[&id])
+        .filter(|s| waits_on_you(s, views.get(&s.agent_id), read_since_idle(s, seen)).is_some())
+        .collect();
+    let lined_up = |s: &&AgentSlot| {
+        now.duration_since(s.state_started_at)
+            .unwrap_or_default()
+            .as_millis()
+            >= u128::from(pixtuoid_scene::waiting::LINE_UP_AFTER_MS)
+    };
+    waiting
+        .iter()
+        .copied()
+        .find(lined_up)
+        .or(waiting.first().copied())
+        .map(|s| s.agent_id)
 }
 
 /// `slot` then its subagents, theirs under them, oldest first at each level.
@@ -212,6 +293,11 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>) -> (String, Color) {
                 None => (what, WORK),
             }
         }
+        // Opened or not, the question stays unanswered until you reply.
+        ActivityState::Idle if waits_on_you(slot, view, false) == Some(Wait::Reply) => (
+            format!("? {REPLY_WAIT} {}", ago(slot.state_started_at)),
+            WAIT,
+        ),
         ActivityState::Idle => (format!("· 空闲 {}", ago(slot.state_started_at)), DIM),
     }
 }
@@ -456,7 +542,7 @@ pub fn render(
     scene: &SceneState,
     views: &TaskViews,
     inks: &HashMap<AgentId, Rgb>,
-    state: &PanelState,
+    state: &mut PanelState,
 ) -> Vec<(u16, AgentId)> {
     let now = SystemTime::now();
     let order = order(scene, views, now, &state.seen);
@@ -559,8 +645,6 @@ pub fn render(
             Some(Card { id: *id, lines })
         })
         .collect();
-    // Scroll so the selected card is wholly in view.
-    let mut start = 0usize;
     let mut sel_range = None;
     let mut y = 0usize;
     for c in &cards {
@@ -570,11 +654,20 @@ pub fn render(
         y += c.lines.len();
     }
     let h = usize::from(inner.height);
-    if let Some((top, bottom)) = sel_range
-        && bottom > h
+    // A newly selected card is brought wholly into view, its top kept in
+    // view if it is taller than the panel.
+    if std::mem::take(&mut state.reveal)
+        && let Some((top, bottom)) = sel_range
     {
-        start = (bottom - h).min(top);
+        if bottom > state.scroll + h {
+            state.scroll = bottom.saturating_sub(h);
+        }
+        state.scroll = state.scroll.min(top);
     }
+    // No scrolling past the last card, so the wheel never leaves the panel
+    // blank and a shrinking list pulls its cards back into view.
+    state.scroll = state.scroll.min(y.saturating_sub(h));
+    let start = state.scroll;
     let mut row = 0usize;
     let mut rows = Vec::new();
     for c in &cards {
@@ -703,6 +796,70 @@ mod tests {
         );
     }
 
+    /// More sessions than fit must be reachable by the wheel, not only by
+    /// selecting through them; a scroll past the end would blank the panel,
+    /// and a selection that keeps snapping back would undo every scroll.
+    #[test]
+    fn the_wheel_scrolls_the_cards_and_a_selection_brings_its_card_back() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = (0..8)
+            .map(|i| {
+                start(
+                    &mut scene,
+                    &mut r,
+                    &format!("s{i}"),
+                    None,
+                    t0 + Duration::from_secs(i),
+                )
+            })
+            .collect();
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 40, 12);
+        let mut state = PanelState::default();
+        let draw = |state: &mut PanelState| {
+            let mut buf = Buffer::empty(area);
+            render(&mut buf, area, &scene, &views, &HashMap::new(), state)
+        };
+        let first_card = |rows: &[(u16, AgentId)]| rows.first().map(|(_, id)| *id);
+        let top = draw(&mut state);
+        let shown_first = first_card(&top);
+        assert!(
+            ids.iter().any(|id| !top.iter().any(|(_, o)| o == id)),
+            "the test needs more cards than the panel holds"
+        );
+
+        state.scroll_by(3);
+        let scrolled = draw(&mut state);
+        assert_eq!(state.scroll, 3);
+        assert_ne!(scrolled, top, "the wheel moves the cards");
+
+        state.scroll_by(1000);
+        let bottom = draw(&mut state);
+        assert!(state.scroll < 1000, "the scroll stops at the last card");
+        assert_eq!(
+            bottom.last().map(|(y, _)| *y),
+            Some(area.height - 1),
+            "scrolled to the end, the last row is still filled"
+        );
+
+        state.scroll_by(-1000);
+        assert_eq!(first_card(&draw(&mut state)), shown_first);
+
+        // Selecting an off-screen card brings it into view once ...
+        let target = *ids
+            .iter()
+            .find(|id| !draw(&mut state).iter().any(|(_, o)| o == *id))
+            .expect("some card starts off screen");
+        state.selected = Some(target);
+        state.reveal = true;
+        assert!(draw(&mut state).iter().any(|(_, o)| *o == target));
+        // ... and the wheel can then scroll away from it.
+        state.scroll_by(-1000);
+        assert!(!draw(&mut state).iter().any(|(_, o)| *o == target));
+    }
+
     /// The panel lists sessions by what they need from you, most urgent
     /// first, so the top of the panel is always the next thing to do; those
     /// waiting on you keep the order they started waiting, the order they
@@ -779,6 +936,81 @@ mod tests {
             Group::Idle,
             "idle 15 min+ is up on the rooftop"
         );
+    }
+
+    /// A done session asking you a question needs you as much as a prompt
+    /// does, so it waits with them, not in the pantry; but behind them, since
+    /// a prompt holds its session mid-turn. Once opened, the question was
+    /// seen, and it idles like any read session.
+    #[test]
+    fn a_question_to_you_waits_behind_the_prompts() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let [asked, prompt, done] =
+            ["asked", "prompt", "done"].map(|sid| start(&mut scene, &mut r, sid, None, t0));
+        for (id, state, ago) in [
+            (asked, ActivityState::Idle, 600),
+            (prompt, ActivityState::RequiresAction { reason: None }, 30),
+            (done, ActivityState::Idle, 900 - 60),
+        ] {
+            let s = scene.agents.get_mut(&id).unwrap();
+            s.state = state;
+            s.state_started_at = now - Duration::from_secs(ago);
+        }
+        let outcome = |o: &str| TaskView {
+            outcome: Some(o.into()),
+            outcome_summarized: true,
+            ..TaskView::default()
+        };
+        let views: TaskViews = std::sync::Arc::new(
+            [
+                (asked, outcome("问：要不要删旧接口")),
+                (done, outcome("登录页已修好")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let none = HashMap::new();
+        let o: Vec<AgentId> = order(&scene, &views, now, &none)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(o, vec![prompt, asked, done]);
+        let group = |id| Group::of(&scene.agents[&id], views.get(&id), now, false);
+        assert_eq!(group(asked), Group::Waiting);
+        assert_eq!(
+            group(done),
+            Group::Done,
+            "a plain result is still read in the pantry"
+        );
+        assert_eq!(next_waiting(&scene, &views, now, &none), Some(prompt));
+        // A prompt just raised has not walked over yet: what opens is the
+        // question you see in the guest chair.
+        let mut fresh = scene.clone();
+        fresh.agents.get_mut(&prompt).unwrap().state_started_at = now - Duration::from_secs(5);
+        assert_eq!(next_waiting(&fresh, &views, now, &none), Some(asked));
+        assert!(
+            status(&scene.agents[&asked], views.get(&asked))
+                .0
+                .contains("等你回复")
+        );
+
+        let opened = HashMap::from([(asked, now - Duration::from_secs(5))]);
+        let slot = &scene.agents[&asked];
+        assert_eq!(
+            waits_on_you(slot, views.get(&asked), read_since_idle(slot, &opened)),
+            None
+        );
+        let mut answered = scene.clone();
+        answered.agents.remove(&prompt);
+        assert_eq!(
+            next_waiting(&answered, &views, now, &opened),
+            None,
+            "nothing left to deal with"
+        );
+        assert_eq!(next_waiting(&answered, &views, now, &none), Some(asked));
     }
 
     /// A card leads with its repository's initial on the repository's colour

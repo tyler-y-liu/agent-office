@@ -410,6 +410,17 @@ pub(crate) fn hook_identity(
     )
 }
 
+/// agent-office: whether a `Notification` is CC's idle nudge. Its
+/// `notification_type` names it; a CC too old to send one is told by the
+/// nudge's own message.
+fn is_idle_nudge(obj: &serde_json::Map<String, Value>) -> bool {
+    obj.get("notification_type").and_then(|s| s.as_str()) == Some("idle_prompt")
+        || obj
+            .get("message")
+            .and_then(|s| s.as_str())
+            .is_some_and(|m| m.contains("waiting for your input"))
+}
+
 /// Burn-tier effort observation (CC): tool-context hook payloads carry an
 /// `effort: {level}` object — hooks.md lists low/medium/high/xhigh/max and notes
 /// that ULTRACODE "is not a distinct level and reports as xhigh". Codex hook
@@ -549,6 +560,12 @@ pub(crate) fn shared_hook_arms(
             ];
             evs.extend(hook_effort(agent_id, obj));
             Ok(evs)
+        }
+        // agent-office: CC's 60s idle nudge is the turn already over, not a
+        // prompt: as a RequiresAction it lined every finished session up at
+        // your office. Its identity still proves the session alive.
+        "Notification" if is_idle_nudge(obj) => {
+            Ok(vec![hook_identity(agent_id, source, &session_id, obj)])
         }
         "Notification" => {
             let msg = obj.get("message").and_then(|s| s.as_str());
@@ -1085,6 +1102,42 @@ mod tests {
                 ]
             ),
             "{evs:?}"
+        );
+    }
+
+    /// agent-office: CC nudges a session idle for 60s with a `Notification`.
+    /// Read as a prompt, every finished session would walk to your office as
+    /// if it needed you; only a real prompt may ask for you.
+    #[test]
+    fn cc_idle_nudge_asks_nothing_of_you() {
+        let nudge = |extra: Value| {
+            let mut v = json!({
+                "hook_event_name": "Notification",
+                "session_id": "s",
+                "transcript_path": "/p/s.jsonl",
+                "cwd": "/r",
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            decode_hook_payload(v).expect("decodes")
+        };
+        for evs in [
+            nudge(json!({"notification_type": "idle_prompt", "message": "idle"})),
+            nudge(json!({"message": "Claude is waiting for your input"})),
+        ] {
+            assert!(
+                matches!(evs.as_slice(), [AgentEvent::Identity { .. }]),
+                "{evs:?}"
+            );
+        }
+        let prompt = nudge(json!({
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission to use Bash",
+        }));
+        assert!(
+            matches!(prompt[1], AgentEvent::UserActionRequest { .. }),
+            "{prompt:?}"
         );
     }
 

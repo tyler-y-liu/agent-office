@@ -197,7 +197,7 @@ impl Badge {
     pub(crate) fn new(
         anchor: Point,
         agent: &AgentSlot,
-        namesakes: &crate::badge::Namesakes<'_>,
+        namesakes: &crate::badge::Namesakes,
         theme: &Theme,
     ) -> Self {
         let text = namesakes.text(agent);

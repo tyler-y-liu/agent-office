@@ -15,7 +15,18 @@ use crate::layout::{CHARACTER_SPRITE_W, Facing, Point, RoomStyle, SceneLayout, W
 use crate::walk::{WanderKind, WanderTarget};
 
 /// How long an agent waits on you at its desk before it lines up.
-pub(crate) const LINE_UP_AFTER_MS: u64 = 20_000;
+/// agent-office: public, so the host opens the one in the guest chair.
+pub const LINE_UP_AFTER_MS: u64 = 20_000;
+
+/// agent-office: the reason on a session the host lines up for your reply:
+/// its turn ended on a question to you. It waits behind a prompt, which
+/// holds its session mid-turn where a question has it done.
+pub const REPLY_REASON: &str = "agent-office: reply";
+
+/// Whether `slot` waits on your reply rather than on a prompt.
+fn waits_on_reply(slot: &AgentSlot) -> bool {
+    matches!(&slot.state, ActivityState::RequiresAction { reason: Some(r) } if &**r == REPLY_REASON)
+}
 
 /// Columns between neighbours in the line.
 const LINE_GAP: u16 = CHARACTER_SPRITE_W + 2;
@@ -87,7 +98,7 @@ pub(crate) fn waiting_line(
                 .is_some()
         })
         .collect();
-    waiting.sort_by_key(|s| (s.state_started_at, s.agent_id));
+    waiting.sort_by_key(|s| (waits_on_reply(s), s.state_started_at, s.agent_id));
     let mut seats = seats(layout).into_iter();
     let mut out = HashMap::new();
     let mut standing = Vec::new();
