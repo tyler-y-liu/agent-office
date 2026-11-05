@@ -492,3 +492,45 @@ fn a_golden_hour_spill_reaches_further_across_the_floor() {
     assert_eq!(at(super::sunset_depth(0.0)).level_at(45, row), None);
     assert!(at(super::sunset_depth(1.0)).level_at(45, row).is_some());
 }
+
+/// agent-office: with most sessions away from their desks, a lit lamp over
+/// every desk hid the few people working. Only a desk whose occupant sits at
+/// it lights its lamp and standby screen, so after dark the lit desks are
+/// where the people are.
+#[test]
+fn after_dark_only_a_desk_someone_sits_at_lights_up() {
+    let layout =
+        SceneLayout::compute(192, 80, Some(crate::layout::TEST_DEFAULT_DESKS)).expect("fits");
+    let north: Vec<usize> = (0..layout.home_desks.len())
+        .filter(|&i| layout.home_desks[i].facing == Facing::North)
+        .collect();
+    let [sat, away, ..] = north[..] else {
+        panic!("this layout needs two screens facing us: {north:?}");
+    };
+    let seated = HashMap::from([
+        (FloorLocalDeskIndex(sat), true),
+        (FloorLocalDeskIndex(away), false),
+    ]);
+    let sky = Sky::at_with(crate::localclock::at_hour(0), Weather::Clear);
+    let lights = Lights::of(
+        &layout,
+        &SkyTones::resolve(&sky, &crate::theme::NORMAL),
+        &LightInputs {
+            agents: &[],
+            seated: &seated,
+            floor_idx: 0,
+            indoor_scale: 1.0,
+            neon: NeonLevels::RUNNING,
+            beat: Beat::at_ms(0),
+            bulbs: crate::lighting::DeskBulbs::of(&crate::pack::test_office()),
+        },
+    );
+    let on = lights.desks[sat];
+    assert!(on.lamp.strength > 0.0 && on.screen_idle > 0.0, "the sitter's desk is lit");
+    for (i, d) in lights.desks.iter().enumerate().filter(|(i, _)| *i != sat) {
+        assert!(
+            d.lamp.strength == 0.0 && d.screen_idle == 0.0,
+            "desk {i}, nobody sitting there, stays dark"
+        );
+    }
+}

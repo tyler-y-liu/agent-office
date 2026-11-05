@@ -375,7 +375,11 @@ impl Lights {
             desks: layout
                 .home_desks
                 .iter()
-                .map(|&HomeDesk { at, facing }| {
+                .enumerate()
+                .map(|(i, &HomeDesk { at, facing })| {
+                    // agent-office: an empty desk keeps its lamp and standby
+                    // screen off, so the lit desks show where people sit.
+                    let indoor = if seated_at(inputs.seated, i) { indoor } else { 0.0 };
                     desk_lights(at, facing, inputs.bulbs.at(facing), darkness, indoor)
                 })
                 .collect(),
@@ -424,6 +428,11 @@ impl Lights {
             },
         }
     }
+}
+
+/// agent-office: whether desk `i`'s occupant sits at it now.
+pub(crate) fn seated_at(seated: &HashMap<FloorLocalDeskIndex, bool>, i: usize) -> bool {
+    seated.get(&FloorLocalDeskIndex(i)).copied().unwrap_or(false)
 }
 
 /// The lights of a desk facing `facing` that hangs its lamp's `bulb`, scaled

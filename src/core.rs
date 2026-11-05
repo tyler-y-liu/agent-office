@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 
 use crate::fun::{self, Clock, hko::Outlook, stats::Watch};
 use crate::panel::{self, PanelState};
-use crate::{jump, notify, pipeline, tasks, text};
+use crate::{jump, notify, pipeline, tasks};
 
 /// An office that has floors to move between.
 pub trait Floors {
@@ -79,6 +79,10 @@ pub struct Frame {
     pub clock: Clock,
     /// Hong Kong's weather, when the user asked for it.
     pub outlook: Outlook,
+    /// The sessions waiting on you ([`panel::waits_on_you`]).
+    pub waiting: Vec<AgentId>,
+    /// The one to deal with first ([`panel::next_waiting`]).
+    pub first_waiting: Option<AgentId>,
 }
 
 /// `scene` as the office draws it: a session you opened since it went idle
@@ -229,7 +233,8 @@ impl Core {
     pub fn start(rt: &tokio::runtime::Runtime, buf_w: u16, buf_h: u16) -> Self {
         let summarizer = tasks::client::Summarizer::from_env();
         let summary_note = match &summarizer {
-            Some(s) => format!("摘要 {}", s.model()),
+            // The model's name is long and `doctor` already shows it.
+            Some(_) => "摘要 ✓".to_owned(),
             None => "摘要关闭".to_owned(),
         };
         let socket = crate::hook::socket_path();
@@ -290,6 +295,16 @@ impl Core {
         };
         // A hidden session is still live: what you read and its tally carry over.
         self.ui.seen.retain(|id, _| live.agents.contains_key(id));
+        let waiting = scene
+            .agents
+            .values()
+            .filter(|s| {
+                let read = panel::read_since_idle(s, &self.ui.seen);
+                panel::waits_on_you(s, views.get(&s.agent_id), read).is_some()
+            })
+            .map(|s| s.agent_id)
+            .collect();
+        let first_waiting = panel::next_waiting(&scene, &views, now, &self.ui.seen);
         self.watch.observe(&live, &views, now);
         let clock = Clock::now(now);
         let outlook = *self.outlook_rx.borrow();
@@ -302,6 +317,8 @@ impl Core {
             labels,
             clock,
             outlook,
+            waiting,
+            first_waiting,
         }
     }
 
@@ -446,12 +463,15 @@ impl Core {
     }
 }
 
-/// The key hints and the floor and summary status along the bottom.
+/// The key hints and the floor and summary status along the bottom, after
+/// how many sessions wait on you when any do. The status keeps its room: the
+/// hints are cut short before they run into it.
 pub fn footer(
     buf: &mut Buffer,
     area: Rect,
     floors: &impl Floors,
     core: &Core,
+    waiting: usize,
     extra: &[(&str, &str)],
 ) {
     let dim = Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98));
@@ -478,21 +498,34 @@ pub fn footer(
         spans.push(Span::styled(format!(" {k} "), cap));
         spans.push(Span::styled(format!(" {what}  "), dim));
     }
-    let right = format!(
-        "F{}/{}  {} ",
-        floors.current_floor() + 1,
-        floors.n_floors().max(1),
-        core.status_note()
-    );
-    buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-    let w = text::cells(&right);
+    let mut right = Vec::new();
+    if waiting > 0 {
+        let wait = Style::default().fg(panel::WAIT);
+        right.push(Span::styled(format!("● {waiting} 个等你  "), wait));
+    }
+    right.push(Span::styled(
+        format!(
+            "F{}/{}  {} ",
+            floors.current_floor() + 1,
+            floors.n_floors().max(1),
+            core.status_note()
+        ),
+        dim,
+    ));
+    set_hints_and_status(buf, area, &Line::from(spans), &Line::from(right));
+}
+
+/// `hints` along `area`'s row and `status` flush right on it, the hints cut
+/// short a cell before the status; the hints alone when the status does
+/// not fit.
+fn set_hints_and_status(buf: &mut Buffer, area: Rect, hints: &Line, status: &Line) {
+    let w = u16::try_from(status.width()).unwrap_or(u16::MAX);
     if area.width > w {
-        buf.set_line(
-            area.x + area.width - w,
-            area.y,
-            &Line::from(Span::styled(right, dim)),
-            w,
-        );
+        let room = area.width - w;
+        buf.set_line(area.x, area.y, hints, room.saturating_sub(1));
+        buf.set_line(area.x + room, area.y, status, w);
+    } else {
+        buf.set_line(area.x, area.y, hints, area.width);
     }
 }
 
@@ -501,6 +534,32 @@ mod tests {
     use super::*;
     use pixtuoid_core::Reducer;
     use pixtuoid_core::source::{AgentEvent, Transport};
+
+    /// The footer's key hints run longer than a narrow window: drawn across
+    /// the whole row, they were overwritten mid-word by the status, which
+    /// left both unreadable. The hints give way and the status reads whole.
+    #[test]
+    fn long_hints_stop_short_of_the_status() {
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        let hints = Line::from("t 取消置顶  q 退出  b 隐藏头顶  r 重新总结");
+        let status = Line::from("● 2 个等你  F1/1  摘要 ✓ ");
+        set_hints_and_status(&mut buf, area, &hints, &status);
+        let row: String = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol().to_owned())
+            .collect();
+        let w = u16::try_from(status.width()).expect("fits");
+        let tail: String = (area.width - w..area.width)
+            .map(|x| buf[(x, 0)].symbol().to_owned())
+            .collect();
+        assert_eq!(tail.replace(' ', ""), "●2个等你F1/1摘要✓", "row: {row:?}");
+        assert_eq!(
+            buf[(area.width - w - 1, 0)].symbol(),
+            " ",
+            "a gap before it"
+        );
+        assert_eq!(buf[(0, 0)].symbol(), "t", "the hints still start the row");
+    }
 
     /// The office walks a session you opened since it went idle out of the
     /// pantry: it draws that one's idle stretch as past the pantry's, and
@@ -692,7 +751,11 @@ mod tests {
         let fixed = idle_since_written(&scene, &views);
         let started = |id| fixed.agents[id].state_started_at;
         assert_eq!(started(&ids[0]), t0, "idle since its last write");
-        assert_eq!(started(&ids[1]), launch, "a later write keeps the slot's clock");
+        assert_eq!(
+            started(&ids[1]),
+            launch,
+            "a later write keeps the slot's clock"
+        );
         assert_eq!(started(&ids[2]), launch, "a working session is not idle");
         assert!(Arc::ptr_eq(
             &idle_since_written(&scene, &Arc::new(HashMap::new())),
@@ -748,10 +811,22 @@ mod tests {
         )]));
         let seen = HashMap::new();
         let shown = without_long_idle(&Arc::new(scene.clone()), &views, &seen, now);
-        assert!(!shown.agents.contains_key(&ids[0]), "idle two hours: hidden");
-        assert!(shown.agents.contains_key(&ids[1]), "idle half an hour: still in");
-        assert!(shown.agents.contains_key(&ids[2]), "its question waits on you");
-        assert!(shown.agents.contains_key(&ids[3]), "a long turn is still work");
+        assert!(
+            !shown.agents.contains_key(&ids[0]),
+            "idle two hours: hidden"
+        );
+        assert!(
+            shown.agents.contains_key(&ids[1]),
+            "idle half an hour: still in"
+        );
+        assert!(
+            shown.agents.contains_key(&ids[2]),
+            "its question waits on you"
+        );
+        assert!(
+            shown.agents.contains_key(&ids[3]),
+            "a long turn is still work"
+        );
 
         // Once you read its question, it is done with you and leaves too.
         let read = HashMap::from([(ids[2], now)]);
@@ -763,6 +838,9 @@ mod tests {
         s.state = pixtuoid_core::ActivityState::Running { item: None };
         s.state_started_at = now;
         let shown = without_long_idle(&Arc::new(scene), &views, &seen, now);
-        assert!(shown.agents.contains_key(&ids[0]), "new work: back in the office");
+        assert!(
+            shown.agents.contains_key(&ids[0]),
+            "new work: back in the office"
+        );
     }
 }

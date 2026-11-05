@@ -19,7 +19,7 @@ use crate::text::{one_line, truncate_cells};
 const DIM: Color = Color::Rgb(0x8a, 0x8f, 0x98);
 const TEXT: Color = Color::Rgb(0xe6, 0xe6, 0xe6);
 const TASK: Color = Color::Rgb(0xff, 0xe8, 0xa3);
-const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
+pub const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
 const WORK: Color = Color::Rgb(0x7d, 0xcf, 0xff);
 const STUCK: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);

@@ -84,6 +84,9 @@ const SHOT_AFTER: Duration = Duration::from_secs(20);
 /// and close: the window's own pixels, for checking the look.
 pub fn run(rt: &tokio::runtime::Runtime, shot: Option<std::path::PathBuf>) -> Result<()> {
     let pack = Arc::new(pixtuoid_scene::pack::load_bundled_pack()?);
+    // The footer says who waits on you, readable; the wall board's art font
+    // is too small for its chatty lines.
+    pixtuoid_scene::neon_sign::set_personas_shown(false);
     let event_loop = EventLoop::new()?;
     let mut app = Floating {
         rt,
@@ -505,6 +508,7 @@ impl Win {
                 fit,
                 theme,
                 &frame.labels,
+                &shown_in_full(&frame, self.core.ui.selected),
                 sf,
                 OfficeExtras {
                     weather,
@@ -542,6 +546,9 @@ impl Win {
                 sf,
                 fit.upscale(),
             );
+            if let Some(first) = frame.first_waiting {
+                paint_first_waiting(&mut canvas, &mut self.faces, &tags, first, sf, stage);
+            }
             paint_tags(
                 &mut canvas,
                 &mut self.faces,
@@ -593,6 +600,7 @@ impl Win {
             foot_area,
             &self.office,
             &self.core,
+            frame.waiting.len(),
             &[
                 ("点门牌", "看说明"),
                 (
@@ -637,6 +645,7 @@ impl Win {
         fit: PixelFit,
         theme: &'static Theme,
         labels: &HashMap<AgentId, String>,
+        full: &[AgentId],
         scale_factor: f64,
         extras: OfficeExtras,
     ) -> Option<(Vec<Tag>, Vec<DoorSign>, Vec<AgentId>)> {
@@ -680,7 +689,16 @@ impl Win {
             let u = u32::from(fit.upscale());
             signs = door_signs(&mut self.faces, text, d, u, scale_factor);
             let avoid: Vec<Area> = signs.iter().map(|s| s.area).collect();
-            tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor, &avoid);
+            let win_w = u32::from(pixels.width()) * u;
+            tags = place_tags(
+                &mut self.faces,
+                text,
+                (d, u, win_w),
+                labels,
+                full,
+                scale_factor,
+                &avoid,
+            );
             paint_world_text(art, text, d, extras.board.as_ref());
             speakers = text
                 .bubbles
@@ -1145,6 +1163,29 @@ pub(crate) struct Tag {
     name: String,
     ink: u32,
     task: Option<String>,
+    /// Its name and task shown; else only a dot in its marker colour.
+    full: bool,
+}
+
+/// Up to this many figures every badge shows in full; past it only the
+/// ones [`shown_in_full`] picks do, the rest a dot, so a crowd's two-line
+/// tags do not pile up over each other.
+const ALL_FULL_UPTO: usize = 3;
+
+/// The agents whose badge and task read in full however many are in: the
+/// one selected, and the ones waiting on you or stuck, which you are to act
+/// on.
+fn shown_in_full(frame: &crate::core::Frame, selected: Option<AgentId>) -> Vec<AgentId> {
+    let stuck = frame
+        .scene
+        .agents
+        .values()
+        .filter(|s| crate::tasks::stuck_at_work(s, frame.views.get(&s.agent_id)).is_some());
+    selected
+        .into_iter()
+        .chain(frame.waiting.iter().copied())
+        .chain(stuck.map(|s| s.agent_id))
+        .collect()
 }
 
 /// Rows over its badge a task label may climb to find room.
@@ -1164,38 +1205,50 @@ fn tag_pad(scale_factor: f64) -> u32 {
     (2.0 * scale_factor).round() as u32
 }
 
-/// Where each badge goes, at `u` window pixels an art pixel: on the foot of
-/// the plate pixtuoid would bake, centred on it; then each task on a plate of
-/// its own over its badge, climbing a tier when a neighbour holds the row,
-/// left out when no tier is free or it would leave the window's top. The
-/// names and tasks are set here rather than baked because 8 art pixels are
-/// too small to read.
+/// Where each badge goes, at `u` window pixels an art pixel in an office
+/// `win_w` window pixels wide: on the foot of the plate pixtuoid would bake,
+/// centred on it, in full for the agents in `full` (all of them when only a
+/// few are in) and as a dot for the rest; then each full one's task on a
+/// plate of its own over its badge, climbing a tier when a neighbour holds
+/// the row, left out when no tier is free or it would leave the window's
+/// top. The full ones take their rows first. The names and tasks are set
+/// here rather than baked because 8 art pixels are too small to read.
 fn place_tags(
     faces: &mut Faces,
     text: HostText<'_>,
-    d: u32,
-    u: u32,
+    (d, u, win_w): (u32, u32, u32),
     labels: &HashMap<AgentId, String>,
+    full: &[AgentId],
     scale_factor: f64,
     avoid: &[Area],
 ) -> Vec<Tag> {
     let (name_px, task_px) = (pt_px(NAME_PT, scale_factor), pt_px(TASK_PT, scale_factor));
     let pad = tag_pad(scale_factor);
+    let all_full = text.badges.len() <= ALL_FULL_UPTO;
+    // Not off the window's either edge, by the rooftop.
+    let inside = |x: i64, w: u32| x.min(i64::from(win_w) - i64::from(w)).max(0);
     let mut tags: Vec<Tag> = text
         .badges
         .iter()
         .map(|b| {
             let at = run_rect(&badge_run(b), d);
             let name = b.name.text().to_owned();
-            let w = Faces::cells(&name) * faces.cell_w(name_px) + 3 * pad;
-            let h = name_px + 2 * pad;
+            let shown = all_full || full.contains(&b.agent);
+            let (w, h) = if shown {
+                (
+                    Faces::cells(&name) * faces.cell_w(name_px) + 3 * pad,
+                    name_px + 2 * pad,
+                )
+            } else {
+                let dot = name_px / 2 + 2 * pad;
+                (dot, dot)
+            };
             let cx = (at.x + i64::from(at.w / 2)) * i64::from(u);
             let foot = (at.y + i64::from(at.h)) * i64::from(u);
             Tag {
                 agent: b.agent,
-                // Not off the window's west edge, by the rooftop.
                 badge: Area {
-                    x: (cx - i64::from(w / 2)).max(0),
+                    x: inside(cx - i64::from(w / 2), w),
                     y: foot - i64::from(h),
                     w,
                     h,
@@ -1207,10 +1260,16 @@ fn place_tags(
                 marker_rgb: b.marker,
                 name,
                 ink: to_u32(b.name.ink),
-                task: labels.get(&b.agent).map(|t| truncate_cells(t, LABEL_CELLS)),
+                task: labels
+                    .get(&b.agent)
+                    .filter(|_| shown)
+                    .map(|t| truncate_cells(t, LABEL_CELLS)),
+                full: shown,
             }
         })
         .collect();
+    // Stable, so the dots keep pixtuoid's order among themselves.
+    tags.sort_by_key(|t| !t.full);
     // A badge that would cover a neighbour's (sitters side by side on a
     // sofa) steps up a tier over its own figure, so every name reads.
     let mut taken: Vec<Area> = Vec::with_capacity(tags.len());
@@ -1234,7 +1293,7 @@ fn place_tags(
         let b = t.badge;
         t.label = (1..=LABEL_TIERS)
             .map(|tier| Area {
-                x: (b.x + i64::from(b.w / 2) - i64::from(w / 2)).max(0),
+                x: inside(b.x + i64::from(b.w / 2) - i64::from(w / 2), w),
                 y: b.y - step * tier,
                 w,
                 h,
@@ -1525,6 +1584,80 @@ fn ring(cx: i64, cy: i64, rx: i64, ry: i64) -> Vec<(i64, i64)> {
         .collect()
 }
 
+/// How long one breath of the first waiting agent's halo takes.
+const BREATH_MS: u64 = 2_400;
+/// How long one hop of its "!" takes.
+const HOP_MS: u64 = 700;
+
+/// 0..1 and back over `period` ms, smoothly.
+fn breath(ms: u64, period: u64) -> f64 {
+    let phase = (ms % period) as f64 / period as f64;
+    0.5 - 0.5 * (std::f64::consts::TAU * phase).cos()
+}
+
+/// Blend `ink` over the pixel at (`x`, `y`) by `alpha`, clipped.
+fn tint(canvas: &mut Canvas, x: i64, y: i64, ink: u32, alpha: f64) {
+    if x < 0 || y < 0 || x >= i64::from(canvas.w) || y >= i64::from(canvas.h) {
+        return;
+    }
+    let at = (y as u32 * canvas.w + x as u32) as usize;
+    let mix = |shift: u32| {
+        let (a, b) = (
+            f64::from((canvas.px[at] >> shift) & 0xff),
+            f64::from((ink >> shift) & 0xff),
+        );
+        ((a + (b - a) * alpha).round() as u32) << shift
+    };
+    canvas.px[at] = mix(16) | mix(8) | mix(0);
+}
+
+/// Mark `first`, the session the panel heads its waiting line with, where
+/// it stands: a halo in the panel's waiting colour breathing round its figure
+/// and a "!" hopping over its tags, so the one to answer first is found in
+/// the office as fast as on the panel.
+fn paint_first_waiting(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    tags: &[Tag],
+    first: AgentId,
+    scale_factor: f64,
+    stage: lively::Stage,
+) {
+    let Some(t) = tags.iter().find(|t| t.agent == first) else {
+        return;
+    };
+    let ink = color_u32(crate::panel::WAIT, STUCK_RED);
+    let u = stage.u;
+    let b = t.badge;
+    let cx = b.x + i64::from(b.w / 2);
+    let half_h = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * u / 2;
+    let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * u * 3 / 4;
+    let cy = t.figure_top + half_h;
+    // A band a few art pixels wide, densest at its inner edge, that swells
+    // and fades as it breathes.
+    let swell = breath(stage.ms, BREATH_MS);
+    let band = (u * 3).max(3);
+    let (rx, ry) = (half_w + u, half_h + 2 * u);
+    for y in cy - ry - band..=cy + ry + band {
+        for x in cx - rx - band..=cx + rx + band {
+            let (dx, dy) = ((x - cx) as f64 / rx as f64, (y - cy) as f64 / ry as f64);
+            let past = ((dx * dx + dy * dy).sqrt() - 1.0) * rx.min(ry) as f64 / band as f64;
+            if (0.0..1.0).contains(&past) {
+                tint(canvas, x, y, ink, (1.0 - past) * (0.25 + 0.4 * swell));
+            }
+        }
+    }
+    let px = pt_px(NAME_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    let (w, h) = (faces.cell_w(px) + 2 * pad, px + 2 * pad);
+    let hop = (breath(stage.ms, HOP_MS) * f64::from(h) / 2.0).round() as i64;
+    let top = t.label.map_or(b.y, |l| l.y.min(b.y)) - i64::from(h + pad) - hop;
+    let (x, y) = (cx - i64::from(w / 2), top.max(0));
+    canvas.fill(x, y, w, h, ink);
+    let base = y + i64::from(pad) + i64::from(faces.ascent(px));
+    faces.draw(canvas, x + i64::from(pad), base, "!", PANEL_BG, px);
+}
+
 /// Set the placed badges and task labels in the readable faces.
 fn paint_tags(
     canvas: &mut Canvas,
@@ -1538,6 +1671,16 @@ fn paint_tags(
     for t in tags {
         let r = t.badge;
         canvas.fill(r.x, r.y, r.w, r.h, t.plate);
+        if !t.full {
+            canvas.fill(
+                r.x + i64::from(pad),
+                r.y + i64::from(pad),
+                r.w - 2 * pad,
+                r.h - 2 * pad,
+                t.marker,
+            );
+            continue;
+        }
         canvas.fill(r.x, r.y, pad, r.h, t.marker);
         let ink = if selected == Some(t.agent) {
             0x00ff_ffff
@@ -1688,5 +1831,81 @@ mod tests {
             assert_eq!(lines.concat(), s, "{max}");
         }
         assert_eq!(wrap_cells("短", 26), vec!["短".to_owned()]);
+    }
+
+    /// A crowd's two-line tags piled over each other and ran off the
+    /// window's east edge. Past a few figures only the one selected or
+    /// waiting shows its name and task, the rest a dot each, and every tag
+    /// stays inside the office.
+    #[test]
+    fn in_a_crowd_only_the_ones_to_act_on_read_in_full_and_none_leave_the_office() {
+        let Ok(mut faces) = Faces::load() else {
+            // Not macOS, or the system faces moved: nothing to check here.
+            return;
+        };
+        let ink = Rgb { r: 9, g: 9, b: 9 };
+        let id = |n: usize| AgentId::from_parts("claude-code", &format!("s{n}"));
+        let (d, u, win_w) = (1, 4, 400);
+        // Shoulder to shoulder, the last at the east edge.
+        let badges: Vec<Badge> = (0..6)
+            .map(|n| Badge {
+                agent: id(n),
+                at: pixtuoid_scene::layout::Point {
+                    x: 40 + 10 * n as u16,
+                    y: 40,
+                },
+                marker: ink,
+                name: pixtuoid_scene::display::TextSpan::new(format!("cc·repo·{n}"), ink),
+                plate: ink,
+            })
+            .chain(std::iter::once(Badge {
+                agent: id(6),
+                at: pixtuoid_scene::layout::Point { x: 99, y: 40 },
+                marker: ink,
+                name: pixtuoid_scene::display::TextSpan::new("cc·toolhub-store", ink),
+                plate: ink,
+            }))
+            .collect();
+        let text = HostText {
+            badges: &badges,
+            bubbles: &[],
+            signs: &[],
+            dim: pixtuoid_scene::look::Dim::NONE,
+        };
+        let labels: HashMap<AgentId, String> =
+            (0..7).map(|n| (id(n), "改登录页".to_owned())).collect();
+        let tags = place_tags(
+            &mut faces,
+            text,
+            (d, u, win_w),
+            &labels,
+            &[id(2), id(6)],
+            2.0,
+            &[],
+        );
+        assert_eq!(tags.len(), 7, "every figure keeps a tag to click");
+        for t in &tags {
+            let wanted = t.agent == id(2) || t.agent == id(6);
+            assert_eq!(t.full, wanted, "{}", t.name);
+            assert_eq!(t.task.is_some(), wanted, "only a full tag carries its task");
+            for r in std::iter::once(t.badge).chain(t.label) {
+                assert!(
+                    r.x >= 0 && r.x + i64::from(r.w) <= i64::from(win_w),
+                    "{} inside the office",
+                    t.name
+                );
+            }
+        }
+        let full: Vec<Area> = tags
+            .iter()
+            .filter(|t| t.full)
+            .flat_map(|t| std::iter::once(t.badge).chain(t.label))
+            .collect();
+        for (i, a) in full.iter().enumerate() {
+            assert!(
+                !full[i + 1..].iter().any(|b| a.meets(b)),
+                "full tags do not overlap"
+            );
+        }
     }
 }

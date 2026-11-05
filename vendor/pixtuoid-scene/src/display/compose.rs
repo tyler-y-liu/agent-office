@@ -1037,7 +1037,12 @@ fn push_desk(
             theme,
         ),
         props.scanline,
-        crate::lighting::screen_idle(facing, moment.look.darkness, frame.indoor_scale),
+        // agent-office: an empty desk's screen stays dark, as its lamp does.
+        if crate::lighting::seated_at(&frame.seated_agents, i.0) {
+            crate::lighting::screen_idle(facing, moment.look.darkness, frame.indoor_scale)
+        } else {
+            0.0
+        },
         theme,
     );
     let span = desk_span(pack, desk, d, scale).with_depth(depth);

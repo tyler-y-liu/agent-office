@@ -5689,7 +5689,13 @@ mod tests {
         for s in [1, pack.max_density_variant().get()] {
             let scale = RenderScale::new(s).expect("nonzero");
             let pen = Pen::for_pack(scale, &pack);
-            let frame = empty_frame(&layout);
+            // agent-office: only a desk someone sits at lights its lamp.
+            let mut frame = empty_frame(&layout);
+            for i in 0..layout.home_desks.len() {
+                frame
+                    .seated_agents
+                    .insert(pixtuoid_core::state::FloorLocalDeskIndex(i), true);
+            }
             let list = list_at(
                 &frame,
                 Office {
