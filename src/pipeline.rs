@@ -1,4 +1,4 @@
-//! Source → reducer → latest `SceneState`, Claude Code only. Mirrors
+//! Source → reducer → latest `SceneState`, Claude Code and dsh only. Mirrors
 //! pixtuoid's `runtime/driver.rs` + `pipeline.rs` (MIT, pixtuoid authors),
 //! minus the other CLIs, daemon presence and the Sources panel gate.
 
@@ -17,6 +17,13 @@ use pixtuoid_core::{AgentEvent, Reducer, SceneState, TaggedReceiver, Transport};
 use tokio::sync::{mpsc, watch};
 
 pub const CC_SOURCE: &str = "claude-code";
+/// The CLIs the office shows: Claude Code, and DeepSeek Harness through
+/// agent-office's own plugin (`connect dsh`).
+pub const SHOWN_SOURCES: [&str; 2] = [CC_SOURCE, crate::dsh::SOURCE];
+
+pub fn is_shown_source(source: &str) -> bool {
+    SHOWN_SOURCES.contains(&source)
+}
 
 pub type FloorCaps = Arc<[AtomicUsize; MAX_FLOORS]>;
 
@@ -58,7 +65,7 @@ async fn reducer_task(
     let mut reducer = Reducer::new();
     let caps: [usize; MAX_FLOORS] = std::array::from_fn(|i| floor_caps[i].load(Ordering::Relaxed));
     let mut scene = SceneState::new(caps);
-    let connected: HashSet<String> = HashSet::from([CC_SOURCE.to_string()]);
+    let connected: HashSet<String> = SHOWN_SOURCES.iter().map(|s| s.to_string()).collect();
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -68,7 +75,7 @@ async fn reducer_task(
         tokio::select! {
             event = rx.recv() => {
                 let Some((transport, ev)) = event else { break };
-                if is_claude(&scene, &ev) {
+                if is_shown(&scene, &ev) {
                     reducer.apply(&mut scene, ev, SystemTime::now(), transport);
                 }
             }
@@ -85,11 +92,11 @@ async fn reducer_task(
     }
 }
 
-/// The hook socket is shared with every CLI pixtuoid connected (Cursor, dsh,
-/// ...): their events must not reach the reducer, or each one walks a
+/// The hook socket is shared with every CLI pixtuoid connected (Cursor,
+/// Codex, ...): their events must not reach the reducer, or each one walks a
 /// figure in that the next sweep walks out again. The gate pixtuoid's
-/// `runtime/gate.rs` keeps, narrowed to one source.
-fn is_claude(scene: &SceneState, ev: &AgentEvent) -> bool {
+/// `runtime/gate.rs` keeps, narrowed to the shown sources.
+fn is_shown(scene: &SceneState, ev: &AgentEvent) -> bool {
     let source = match ev {
         AgentEvent::SessionStart { source, .. } | AgentEvent::Identity { source, .. }
             if !source.is_empty() =>
@@ -98,7 +105,7 @@ fn is_claude(scene: &SceneState, ev: &AgentEvent) -> bool {
         }
         _ => scene.agents.get(&ev.agent_id()).map(|s| &*s.source),
     };
-    source.is_none_or(|s| s == CC_SOURCE)
+    source.is_none_or(is_shown_source)
 }
 
 /// Each floor's desk count for an office `buf_w`×`buf_h` laid out; at least
@@ -117,5 +124,31 @@ pub fn caps_for(buf_w: u16, buf_h: u16) -> [usize; MAX_FLOORS] {
 pub fn store_caps(caps: &FloorCaps, buf_w: u16, buf_h: u16) {
     for (slot, cap) in caps.iter().zip(caps_for(buf_w, buf_h)) {
         slot.store(cap, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start(source: &str) -> AgentEvent {
+        AgentEvent::SessionStart {
+            agent_id: pixtuoid_core::AgentId::from_parts(source, "s1"),
+            source: source.into(),
+            session_id: "s1".into(),
+            cwd: "/repo".into(),
+            parent_id: None,
+        }
+    }
+
+    /// dsh sessions reach the office through agent-office's own plugin, so
+    /// they must pass the gate; another CLI pixtuoid hooked into the same
+    /// socket must not, or its figure walks in and out every sweep.
+    #[test]
+    fn the_gate_lets_claude_and_dsh_through_and_no_other_cli() {
+        let scene = SceneState::new([1; MAX_FLOORS]);
+        assert!(is_shown(&scene, &start(CC_SOURCE)));
+        assert!(is_shown(&scene, &start(crate::dsh::SOURCE)));
+        assert!(!is_shown(&scene, &start("codex")));
     }
 }

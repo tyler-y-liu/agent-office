@@ -75,19 +75,29 @@ pub fn prepare_socket_dir(socket: &std::path::Path) -> Result<()> {
 /// `agent-office hook`. Claude Code waits on every hook, so this never fails,
 /// never prints and gives up quickly: with no office running the event is
 /// simply not seen.
-pub fn forward() {
+///
+/// `source` is the CLI a non-Claude caller speaks for (`--source dsh`): the
+/// router reads it from the stamp pixtuoid's shim writes, and an unstamped
+/// payload is Claude Code's.
+pub fn forward(source: Option<&str>) {
     let mut raw = String::new();
     if std::io::stdin()
         .take(STDIN_CAP)
         .read_to_string(&mut raw)
         .is_ok()
     {
-        send(&raw, &socket_path());
+        send(&raw, source, &socket_path());
     }
 }
 
-fn send(raw: &str, socket: &std::path::Path) -> Option<()> {
-    let v: Value = serde_json::from_str(raw).ok()?;
+fn send(raw: &str, source: Option<&str>, socket: &std::path::Path) -> Option<()> {
+    let mut v: Value = serde_json::from_str(raw).ok()?;
+    if let Some(source) = source {
+        v.as_object_mut()?.insert(
+            pixtuoid_core::source::decoder::SOURCE_STAMP.to_owned(),
+            source.into(),
+        );
+    }
     #[cfg(unix)]
     {
         let mut s = std::os::unix::net::UnixStream::connect(socket).ok()?;
@@ -258,12 +268,38 @@ mod tests {
         let sock = dir.join("s.sock");
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let pretty = "{\n \"hook_event_name\": \"Stop\",\n \"session_id\": \"s1\"\n}";
-        assert!(send(pretty, &sock).is_some());
+        assert!(send(pretty, None, &sock).is_some());
         let (conn, _) = listener.accept().unwrap();
         let mut line = String::new();
         std::io::BufReader::new(conn).read_line(&mut line).unwrap();
         let v: Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(v["session_id"], "s1");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Unstamped, the router reads a dsh payload as Claude Code's and keys
+    /// the figure under the wrong CLI; stamped, the dsh decoder claims it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dsh_payload_arrives_stamped_and_decodes_as_dsh() {
+        use std::io::BufRead;
+        let dir = std::env::temp_dir().join(format!("ao-hook-dsh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let raw = r#"{"type":"session_start","sessionId":"session-1","cwd":"/repo"}"#;
+        assert!(send(raw, Some("dsh"), &sock).is_some());
+        let (conn, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(conn).read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(line.trim_end()).unwrap();
+        let evs = pixtuoid_core::source::decoder::decode_hook_payload(v).unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(e,
+                pixtuoid_core::AgentEvent::SessionStart { source, session_id, .. }
+                    if source == "dsh" && session_id == "session-1")),
+            "{evs:?}"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

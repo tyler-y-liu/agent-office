@@ -1,5 +1,7 @@
 //! What a Claude Code transcript says the agent was asked to do. pixtuoid's
 //! decoder keeps only tool calls, so the prompts and todos come from here.
+//! agent-office's dsh plugin writes its task logs in the same shape, with
+//! dsh's own tool names (`bash`, `read`, `todo_write`, ...).
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -61,6 +63,12 @@ fn result_text(b: &Value) -> String {
     }
 }
 
+/// A call the user turned down: Claude Code words its result so, and the dsh
+/// plugin flags it, since dsh's wording is not Claude Code's.
+fn rejected(b: &Value) -> bool {
+    b.get("rejected").and_then(Value::as_bool) == Some(true) || result_text(b).contains(REJECTED)
+}
+
 /// What kind of work an agent is at, read off its last tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -97,9 +105,16 @@ const CHECK_WORDS: &[&str] = &[
 fn phase_of(name: &str, input: &Value) -> Option<Phase> {
     Some(match name {
         "Read" | "Grep" | "Glob" | "WebFetch" | "WebSearch" | "LSP" => Phase::Research,
+        "read" | "read_image" | "grep" | "glob" | "web_fetch" | "web_search" => Phase::Research,
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Phase::Code,
-        "Task" | "Agent" => Phase::Delegate,
-        "Bash" => {
+        "edit" | "write" => Phase::Code,
+        // One tool for looking and changing; `view` only reads.
+        "str_replace_editor" if input.get("command").and_then(Value::as_str) == Some("view") => {
+            Phase::Research
+        }
+        "str_replace_editor" => Phase::Code,
+        "Task" | "Agent" | "subagent" | "subagent_fork" => Phase::Delegate,
+        "Bash" | "bash" => {
             let cmd = input
                 .get("command")
                 .and_then(Value::as_str)
@@ -177,12 +192,11 @@ impl Transcript {
                         }
                     }
                     let failed = |b: &&Value| {
-                        b.get("is_error").and_then(Value::as_bool) == Some(true)
-                            && !result_text(b).contains(REJECTED)
+                        b.get("is_error").and_then(Value::as_bool) == Some(true) && !rejected(b)
                     };
                     if results.iter().any(failed) {
                         self.fail_streak += 1;
-                    } else if results.iter().all(|b| !result_text(b).contains(REJECTED)) {
+                    } else if results.iter().all(|b| !rejected(b)) {
                         self.fail_streak = 0;
                     }
                     return;
@@ -223,7 +237,7 @@ impl Transcript {
             if let Some(p) = phase_of(name, input) {
                 self.phase = Some(p);
             }
-            if name == "TodoWrite" {
+            if name == "TodoWrite" || name == "todo_write" {
                 self.todo_active = active_todo(input);
             }
             if self.recent_tools.len() == KEEP_TOOLS {
@@ -261,18 +275,20 @@ fn active_todo(input: &Value) -> Option<String> {
 fn tool_line(name: &str, input: &Value) -> String {
     let s = |k: &str| input.get(k).and_then(Value::as_str);
     let target = match name {
-        "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
-            s("file_path").or_else(|| s("notebook_path")).map(|p| {
+        "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "read" | "read_image"
+        | "edit" | "write" | "str_replace_editor" => s("file_path")
+            .or_else(|| s("notebook_path"))
+            .or_else(|| s("path"))
+            .map(|p| {
                 Path::new(p)
                     .file_name()
                     .map_or_else(|| p.to_owned(), |f| f.to_string_lossy().into_owned())
-            })
-        }
-        "Bash" => s("description").or_else(|| s("command")).map(str::to_owned),
-        "Grep" | "Glob" => s("pattern").map(str::to_owned),
-        "Task" | "Agent" => s("description").map(str::to_owned),
-        "WebFetch" => s("url").map(str::to_owned),
-        "WebSearch" => s("query").map(str::to_owned),
+            }),
+        "Bash" | "bash" => s("description").or_else(|| s("command")).map(str::to_owned),
+        "Grep" | "Glob" | "grep" | "glob" => s("pattern").map(str::to_owned),
+        "Task" | "Agent" | "subagent" | "subagent_fork" => s("description").map(str::to_owned),
+        "WebFetch" | "web_fetch" => s("url").map(str::to_owned),
+        "WebSearch" | "web_search" => s("query").map(str::to_owned),
         _ => None,
     };
     // Tool input is the model's text: one line, no control characters.
@@ -381,6 +397,60 @@ mod tests {
     fn tool(name: &str, input: Value) -> String {
         json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":name,"input":input}]}})
             .to_string()
+    }
+
+    /// A dsh session's task log, as agent-office's plugin writes it: the
+    /// prompt, todo, phase and failures must read the same as a Claude Code
+    /// session's, or a dsh figure shows no task and is never flagged stuck.
+    #[test]
+    fn a_dsh_task_log_reads_like_a_claude_transcript() {
+        let mut t = Transcript::default();
+        let feed = |t: &mut Transcript, v: Value| t.feed(&v.to_string());
+        feed(
+            &mut t,
+            json!({"type":"user","message":{"content":"开始微信读书问答PK"}}),
+        );
+        feed(
+            &mut t,
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1",
+            "name":"todo_write","input":{"todos":[{"content":"打开 app","status":"completed"},
+            {"content":"答 10 题","status":"in_progress"}]}}]}}),
+        );
+        feed(
+            &mut t,
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2",
+            "name":"bash","input":{"description":"Run quiz","command":"python3 quiz.py"}}]}}),
+        );
+        assert_eq!(t.latest_prompt(), Some("开始微信读书问答PK"));
+        assert_eq!(t.todo_active.as_deref(), Some("答 10 题"));
+        assert_eq!(t.phase, Some(Phase::Run));
+        assert_eq!(
+            t.recent_tools.back().map(String::as_str),
+            Some("bash Run quiz")
+        );
+        assert!(t.awaits_any(&["bash"]));
+        let result = |id: &str, err: bool, rejected: bool| {
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,
+                "is_error":err,"rejected":rejected}]}})
+        };
+        for _ in 0..3 {
+            feed(&mut t, result("c2", true, false));
+        }
+        assert_eq!(t.fail_streak, 3);
+        assert!(!t.awaits_any(&["bash"]));
+        // The user turning a call down is not the agent failing.
+        feed(&mut t, result("c3", true, true));
+        assert_eq!(t.fail_streak, 3);
+        feed(
+            &mut t,
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c4",
+            "name":"edit","input":{"file_path":"/repo/src/quiz.py"}}]}}),
+        );
+        assert_eq!(t.phase, Some(Phase::Code));
+        assert_eq!(
+            t.recent_tools.back().map(String::as_str),
+            Some("edit quiz.py")
+        );
     }
 
     #[test]

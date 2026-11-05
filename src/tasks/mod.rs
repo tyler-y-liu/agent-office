@@ -1,5 +1,6 @@
 //! Each agent's task, as one line: a background loop tails the transcripts of
-//! the agents the office shows and keeps their summaries fresh.
+//! the agents the office shows and keeps their summaries fresh. A dsh
+//! session's transcript is the task log agent-office's dsh plugin writes.
 
 pub mod client;
 pub mod extract;
@@ -14,7 +15,7 @@ use pixtuoid_core::state::ActivityState;
 use pixtuoid_core::{AgentId, SceneState};
 use tokio::sync::{mpsc, watch};
 
-use crate::pipeline::CC_SOURCE;
+use crate::pipeline::{CC_SOURCE, is_shown_source};
 use crate::text::truncate_cells;
 use client::{SUMMARY_CELLS, Summarizer, SummaryInput};
 pub use extract::Phase;
@@ -62,7 +63,16 @@ const FAILS_STUCK: u32 = 3;
 const QUIET_STUCK: Duration = Duration::from_secs(5 * 60);
 /// The same while a call that may run long is out: a build, a subagent.
 const QUIET_STUCK_LONG_CALL: Duration = Duration::from_secs(20 * 60);
-const LONG_CALLS: &[&str] = &["Bash", "Task", "Agent"];
+const LONG_CALLS: &[&str] = &[
+    "Bash",
+    "Task",
+    "Agent",
+    // dsh's names for the same calls, and its wait on a background job.
+    "bash",
+    "subagent",
+    "subagent_fork",
+    "job_output",
+];
 
 fn stuck(t: &Transcript, working: bool, quiet: Duration) -> Option<Stuck> {
     if t.fail_streak >= FAILS_STUCK {
@@ -171,6 +181,22 @@ pub fn projects_root() -> Option<PathBuf> {
     claude_dir().map(|d| d.join("projects"))
 }
 
+/// The task log agent-office's dsh plugin keeps for `session_id`, named the
+/// way the plugin names it.
+fn dsh_log(dir: &Path, session_id: &str) -> PathBuf {
+    let safe: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(format!("{safe}.jsonl"))
+}
+
 /// Spawn the loop; the views it publishes, and where to ask for a re-summary.
 pub fn spawn(
     scene_rx: watch::Receiver<Arc<SceneState>>,
@@ -188,7 +214,8 @@ async fn run(
     views_tx: watch::Sender<TaskViews>,
     mut force_rx: mpsc::UnboundedReceiver<AgentId>,
 ) {
-    let Some(root) = projects_root() else { return };
+    let root = projects_root();
+    let dsh_dir = crate::dsh::transcripts_dir();
     let mut entries: HashMap<AgentId, Entry> = HashMap::new();
     let mut locator = Locator::default();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, Option<String>)>();
@@ -221,11 +248,19 @@ async fn run(
         // Transcript reads and directory scans are blocking file I/O.
         tokio::task::block_in_place(|| {
             for (id, slot) in &scene.agents {
-                if &*slot.source != CC_SOURCE {
+                if !is_shown_source(&slot.source) {
                     continue;
                 }
                 if !entries.contains_key(id) {
-                    let Some(path) = locator.find(*id, &root, now) else {
+                    let path = if &*slot.source == crate::dsh::SOURCE {
+                        dsh_dir
+                            .as_deref()
+                            .map(|d| dsh_log(d, &slot.session_id))
+                            .filter(|p| p.is_file())
+                    } else {
+                        root.as_deref().and_then(|r| locator.find(*id, r, now))
+                    };
+                    let Some(path) = path else {
                         continue;
                     };
                     let sub = extract::sub_meta(&path);
@@ -381,6 +416,22 @@ mod tests {
         let meta = extract::sub_meta(&found[&sub]).unwrap();
         assert_eq!(meta.description.as_deref(), Some("调研 X 仓库"));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The plugin and the reader must agree on the file name, or a dsh
+    /// session never gets a task line.
+    #[test]
+    fn a_dsh_log_is_named_the_way_the_plugin_names_it() {
+        let dir = Path::new("/t");
+        assert_eq!(
+            dsh_log(dir, "session-209513f0-7740"),
+            Path::new("/t/session-209513f0-7740.jsonl")
+        );
+        // The plugin's `replace(/[^A-Za-z0-9._-]/gu, "_")`: per code point,
+        // as `chars()` is, so a non-BMP character is one `_` on both sides.
+        assert_eq!(dsh_log(dir, "../a/b c🙂"), Path::new("/t/.._a_b_c_.jsonl"));
+        let plugin = include_str!("../dsh_plugin.mjs");
+        assert!(plugin.contains(r#"sessionId.replace(/[^A-Za-z0-9._-]/gu, "_") + ".jsonl""#));
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<(), String> {
             None => break,
         }
     }
+    if &*slot.source != crate::pipeline::CC_SOURCE {
+        return Err("dsh 的会话，跳不过去".to_owned());
+    }
     let dir = crate::tasks::projects_root()
         .and_then(|root| registry_dir(&root))
         .ok_or("找不到 ~/.claude/sessions")?;
