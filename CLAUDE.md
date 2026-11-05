@@ -22,4 +22,4 @@
 - 最小改动：只改该改的，不顺手改相邻的代码、注释或格式。注释只写为什么。
 - 不要把内部地址、密钥、真实会话名或个人路径写进仓库。截图要用假会话生成：设 `CLAUDE_CONFIG_DIR` 指向一个只有 demo transcript 的目录。
 - 摘要接口只通过 `AGENT_OFFICE_API_BASE` / `AGENT_OFFICE_API_KEY` / `AGENT_OFFICE_MODEL` 配置，代码里不写默认地址。
-- 未经要求不 commit、不 push、不新增文档。
+- 未经要求不新增文档；commit / push 按全局「放行与拍板」规则。
