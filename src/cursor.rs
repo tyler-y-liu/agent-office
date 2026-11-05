@@ -11,11 +11,12 @@ use serde_json::{Map, Value, json};
 
 use crate::pipeline::CURSOR_SOURCE;
 
-/// The events pixtuoid's Cursor decoder reads, and the prompt, which only
-/// the task log keeps (the decoder does not take it).
-const EVENTS: [&str; 7] = [
+/// The events pixtuoid's Cursor decoder reads, and the prompt and the
+/// agent's reply, which only the task log keeps (the decoder does not take them).
+const EVENTS: [&str; 8] = [
     "sessionStart",
     "beforeSubmitPrompt",
+    "afterAgentResponse",
     "preToolUse",
     "postToolUse",
     "postToolUseFailure",
@@ -23,6 +24,7 @@ const EVENTS: [&str; 7] = [
     "sessionEnd",
 ];
 pub const PROMPT_EVENT: &str = "beforeSubmitPrompt";
+pub const REPLY_EVENT: &str = "afterAgentResponse";
 
 /// The tool input fields the task reader shows or classifies by. Everything
 /// else (file contents, edit strings, subagent prompts) stays out of the log.
@@ -199,6 +201,15 @@ fn log_line(v: &Value, now: &str) -> Option<Value> {
                 "type": "user",
                 "timestamp": now,
                 "message": { "content": truncate(prompt, 4000) },
+            })
+        }
+        REPLY_EVENT => {
+            let text = s("text").filter(|t| !t.trim().is_empty())?;
+            let n = text.chars().count();
+            let tail: String = text.chars().skip(n.saturating_sub(3000)).collect();
+            json!({
+                "type": "assistant",
+                "message": { "content": [{ "type": "text", "text": tail }] },
             })
         }
         "preToolUse" => {
@@ -378,6 +389,7 @@ mod tests {
         };
         let events = [
             ev(PROMPT_EVENT, json!({"prompt": "给登录页补测试"})),
+            ev(REPLY_EVENT, json!({"text": "先看一下现有的测试"})),
             ev(
                 "preToolUse",
                 json!({"tool_name": "Write", "tool_use_id": "t1",
@@ -413,6 +425,7 @@ mod tests {
             Some("Write login.test.ts")
         );
         assert_eq!(t.fail_streak, 2, "a call turned down is not a failure");
+        assert_eq!(t.last_reply.as_deref(), Some("先看一下现有的测试"));
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -9,9 +9,10 @@
 //   move the figures. Never prompts or tool arguments.
 // - A local task log per session under TRANSCRIPTS, in the subset of Claude
 //   Code's transcript shape the office's task reader parses, so one reader
-//   serves both CLIs. It holds the human's prompts and each tool's target
-//   fields (path, command, pattern, url, todos), never file contents or tool
-//   output; the office sends it to the summary API only when one is configured.
+//   serves both CLIs. It holds the human's prompts, the agent's replies and
+//   each tool's target fields (path, command, pattern, url, todos), never file
+//   contents or tool output; the office sends it to the summary API only when
+//   one is configured.
 const HOOK_EXE = __HOOK_EXE__
 const TRANSCRIPTS = __TRANSCRIPTS__
 
@@ -212,6 +213,20 @@ export function apply(ctx) {
           })
           break
         }
+        case "assistant/message":
+          // The reply's text, which the office reads a finished turn's outcome from.
+          if (Array.isArray(d?.content)) {
+            const text = d.content
+              .filter((b) => b?.type === "text" && typeof b.text === "string")
+              .map((b) => b.text)
+              .join(" ")
+            if (text.trim())
+              log(sid, {
+                type: "assistant",
+                message: { content: [{ type: "text", text: text.slice(-3000) }] },
+              })
+          }
+          break
         case "turn/end":
           send({ type: "turn_end", ...base(header) })
           break

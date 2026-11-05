@@ -19,6 +19,8 @@ const KEEP_PROMPTS: usize = 3;
 /// to 100 MB, nearly all of it tool output.
 const FIRST_READ: u64 = 4 << 20;
 const KEEP_TOOLS: usize = 5;
+/// How much of the agent's last reply is kept, in characters.
+const KEEP_REPLY: usize = 3000;
 
 #[derive(Debug, Default, Clone)]
 pub struct Transcript {
@@ -39,6 +41,9 @@ pub struct Transcript {
     /// When the human last spoke, which is when the current turn began;
     /// `None` when that line carried no timestamp.
     pub turn_started: Option<SystemTime>,
+    /// The agent's last words to the human since they last spoke: once the
+    /// turn is over, its answer, its report, or its question.
+    pub last_reply: Option<String>,
 }
 
 /// More calls than this out at once is results lost to a mid-file first read.
@@ -233,29 +238,52 @@ impl Transcript {
             }
             _ => return,
         };
-        // The human spoke: whatever went wrong before, the agent starts over.
         if human_prompt(&text).is_some() {
-            self.fail_streak = 0;
-            // Set even when the words repeat the last prompt: it is a new turn.
-            self.turn_started = v
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(parse_timestamp);
+            self.human_spoke(v);
         }
         self.push_prompt(&text);
+    }
+
+    /// A new turn: whatever went wrong before, the agent starts over, and
+    /// what it said last answered the turn before.
+    fn human_spoke(&mut self, v: &Value) {
+        self.fail_streak = 0;
+        self.last_reply = None;
+        // Set even when the words repeat the last prompt: it is a new turn.
+        self.turn_started = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp);
+    }
+
+    fn set_reply(&mut self, text: &str) {
+        let t = one_line(text);
+        if t.is_empty() {
+            return;
+        }
+        // The end of a long report is where it concludes.
+        let n = t.chars().count();
+        self.last_reply = Some(t.chars().skip(n.saturating_sub(KEEP_REPLY)).collect());
     }
 
     fn feed_assistant(&mut self, v: &Value) {
         let Some(Value::Array(blocks)) = v.pointer("/message/content") else {
             return;
         };
+        let mut said = Vec::new();
         for b in blocks {
-            if b.get("type").and_then(Value::as_str) != Some("tool_use") {
-                continue;
+            match b.get("type").and_then(Value::as_str) {
+                Some("text") => said.extend(b.get("text").and_then(Value::as_str)),
+                Some("tool_use") => {
+                    let name = b.get("name").and_then(Value::as_str).unwrap_or("?");
+                    let input = b.get("input").unwrap_or(&Value::Null);
+                    self.tool_call(b.get("id").and_then(Value::as_str), name, input);
+                }
+                _ => {}
             }
-            let name = b.get("name").and_then(Value::as_str).unwrap_or("?");
-            let input = b.get("input").unwrap_or(&Value::Null);
-            self.tool_call(b.get("id").and_then(Value::as_str), name, input);
+        }
+        if !said.is_empty() {
+            self.set_reply(&said.join(" "));
         }
     }
 
@@ -291,13 +319,20 @@ impl Transcript {
             (Some("event_msg"), Some("user_message")) => {
                 let Some(text) = s("message") else { return };
                 if human_prompt(text).is_some() {
-                    self.fail_streak = 0;
-                    self.turn_started = v
-                        .get("timestamp")
-                        .and_then(Value::as_str)
-                        .and_then(parse_timestamp);
+                    self.human_spoke(v);
                 }
                 self.push_prompt(text);
+            }
+            (Some("event_msg"), Some("agent_message")) => {
+                if let Some(text) = s("message") {
+                    self.set_reply(text);
+                }
+            }
+            // The turn's own record of how it ended.
+            (Some("event_msg"), Some("task_complete")) => {
+                if let Some(text) = s("last_agent_message") {
+                    self.set_reply(text);
+                }
             }
             (Some("response_item"), Some(kind @ ("function_call" | "custom_tool_call"))) => {
                 let name = s("name").unwrap_or("?");
@@ -821,6 +856,54 @@ mod tests {
             json!({"type":"user_message","message":"换个办法"}),
         ));
         assert_eq!(t.fail_streak, 0, "the human spoke: it starts over");
+    }
+
+    /// A finished turn's outcome is read from the agent's last words, so
+    /// they must be the last text it wrote, whatever tools ran after earlier
+    /// text, and gone once the human speaks: a reply to the previous turn
+    /// says nothing of the new one.
+    #[test]
+    fn the_last_reply_is_the_agents_last_words_since_the_human_spoke() {
+        let say = |text: &str| {
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":text}]}})
+                .to_string()
+        };
+        let mut t = Transcript::default();
+        t.feed(&user(json!("修登录页")));
+        t.feed(&say("先看看代码"));
+        t.feed(&call("r", "Read", json!({"file_path":"/a.ts"})));
+        t.feed(&result("r", false, "code"));
+        assert_eq!(
+            t.last_reply.as_deref(),
+            Some("先看看代码"),
+            "a tool result is not the human"
+        );
+        t.feed(&say("已修好，\n补了 2 个测试"));
+        assert_eq!(t.last_reply.as_deref(), Some("已修好， 补了 2 个测试"));
+        t.feed(&user(json!("再部署一下")));
+        assert_eq!(t.last_reply, None);
+        // Codex: its message events, then the turn's own record of its end.
+        let mut c = Transcript::default();
+        c.feed(&rollout(
+            "event_msg",
+            json!({"type":"user_message","message":"修登录页"}),
+        ));
+        c.feed(&rollout(
+            "event_msg",
+            json!({"type":"agent_message","message":"我先看代码"}),
+        ));
+        assert_eq!(c.last_reply.as_deref(), Some("我先看代码"));
+        c.feed(&rollout(
+            "event_msg",
+            json!({"type":"task_complete","turn_id":"t1","last_agent_message":"已修好"}),
+        ));
+        assert_eq!(c.last_reply.as_deref(), Some("已修好"));
+        // A long report keeps its end, where it concludes.
+        let mut l = Transcript::default();
+        l.feed(&say(&format!("{}结论", "过程".repeat(KEEP_REPLY))));
+        let kept = l.last_reply.unwrap();
+        assert_eq!(kept.chars().count(), KEEP_REPLY);
+        assert!(kept.ends_with("结论"));
     }
 
     #[test]

@@ -236,14 +236,33 @@ fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
         } => Some((one_line(d), TEXT)),
         ActivityState::RequiresAction { reason } => {
             let last_tool = view.and_then(|v| v.recent_tools.last());
-            Some((
-                waiting_on(reason.as_deref(), last_tool.map(String::as_str)),
-                WAIT,
-            ))
+            let wait = waiting_on(reason.as_deref(), last_tool.map(String::as_str));
+            // A turn that ended on a question waits for your reply: the
+            // outcome says what it asked.
+            match view.and_then(|v| v.outcome.as_deref()) {
+                Some(o) if wait == REPLY_WAIT => Some((format!("{wait}：{o}"), WAIT)),
+                _ => Some((wait, WAIT)),
+            }
+        }
+        // Done: what it came to, so you know which to read first.
+        ActivityState::Idle if slot.exiting_at.is_none() => {
+            let v = view?;
+            let o = v.outcome.clone()?;
+            let color = if !v.outcome_summarized {
+                DIM
+            } else if o.starts_with("问：") {
+                WAIT
+            } else {
+                TEXT
+            };
+            Some((o, color))
         }
         _ => None,
     }
 }
+
+/// The agent finished its turn and waits on your answer.
+const REPLY_WAIT: &str = "等你回复";
 
 /// What the agent waits on, in words. pixtuoid's reason is `"permission"`
 /// for a PermissionRequest hook and Claude's own English line for a
@@ -254,7 +273,7 @@ fn waiting_on(reason: Option<&str>, last_tool: Option<&str>) -> String {
             Some(t) => format!("等你批准：{t}"),
             None => "等你批准工具调用".to_owned(),
         },
-        Some(r) if r.contains("waiting for your input") => "等你回复".to_owned(),
+        Some(r) if r.contains("waiting for your input") => REPLY_WAIT.to_owned(),
         Some(r) if r.contains("needs your permission") => match last_tool {
             Some(t) => format!("等你批准：{t}"),
             None => one_line(r),
@@ -382,6 +401,22 @@ fn card(
                 Style::default().fg(DIM),
             )));
             for l in wrap(p, body_w).into_iter().take(6) {
+                lines.push(Line::from(Span::styled(
+                    format!("{pad}{l}"),
+                    Style::default().fg(TEXT),
+                )));
+            }
+        }
+        if matches!(slot.state, ActivityState::Idle)
+            && let Some(r) = &v.reply
+        {
+            lines.push(Line::from(Span::styled(
+                format!("{pad}最后回复"),
+                Style::default().fg(DIM),
+            )));
+            // The end of a long reply is where it concludes.
+            let wrapped = wrap(r, body_w);
+            for l in &wrapped[wrapped.len().saturating_sub(6)..] {
                 lines.push(Line::from(Span::styled(
                     format!("{pad}{l}"),
                     Style::default().fg(TEXT),
@@ -835,6 +870,47 @@ mod tests {
         // No start known: the card says nothing rather than guess.
         slot.state = ActivityState::Running { item: None };
         assert_eq!(status(slot, Some(&TaskView::default())).0, "… 思考中");
+    }
+
+    /// A finished card says what the turn came to, so you can tell which to
+    /// read first without opening each; a question for you stands out in the
+    /// waiting colour, a raw reply reads dim, and a working card shows its
+    /// current call instead.
+    #[test]
+    fn a_finished_card_says_what_the_turn_came_to() {
+        let now = SystemTime::now();
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, now);
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Idle;
+        let done = |o: &str, summarized: bool| TaskView {
+            outcome: Some(o.into()),
+            outcome_summarized: summarized,
+            ..TaskView::default()
+        };
+        assert_eq!(
+            doing(slot, Some(&done("登录页已修好", true))),
+            Some(("登录页已修好".into(), TEXT))
+        );
+        assert_eq!(
+            doing(slot, Some(&done("问：要不要删旧接口", true))).map(|d| d.1),
+            Some(WAIT)
+        );
+        assert_eq!(
+            doing(slot, Some(&done("已修好，补了测试", false))).map(|d| d.1),
+            Some(DIM)
+        );
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(doing(slot, Some(&done("登录页已修好", true))), None);
+        // Claude's idle prompt moves it to 等你批; the question stays shown.
+        slot.state = ActivityState::RequiresAction {
+            reason: Some("Claude is waiting for your input".into()),
+        };
+        assert_eq!(
+            doing(slot, Some(&done("问：要不要删旧接口", true))).map(|d| d.0),
+            Some("等你回复：问：要不要删旧接口".into())
+        );
     }
 
     #[test]

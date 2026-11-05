@@ -1,4 +1,5 @@
-//! The one-line task summary from an OpenAI-compatible chat endpoint.
+//! The one-line task summary, and the one-line outcome of a finished turn,
+//! from an OpenAI-compatible chat endpoint.
 //! Not `claude -p`: that session would fire the hooks and walk into the office
 //! as one more agent.
 
@@ -18,6 +19,21 @@ pub const SUMMARY_CELLS: u16 = 40;
 const SYSTEM: &str = "你给 AI 编程助手正在做的任务起一句话标题。\
 根据开发者最新的指令（必要时参考之前的指令、当前 todo 和最近动作），\
 用简体中文写一句动宾结构的短句，不超过20个汉字，不加句号、引号或任何前缀，只输出这一句。";
+
+const OUTCOME_SYSTEM: &str = "你用一句话告诉开发者 AI 编程助手这一轮的结果。\
+根据它的任务和它最后的回复，用简体中文写一句短句，不超过20个汉字：\
+做完了就说做成了什么；没做成就说卡在哪；在等开发者回答或拿主意就以「问：」开头说问的是什么。\
+不加句号、引号或别的前缀，只输出这一句。";
+
+/// What a finished turn's outcome is read from.
+#[derive(Debug, Clone, Default)]
+pub struct OutcomeInput {
+    pub project: String,
+    /// The prompt the turn answered.
+    pub task: Option<String>,
+    /// The agent's last reply.
+    pub reply: String,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SummaryInput {
@@ -79,13 +95,21 @@ impl Summarizer {
     }
 
     pub async fn summarize(&self, input: &SummaryInput) -> Result<String> {
+        self.ask(SYSTEM, user_message(input)).await
+    }
+
+    pub async fn summarize_outcome(&self, input: &OutcomeInput) -> Result<String> {
+        self.ask(OUTCOME_SYSTEM, outcome_message(input)).await
+    }
+
+    async fn ask(&self, system: &str, user: String) -> Result<String> {
         let body = json!({
             "model": self.model,
             "max_tokens": 60,
             "temperature": 0.2,
             "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": user_message(input)},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
         });
         let resp = self
@@ -136,6 +160,18 @@ fn user_message(input: &SummaryInput) -> String {
     m
 }
 
+fn outcome_message(input: &OutcomeInput) -> String {
+    let mut m = format!("项目: {}\n", input.project);
+    if let Some(t) = &input.task {
+        m.push_str(&format!("任务: {}\n", truncate_cells(t, 600)));
+    }
+    // A long reply's conclusion is at its end.
+    let n = input.reply.chars().count();
+    let tail: String = input.reply.chars().skip(n.saturating_sub(1500)).collect();
+    m.push_str(&format!("最后的回复: {tail}\n"));
+    m
+}
+
 /// The model's line as a label: one line, no quotes or closing stop, capped.
 fn clean(raw: &str) -> Option<String> {
     let line = one_line(raw.lines().find(|l| !l.trim().is_empty())?);
@@ -167,6 +203,21 @@ mod tests {
         assert_eq!(clean("  \n"), None);
         let long = "一".repeat(40);
         assert!(crate::text::cells(&clean(&long).unwrap()) <= SUMMARY_CELLS);
+    }
+
+    /// A long report concludes at its end: that part must reach the model,
+    /// with the task it answers.
+    #[test]
+    fn an_outcome_request_carries_the_task_and_the_replys_end() {
+        let reply = format!("{}结论：登录页已修好", "过程。".repeat(2000));
+        let m = outcome_message(&OutcomeInput {
+            project: "web".into(),
+            task: Some("修登录页".into()),
+            reply,
+        });
+        assert!(m.contains("任务: 修登录页"));
+        assert!(m.ends_with("结论：登录页已修好\n"));
+        assert!(m.chars().count() < 1700);
     }
 
     #[test]

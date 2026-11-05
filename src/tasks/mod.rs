@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::pipeline::{CC_SOURCE, CODEX_SOURCE, CURSOR_SOURCE, is_shown_source};
 use crate::text::truncate_cells;
-use client::{SUMMARY_CELLS, Summarizer, SummaryInput};
+use client::{OutcomeInput, SUMMARY_CELLS, Summarizer, SummaryInput};
 pub use extract::Phase;
 use extract::{SubMeta, Tail, Transcript};
 use trigger::Trigger;
@@ -41,6 +41,13 @@ pub struct TaskView {
     pub stuck: Option<Stuck>,
     /// When the current turn began: the human's last prompt.
     pub turn_started: Option<SystemTime>,
+    /// What the turn came to, from the agent's last reply: the model's line,
+    /// or the reply cut short when there is none.
+    pub outcome: Option<String>,
+    /// `outcome` came from the model.
+    pub outcome_summarized: bool,
+    /// The agent's last reply.
+    pub reply: Option<String>,
 }
 
 /// Why an agent looks stuck.
@@ -116,6 +123,11 @@ struct Entry {
     sub: Option<SubMeta>,
     trigger: Trigger,
     summary: Option<String>,
+    /// The outcome line and the reply it was read from.
+    outcome: Option<(String, String)>,
+    outcome_in_flight: bool,
+    /// After a failed outcome request, when to try again.
+    outcome_retry_at: Option<Instant>,
     /// When the transcript last gained a line.
     grew_at: Instant,
 }
@@ -284,6 +296,9 @@ async fn run(
     let mut locator = Locator::new(scan);
     let mut codex_locator = Locator::new(scan_codex);
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, Option<String>)>();
+    // Each outcome reply with the agent reply it was asked for.
+    let (outcome_tx, mut outcome_rx) =
+        mpsc::unbounded_channel::<(AgentId, String, Option<String>)>();
     let mut tick = tokio::time::interval(Duration::from_millis(700));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -298,6 +313,18 @@ async fn run(
                             e.summary = Some(line);
                         }
                         None => e.trigger.failed(Instant::now()),
+                    }
+                }
+            }
+            Some((id, reply, out)) = outcome_rx.recv() => {
+                if let Some(e) = entries.get_mut(&id) {
+                    e.outcome_in_flight = false;
+                    match out {
+                        Some(line) => {
+                            e.outcome = Some((reply, line));
+                            e.outcome_retry_at = None;
+                        }
+                        None => e.outcome_retry_at = Some(Instant::now() + trigger::RETRY_AFTER),
                     }
                 }
             }
@@ -341,6 +368,9 @@ async fn run(
                             sub,
                             trigger: Trigger::default(),
                             summary: None,
+                            outcome: None,
+                            outcome_in_flight: false,
+                            outcome_retry_at: None,
                             grew_at: now,
                         },
                     );
@@ -350,6 +380,22 @@ async fn run(
                 };
                 if e.tail.poll(&mut e.transcript).is_ok_and(|grew| grew) {
                     e.grew_at = now;
+                }
+                if let Some(s) = &summarizer
+                    && let Some(reply) = outcome_due(e, slot, SystemTime::now(), now)
+                {
+                    e.outcome_in_flight = true;
+                    let input = OutcomeInput {
+                        project: project_of(&slot.cwd),
+                        task: e.transcript.latest_prompt().map(str::to_owned),
+                        reply: reply.clone(),
+                    };
+                    let (s, tx, id) = (s.clone(), outcome_tx.clone(), *id);
+                    tokio::spawn(async move {
+                        let out = s.summarize_outcome(&input).await;
+                        debug_log(id, "outcome", &out);
+                        let _ = tx.send((id, reply, out.ok()));
+                    });
                 }
                 // Claude Code may write a subagent's meta.json after its transcript.
                 if e.sub.as_ref().is_none_or(|s| s.description.is_none()) {
@@ -373,17 +419,7 @@ async fn run(
                     let (s, tx, id) = (s.clone(), done_tx.clone(), *id);
                     tokio::spawn(async move {
                         let out = s.summarize(&input).await;
-                        if let Ok(path) = std::env::var("AGENT_OFFICE_DEBUG") {
-                            let line =
-                                format!("{id} {:?}\n", out.as_ref().map_err(|e| format!("{e:#}")));
-                            let _ = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(path)
-                                .and_then(|mut f| {
-                                    std::io::Write::write_all(&mut f, line.as_bytes())
-                                });
-                        }
+                        debug_log(id, "task", &out);
                         let _ = tx.send((id, out.ok()));
                     });
                 }
@@ -409,13 +445,54 @@ async fn run(
     }
 }
 
+/// `AGENT_OFFICE_DEBUG`: append each summary result to that file.
+fn debug_log(id: AgentId, kind: &str, out: &anyhow::Result<String>) {
+    let Ok(path) = std::env::var("AGENT_OFFICE_DEBUG") else {
+        return;
+    };
+    let line = format!(
+        "{id} {kind} {:?}\n",
+        out.as_ref().map_err(|e| format!("{e:#}"))
+    );
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
+fn project_of(cwd: &Path) -> String {
+    cwd.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The reply to ask an outcome for now, if any: the agent has stopped (idle
+/// a moment, so the turn's last lines are in) and its last reply has no
+/// outcome yet, none is out, and no failed one is waiting to be retried.
+fn outcome_due(
+    e: &Entry,
+    slot: &pixtuoid_core::AgentSlot,
+    wall: SystemTime,
+    now: Instant,
+) -> Option<String> {
+    let reply = e.transcript.last_reply.as_ref()?;
+    let settled = wall
+        .duration_since(slot.state_started_at)
+        .is_ok_and(|d| d >= trigger::DEBOUNCE);
+    let due = matches!(slot.state, ActivityState::Idle)
+        && slot.exiting_at.is_none()
+        && settled
+        && !e.outcome_in_flight
+        && e.outcome.as_ref().is_none_or(|(r, _)| r != reply)
+        && e.outcome_retry_at.is_none_or(|t| now >= t);
+    due.then(|| reply.clone())
+}
+
 fn summary_input(t: &Transcript, cwd: &Path) -> SummaryInput {
     let n = t.prompts.len();
     SummaryInput {
-        project: cwd
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        project: project_of(cwd),
         latest_prompt: t.latest_prompt().unwrap_or_default().to_owned(),
         earlier_prompts: t
             .prompts
@@ -430,6 +507,11 @@ fn summary_input(t: &Transcript, cwd: &Path) -> SummaryInput {
 
 fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
     let t = &e.transcript;
+    // An outcome read from an earlier reply describes an earlier turn.
+    let outcome = t.last_reply.as_ref().map(|r| match &e.outcome {
+        Some((of, line)) if of == r => (line.clone(), true),
+        _ => (truncate_cells(r, SUMMARY_CELLS), false),
+    });
     let desc = e.sub.as_ref().and_then(|s| s.description.clone());
     let (line, summarized) = match (desc, &e.summary) {
         (Some(d), _) => (Some(d), true),
@@ -450,6 +532,9 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         phase: t.phase,
         stuck: stuck(t, working, now.duration_since(e.grew_at)),
         turn_started: t.turn_started,
+        outcome: outcome.as_ref().map(|(o, _)| o.clone()),
+        outcome_summarized: outcome.is_some_and(|(_, s)| s),
+        reply: t.last_reply.clone(),
     }
 }
 
@@ -558,16 +643,109 @@ mod tests {
         assert_eq!(stuck(&t, true, Duration::ZERO), Some(Stuck::Failing(3)));
     }
 
-    #[test]
-    fn without_a_summary_the_line_is_the_raw_prompt_marked_unsummarized() {
-        let mut e = Entry {
+    fn entry() -> Entry {
+        Entry {
             tail: Tail::new(PathBuf::new()),
             transcript: Transcript::default(),
             sub: None,
             trigger: Trigger::default(),
             summary: None,
+            outcome: None,
+            outcome_in_flight: false,
+            outcome_retry_at: None,
             grew_at: Instant::now(),
-        };
+        }
+    }
+
+    fn idle_slot(since: SystemTime) -> pixtuoid_core::AgentSlot {
+        let mut scene = SceneState::uniform(8);
+        let id = AgentId::from_parts(CC_SOURCE, "s");
+        pixtuoid_core::Reducer::new().apply(
+            &mut scene,
+            pixtuoid_core::AgentEvent::SessionStart {
+                agent_id: id,
+                source: CC_SOURCE.into(),
+                session_id: "s".into(),
+                cwd: "/repo".into(),
+                parent_id: None,
+            },
+            since,
+            pixtuoid_core::Transport::Hook,
+        );
+        let mut slot = scene.agents.remove(&id).unwrap();
+        slot.state = ActivityState::Idle;
+        slot.state_started_at = since;
+        slot
+    }
+
+    /// One request per finished turn: asked once the agent has stopped and
+    /// its last lines are in, never while it works or for a reply already
+    /// read, and a failed one waits before it is tried again.
+    #[test]
+    fn an_outcome_is_asked_once_per_reply_after_the_agent_stops() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = Instant::now();
+        let mut e = entry();
+        let mut slot = idle_slot(t0);
+        let settled = t0 + trigger::DEBOUNCE;
+        assert_eq!(outcome_due(&e, &slot, settled, now), None, "no reply yet");
+        e.transcript.last_reply = Some("已修好".into());
+        assert_eq!(
+            outcome_due(&e, &slot, t0 + Duration::from_secs(1), now),
+            None,
+            "its last lines may still be landing"
+        );
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now).as_deref(),
+            Some("已修好")
+        );
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(outcome_due(&e, &slot, settled, now), None, "still working");
+        slot.state = ActivityState::Idle;
+        e.outcome_in_flight = true;
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now),
+            None,
+            "one out already"
+        );
+        e.outcome_in_flight = false;
+        e.outcome = Some(("已修好".into(), "登录页已修好".into()));
+        assert_eq!(outcome_due(&e, &slot, settled, now), None, "already read");
+        e.transcript.last_reply = Some("要删旧接口吗？".into());
+        assert!(
+            outcome_due(&e, &slot, settled, now).is_some(),
+            "a new turn's reply"
+        );
+        e.outcome_retry_at = Some(now + Duration::from_secs(30));
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now),
+            None,
+            "waits after a failure"
+        );
+        assert!(outcome_due(&e, &slot, settled, now + Duration::from_secs(30)).is_some());
+    }
+
+    /// An outcome read from an earlier reply describes an earlier turn: the
+    /// card falls back to the new reply rather than show a stale result.
+    #[test]
+    fn an_outcome_shows_only_for_the_reply_it_was_read_from() {
+        let mut e = entry();
+        e.transcript.last_reply = Some("已修好，补了测试".into());
+        e.outcome = Some(("已修好，补了测试".into(), "登录页已修好".into()));
+        let v = view(&e, false, Instant::now());
+        assert_eq!(v.outcome.as_deref(), Some("登录页已修好"));
+        assert!(v.outcome_summarized);
+        e.transcript.last_reply = Some("要删旧接口吗？".into());
+        let v = view(&e, false, Instant::now());
+        assert_eq!(v.outcome.as_deref(), Some("要删旧接口吗？"));
+        assert!(!v.outcome_summarized);
+        e.transcript.last_reply = None;
+        assert_eq!(view(&e, false, Instant::now()).outcome, None);
+    }
+
+    #[test]
+    fn without_a_summary_the_line_is_the_raw_prompt_marked_unsummarized() {
+        let mut e = entry();
         e.transcript
             .prompts
             .push_back("请帮我把登录页的报错修好然后补一个回归测试再部署".into());
