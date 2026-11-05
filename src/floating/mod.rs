@@ -150,6 +150,8 @@ struct Win {
     cursor_in: bool,
     /// The sign clicked for what its zone is for, by its text, and when.
     about: Option<(String, Instant)>,
+    /// The role picker `p` opens is showing: the next key picks or closes.
+    picker: bool,
     /// What a click last got out of the office, and when.
     reaction: Option<(Reaction, Instant)>,
     /// How many times each idle worker has been clicked, so it answers
@@ -393,6 +395,17 @@ impl ApplicationHandler for Floating<'_> {
                 win.next_frame = Instant::now();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // Open, the picker takes the next key whatever it is: a
+                // digit picks, anything else closes it.
+                if std::mem::take(&mut win.picker) {
+                    if let Key::Character(c) = event.logical_key.as_ref()
+                        && let Some(role) = picked_role(c)
+                    {
+                        win.core.act(Action::Dispatch(role), &mut win.office);
+                    }
+                    win.next_frame = Instant::now();
+                    return;
+                }
                 let action = match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => Action::Back,
                     Key::Named(NamedKey::ArrowDown) => Action::Down,
@@ -410,6 +423,11 @@ impl ApplicationHandler for Floating<'_> {
                     Key::Character("o") => Action::Open,
                     Key::Character("w") => Action::OpenWaiting,
                     Key::Character("n") => Action::OpenNext,
+                    Key::Character("p") => {
+                        win.picker = true;
+                        win.next_frame = Instant::now();
+                        return;
+                    }
                     Key::Character("t") => {
                         win.on_top = !win.on_top;
                         win.window.set_window_level(if win.on_top {
@@ -538,6 +556,7 @@ impl Floating<'_> {
             pointer: false,
             cursor_in: false,
             about: None,
+            picker: false,
             reaction: None,
             pokes: HashMap::new(),
             replay: None,
@@ -749,6 +768,10 @@ impl Win {
                 paint_about(&mut canvas, &mut self.faces, sign, (ow, oh), sf);
             }
             sign_hits = signs.iter().map(|s| (s.area, s.text.clone())).collect();
+        }
+        if self.picker {
+            let selected = self.core.ui.selected.is_some();
+            paint_picker(&mut canvas, &mut self.faces, selected, (ow, oh), sf);
         }
 
         // The cards and footer are laid out as cells, then set in the readable
@@ -2018,6 +2041,77 @@ fn paint_about(
     }
 }
 
+/// The role a key picks in the picker: 1–8 the roster in order, 0 the PM,
+/// who sorts out who else is needed.
+fn picked_role(key: &str) -> Option<Role> {
+    let n: usize = key.parse().ok()?;
+    match n {
+        0 => Some(Role::Pm),
+        _ => crate::roles::ROSTER
+            .get(n - 1)
+            .map(|p| p.role)
+            .filter(|r| *r != Role::Pm),
+    }
+}
+
+/// The picker's lines, as `(key, role)`, PM last.
+fn picker_rows() -> Vec<(char, Role)> {
+    ('1'..='9')
+        .filter_map(|k| Some((k, picked_role(&k.to_string())?)))
+        .chain([('0', Role::Pm)])
+        .collect()
+}
+
+/// The role picker, centred over the office: each role's key, its chip and
+/// its post, under what picking one does.
+fn paint_picker(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    selected: bool,
+    bounds: (u32, u32),
+    scale_factor: f64,
+) {
+    let px = pt_px(ABOUT_PT, scale_factor);
+    let pad = 2 * tag_pad(scale_factor);
+    let cell = faces.cell_w(px).max(1);
+    let head = if selected {
+        "派活：在选中小人的仓库开新会话（其他键取消）"
+    } else {
+        "派活：先选中一个小人，新会话开在它的仓库里"
+    };
+    let rows: Vec<(char, Role, String)> = picker_rows()
+        .into_iter()
+        .map(|(k, r)| {
+            let post = r.post();
+            let what = if r == Role::Pm { "（自动分工）" } else { "" };
+            (k, r, format!("{} {}{what}", post.glyph, post.zh))
+        })
+        .collect();
+    let line_h = px + px / 3;
+    let widest = rows
+        .iter()
+        .map(|(_, _, t)| 2 + Faces::cells(t))
+        .chain([Faces::cells(head)])
+        .max()
+        .unwrap_or(0);
+    let w = widest * cell + 2 * pad;
+    let h = u32::try_from(rows.len() + 1).unwrap_or(0) * line_h + 2 * pad;
+    let x = (i64::from(bounds.0) - i64::from(w)).max(0) / 2;
+    let y = (i64::from(bounds.1) - i64::from(h)).max(0) / 2;
+    canvas.fill(x - 1, y - 1, w + 2, h + 2, ABOUT_EDGE);
+    canvas.fill(x, y, w, h, ABOUT_BG);
+    let ascent = i64::from(faces.ascent(px));
+    let top = |i: usize| y + i64::from(pad) + i64::try_from(i).unwrap_or(0) * i64::from(line_h);
+    faces.draw(canvas, x + i64::from(pad), top(0) + ascent, head, TASK, px);
+    for (i, (key, role, text)) in rows.iter().enumerate() {
+        let (tx, ty) = (x + i64::from(pad), top(i + 1));
+        faces.draw(canvas, tx, ty + ascent, &key.to_string(), TEXT, px);
+        let chip_x = tx + i64::from(2 * cell);
+        canvas.fill(chip_x - 1, ty, 2 * cell + 2, px + px / 6, to_u32(role.post().ink));
+        faces.draw(canvas, chip_x, ty + ascent, text, TEXT, px);
+    }
+}
+
 /// The door signs among `text`'s, at `d` art pixels a layout unit and `u`
 /// window pixels an art pixel.
 fn door_signs(
@@ -2543,5 +2637,21 @@ mod tests {
             assert!(w.badge.w > p.badge.w, "the chip widens the badge");
         }
         assert!(!worn[0].badge.meets(&worn[1].badge), "neighbours step clear");
+    }
+
+    /// The keys follow the roster as the picker lists it, and 0 is the PM:
+    /// a key that picked another role than its line says would start the
+    /// wrong session.
+    #[test]
+    fn picker_digits_follow_the_roster_and_0_is_the_pm() {
+        let rows = picker_rows();
+        assert_eq!(rows.len(), crate::roles::ROSTER.len());
+        assert_eq!(rows.last(), Some(&('0', Role::Pm)));
+        for (key, role) in &rows {
+            assert_eq!(picked_role(&key.to_string()), Some(*role));
+        }
+        assert_eq!(picked_role("1"), Some(crate::roles::ROSTER[0].role));
+        assert_eq!(picked_role("9"), None, "only eight roles before the PM");
+        assert_eq!(picked_role("x"), None);
     }
 }

@@ -59,6 +59,7 @@ fn main() -> Result<()> {
         }
         Some(&"doctor") => return doctor::run(),
         Some(&"roles") => return roles::cli(&args[1..]),
+        Some(&"dispatch") => return roles::dispatch_cli(&args[1..]),
         _ => {}
     }
     let socket = hook::socket_path();

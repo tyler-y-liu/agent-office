@@ -40,6 +40,8 @@ pub enum Action {
     OpenWaiting,
     /// Open the session at the head of the waiting line.
     OpenNext,
+    /// Start a new session in this role, in the selected agent's repository.
+    Dispatch(crate::roles::Role),
 }
 
 /// The footer's warning while Claude Code's hooks are out: short, since it
@@ -501,6 +503,22 @@ impl Core {
                 }
                 None => self.note("先选中一个 agent", Tone::Failed),
             },
+            Action::Dispatch(role) => {
+                let dir = self
+                    .ui
+                    .selected
+                    .and_then(|id| self.scene().agents.get(&id).map(|s| s.cwd.clone()));
+                match dir {
+                    None => self.note("先选中一个小人：新会话开在它的仓库里", Tone::Failed),
+                    Some(dir) => match crate::roles::dispatch(role, &dir, "", false) {
+                        Ok(_) => self.note(
+                            &format!("已在 Claude 开好「{}」的新会话，写上任务发送", role.post().zh),
+                            Tone::Ok,
+                        ),
+                        Err(e) => self.note(&format!("派活失败：{e}"), Tone::Failed),
+                    },
+                }
+            }
             Action::OpenWaiting => {
                 self.note_result(jump::open_url(jump::NEEDS_INPUT).map(|()| "已在 Claude 打开"))
             }
@@ -576,6 +594,7 @@ pub fn footer(
         ("o", "打开会话", 0),
         ("w", "等你的", 4),
         ("n", "处理下一个", 1),
+        ("p", "派活", 5),
         ("r", "重新总结", 7),
         ("b", labels, 6),
     ];

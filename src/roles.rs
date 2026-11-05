@@ -397,6 +397,222 @@ pub fn doctor_line() -> (bool, String) {
     )
 }
 
+/// The prompt that starts a session in `role`: the marker the office reads
+/// its post from, then the role's card when the session will not load the
+/// agent itself (the desktop app takes no agent), then the task. Without a
+/// task it says to ask for one, so a link sent as it is still makes sense.
+pub fn prompt(role: Role, task: &str, with_card: bool) -> String {
+    let post = role.post();
+    let task = task.trim();
+    let task = if task.is_empty() { NO_TASK } else { task };
+    let card = if with_card {
+        format!("\n{}\n", card(role))
+    } else {
+        String::new()
+    };
+    format!("[office:{}] 角色：{}\n{card}\n{TASK_HEAD}{task}", post.id, post.zh)
+}
+
+/// The most a `claude://code/new` prompt may hold: the desktop app cuts
+/// one longer to this many UTF-16 units, and a cut brief is worse than none.
+const DESKTOP_PROMPT_MAX: usize = 14_336;
+
+/// RFC 3986 percent-encoding of everything but the unreserved characters:
+/// a `+` for a space would reach the app as a plus.
+fn encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The link that opens the desktop app's new session in `dir` with
+/// `prompt` filled in for the user to send.
+pub fn desktop_link(dir: &Path, prompt: &str) -> Result<String> {
+    let units = prompt.encode_utf16().count();
+    anyhow::ensure!(
+        units <= DESKTOP_PROMPT_MAX,
+        "任务太长（{units} 字符，桌面 app 最多 {DESKTOP_PROMPT_MAX}）：加 --terminal 在终端开"
+    );
+    Ok(format!(
+        "claude://code/new?folder={}&q={}",
+        encode(&dir.to_string_lossy()),
+        encode(prompt)
+    ))
+}
+
+/// The main checkout of the repository `dir` is in: a session dispatched
+/// from a worktree's figure must not edit that worktree under its owner.
+/// `dir` itself when it is in no repository.
+pub fn repo_root(dir: &Path) -> PathBuf {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output();
+    let common = match out {
+        Ok(o) if o.status.success() => PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()),
+        _ => return dir.to_path_buf(),
+    };
+    match common.file_name() {
+        Some(n) if n == ".git" => common.parent().map_or(dir.to_path_buf(), Path::to_path_buf),
+        // A bare repository has no checkout to send anyone to.
+        _ => dir.to_path_buf(),
+    }
+}
+
+/// What `agent-office dispatch` was asked for.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Dispatch {
+    pub role: Role,
+    pub dir: Option<PathBuf>,
+    pub task: String,
+    pub terminal: bool,
+}
+
+fn roster_ids() -> String {
+    ROSTER.iter().map(|p| p.id).collect::<Vec<_>>().join("、")
+}
+
+const DISPATCH_USAGE: &str =
+    "用法：agent-office dispatch (--role <角色> | --auto) [--dir <目录>] [--terminal] [任务…]";
+
+/// `dispatch`'s arguments: a role or `--auto` (the PM), and the words left
+/// over are the task.
+pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
+    let (mut role, mut dir, mut terminal, mut words) = (None, None, false, Vec::new());
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--role" => {
+                let id = it.next().context(DISPATCH_USAGE)?;
+                let r = Role::of_id(id).with_context(|| {
+                    format!("没有 {id} 这个角色，可选：{}", roster_ids())
+                })?;
+                anyhow::ensure!(role.is_none(), "--role 和 --auto 只能选一个");
+                role = Some(r);
+            }
+            "--auto" => {
+                anyhow::ensure!(role.is_none(), "--role 和 --auto 只能选一个");
+                role = Some(Role::Pm);
+            }
+            "--dir" => dir = Some(PathBuf::from(it.next().context(DISPATCH_USAGE)?)),
+            "--terminal" => terminal = true,
+            w => words.push(w),
+        }
+    }
+    let role = role.with_context(|| format!("{DISPATCH_USAGE}\n角色：{}", roster_ids()))?;
+    Ok(Dispatch {
+        role,
+        dir,
+        task: words.join(" "),
+        terminal,
+    })
+}
+
+/// Why `role` cannot be dispatched yet, if it cannot: the PM hands work to
+/// the other roles as agents, which must be installed; a terminal session
+/// loads its own role as one.
+pub fn not_ready(role: Role, terminal: bool) -> Option<String> {
+    let dir = agents_dir().ok()?;
+    let states = status(&dir).ok()?;
+    let missing = |r: Role| {
+        states
+            .iter()
+            .any(|(p, s)| p.role == r && *s == State::Missing)
+    };
+    let needed: Vec<Role> = if role == Role::Pm {
+        ROSTER.iter().map(|p| p.role).collect()
+    } else if terminal {
+        vec![role]
+    } else {
+        Vec::new()
+    };
+    needed
+        .into_iter()
+        .any(missing)
+        .then(|| "角色还没装：先运行 agent-office roles install".to_owned())
+}
+
+/// The arguments that start `claude` as `role` on `task`; the agent file
+/// brings the brief, so the prompt carries only the marker and the task.
+pub fn terminal_args(role: Role, task: &str) -> Vec<String> {
+    let post = role.post();
+    let name = format!("{}·{}", post.glyph, crate::text::truncate_cells(task.trim(), 24));
+    vec![
+        "--agent".into(),
+        role.agent_name(),
+        "-n".into(),
+        name,
+        prompt(role, task, false),
+    ]
+}
+
+/// Where `claude` is: on PATH, else where its installers put it. A shell
+/// alias or function of the same name is not seen from here.
+fn claude_bin() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|d| d.join("claude"));
+    let known = [".claude/local/claude", ".local/bin/claude"]
+        .into_iter()
+        .filter_map(|rel| home.as_ref().map(|h| h.join(rel)))
+        .chain(["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].map(PathBuf::from));
+    on_path.chain(known).find(|p| p.is_file())
+}
+
+/// Start a session as `role` on `task` in `dir`: in the desktop app, its new
+/// session opened with the prompt filled in; or here in the terminal.
+pub fn dispatch(role: Role, dir: &Path, task: &str, terminal: bool) -> Result<String> {
+    if let Some(why) = not_ready(role, terminal) {
+        anyhow::bail!(why);
+    }
+    let dir = repo_root(dir);
+    if terminal {
+        let bin = claude_bin().context("找不到 claude 命令：装好 Claude Code 或去掉 --terminal")?;
+        std::env::set_current_dir(&dir)
+            .with_context(|| format!("进不了 {}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new(&bin)
+                .args(terminal_args(role, task))
+                .exec();
+            return Err(err).with_context(|| format!("启动 {} 失败", bin.display()));
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("--terminal 只支持 macOS / Linux");
+    }
+    let link = desktop_link(&dir, &prompt(role, task, true))?;
+    crate::jump::open_url(&link).map_err(anyhow::Error::msg)?;
+    Ok(format!(
+        "已在 Claude 打开新会话（{}，{}），确认后发送",
+        role.post().zh,
+        dir.display()
+    ))
+}
+
+/// `agent-office dispatch`.
+pub fn dispatch_cli(args: &[&str]) -> Result<()> {
+    let d = parse_dispatch(args)?;
+    let dir = match d.dir {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("没有 {} 这个目录", dir.display()))?;
+    println!("{}", dispatch(d.role, &dir, &d.task, d.terminal)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,5 +765,112 @@ mod tests {
         remove(&dir, true).unwrap();
         assert!(qa.exists() && !ux.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The desktop app reads the link's query as form data would not: a
+    /// `+` stays a plus, and a raw `&` or `#` would cut the prompt short.
+    #[test]
+    fn a_dispatch_link_is_percent_encoded_and_never_uses_plus() {
+        let link = desktop_link(Path::new("/tmp/my repo"), "a b&c#d\n任务+").unwrap();
+        assert_eq!(
+            link,
+            "claude://code/new?folder=%2Ftmp%2Fmy%20repo&q=a%20b%26c%23d%0A%E4%BB%BB%E5%8A%A1%2B"
+        );
+    }
+
+    /// The app would cut a longer prompt silently, losing the task at its
+    /// end: refused instead, with the way round it.
+    #[test]
+    fn a_prompt_past_the_apps_limit_is_refused_not_cut() {
+        let long = "长".repeat(DESKTOP_PROMPT_MAX + 1);
+        let err = desktop_link(Path::new("/tmp"), &long).unwrap_err();
+        assert!(err.to_string().contains("--terminal"));
+    }
+
+    #[test]
+    fn every_role_card_leaves_room_for_a_long_task() {
+        let task = "改".repeat(2000);
+        for post in ROSTER {
+            assert!(desktop_link(Path::new("/tmp"), &prompt(post.role, &task, true)).is_ok());
+        }
+    }
+
+    /// What dispatch writes is what the office reads back: a dispatched
+    /// session wears its role and shows its task, not the card.
+    #[test]
+    fn a_dispatched_prompt_reads_back_as_its_role_and_task() {
+        for with_card in [true, false] {
+            let mut t = crate::tasks::extract::Transcript::default();
+            let line = serde_json::json!({"type":"user","message":{"role":"user",
+                "content": prompt(Role::Frontend, "设置页加暗色模式", with_card)}});
+            t.feed(&line.to_string());
+            assert_eq!(t.role, Some(Role::Frontend));
+            assert_eq!(t.latest_prompt(), Some("设置页加暗色模式"));
+        }
+        let blank = prompt(Role::Qa, "  ", true);
+        let (role, rest) = parse_marker(&blank).unwrap();
+        assert_eq!((role, task_of(rest)), (Role::Qa, None), "no task is no task");
+    }
+
+    #[test]
+    fn dispatch_args_take_one_role_and_the_rest_is_the_task() {
+        let d = parse_dispatch(&["--role", "qa", "跑", "测试", "--dir", "/x"]).unwrap();
+        assert_eq!(
+            d,
+            Dispatch {
+                role: Role::Qa,
+                dir: Some("/x".into()),
+                task: "跑 测试".into(),
+                terminal: false
+            }
+        );
+        let auto = parse_dispatch(&["--auto", "--terminal", "做个功能"]).unwrap();
+        assert_eq!((auto.role, auto.terminal), (Role::Pm, true));
+        assert!(parse_dispatch(&["--role", "qa", "--auto"]).is_err());
+        let unknown = parse_dispatch(&["--role", "tester"]).unwrap_err().to_string();
+        assert!(unknown.contains("qa") && unknown.contains("frontend"), "{unknown}");
+        assert!(parse_dispatch(&["做个功能"]).is_err(), "no role, no guess");
+    }
+
+    /// A terminal session loads the role as an agent, so the office must
+    /// still see the marker (the agent setting leaves no trace) and the
+    /// prompt need not repeat the brief.
+    #[test]
+    fn a_terminal_launch_names_the_agent_and_marks_the_prompt() {
+        let args = terminal_args(Role::Reviewer, "审一下登录改动");
+        assert_eq!(&args[..2], ["--agent", "office-reviewer"]);
+        assert_eq!(args[2], "-n");
+        assert!(args[3].starts_with("审·"));
+        let p = args.last().unwrap();
+        assert_eq!(parse_marker(p).map(|(r, rest)| (r, task_of(rest))), Some((Role::Reviewer, Some("审一下登录改动"))));
+        assert!(!p.contains(card(Role::Reviewer)));
+    }
+
+    /// Two sessions in one worktree overwrite each other's edits: a figure
+    /// in a worktree dispatches to its repository's main checkout.
+    #[test]
+    fn a_worktree_dispatches_into_its_repository() {
+        let root = temp_dir("repo");
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(ok, "git {args:?}");
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]);
+        let wt = root.join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        let main = main.canonicalize().unwrap();
+        assert_eq!(repo_root(&wt), main);
+        assert_eq!(repo_root(&main), main);
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(repo_root(&plain), plain);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
