@@ -235,15 +235,27 @@ fn office_px(w: u32, h: u32, g: Grid) -> (u32, u32) {
     )
 }
 
-fn fit_for(pack: &OfficeArt, w: u32, h: u32) -> PixelFit {
-    PixelFit::at_least_density(
-        office_scale(h),
-        pack.max_density_variant(),
-        Size {
-            w: u16::try_from(w).unwrap_or(u16::MAX),
-            h: u16::try_from(h).unwrap_or(u16::MAX),
-        },
-    )
+/// Units tall the office may run at the scale it is shown at before a new
+/// scale is taken. The scale steps by the art's density (4, 8, 12...), so a
+/// step halves or doubles the office: without this band a window an edge
+/// away from a step flipped between two offices.
+const KEEP_SCALE_UNITS: std::ops::RangeInclusive<u16> = 110..=300;
+
+/// The fit of a `w`×`h` office, `shown` the one on screen: its scale while
+/// it still lays out within [`KEEP_SCALE_UNITS`], else this size's own.
+fn fit_for(pack: &OfficeArt, w: u32, h: u32, shown: Option<PixelFit>) -> PixelFit {
+    let px = Size {
+        w: u16::try_from(w).unwrap_or(u16::MAX),
+        h: u16::try_from(h).unwrap_or(u16::MAX),
+    };
+    let min = pixtuoid_scene::layout::min_layout_size();
+    let held = shown.map(|f| f.over(px)).filter(|f| {
+        let l = f.logical();
+        l.w >= min.w && l.h >= min.h && KEEP_SCALE_UNITS.contains(&l.h)
+    });
+    held.unwrap_or_else(|| {
+        PixelFit::at_least_density(office_scale(h), pack.max_density_variant(), px)
+    })
 }
 
 impl ApplicationHandler for Floating<'_> {
@@ -373,7 +385,7 @@ impl Floating<'_> {
         // agent arriving before it lands on a desk that exists.
         let size = window.inner_size();
         let (ow, oh) = office_px(size.width, size.height, g);
-        let logical = fit_for(&self.pack, ow, oh).logical();
+        let logical = fit_for(&self.pack, ow, oh, None).logical();
         Ok(Win {
             window,
             surface,
@@ -419,7 +431,8 @@ impl Win {
         canvas.reset(w.get(), h.get(), bg);
         let frame = self.core.frame();
 
-        let fit = self.hold.fit(fit_for(pack, ow, oh), Instant::now());
+        let want = fit_for(pack, ow, oh, self.hold.shown);
+        let fit = self.hold.fit(want, Instant::now());
         if self.office.caps_size != Some(fit.logical()) {
             self.office.caps_size = Some(fit.logical());
             crate::pipeline::store_caps(
@@ -1292,11 +1305,15 @@ mod tests {
     #[test]
     fn a_resize_holds_the_office_until_the_window_settles() {
         let pack = pixtuoid_scene::pack::load_bundled_pack().expect("bundled pack");
-        let fit = |w, h| fit_for(&pack, w, h);
+        let fit = |w, h| fit_for(&pack, w, h, None);
         let mut hold = ResizeHold::default();
         let t0 = Instant::now();
         let before = fit(1500, 1100);
-        assert_eq!(hold.fit(before, t0), before, "the first frame takes its own");
+        assert_eq!(
+            hold.fit(before, t0),
+            before,
+            "the first frame takes its own"
+        );
 
         let step = Duration::from_millis(16);
         let mut now = t0;
@@ -1316,6 +1333,45 @@ mod tests {
             hold.fit(fit(1200, 900), done + step),
             fit(1200, 900),
             "no resize since, so a new size is taken at once"
+        );
+    }
+
+    /// A height near a scale step keeps the office shown, whichever way it
+    /// came: the step halves or doubles the office, so a window resting by
+    /// it would flip between two layouts on an edge's nudge. Well past the
+    /// band the scale steps, so the art neither shrinks to specks nor grows
+    /// to fill the window with a desk.
+    #[test]
+    fn a_height_near_a_scale_step_keeps_the_scale_shown() {
+        let pack = pixtuoid_scene::pack::load_bundled_pack().expect("bundled pack");
+        let scale = |f: PixelFit| f.scale().get();
+        let (small, big) = (
+            fit_for(&pack, 1300, 900, None),
+            fit_for(&pack, 1300, 1300, None),
+        );
+        assert!(
+            scale(small) < scale(big),
+            "two scales either side of a step"
+        );
+
+        let step = (900..1300)
+            .find(|&h| scale(fit_for(&pack, 1300, h, None)) != scale(small))
+            .expect("a step between them");
+        for h in [step - 40, step, step + 40] {
+            let up = fit_for(&pack, 1300, h, Some(small));
+            let down = fit_for(&pack, 1300, h, Some(big));
+            assert_eq!(scale(up), scale(small), "growing to {h}");
+            assert_eq!(scale(down), scale(big), "shrinking to {h}");
+            assert_eq!(up.logical().h, u16::try_from(h).unwrap() / scale(small));
+        }
+
+        assert_eq!(
+            scale(fit_for(&pack, 1300, 2400, Some(small))),
+            scale(fit_for(&pack, 1300, 2400, None))
+        );
+        assert_eq!(
+            scale(fit_for(&pack, 1300, 700, Some(big))),
+            scale(fit_for(&pack, 1300, 700, None))
         );
     }
 
