@@ -1644,3 +1644,142 @@ fn reconcile_connected_evicts_a_blank_source_gate_slipper() {
         "a blank-source gate-slipper is evicted within one reconcile tick"
     );
 }
+
+// agent-office: floors open only for sessions, and close once they can.
+
+/// Seat `id` (`parent` its parent) working in `repo` at `now`.
+fn seat(
+    r: &mut Reducer,
+    scene: &mut SceneState,
+    id: AgentId,
+    repo: &str,
+    parent: Option<AgentId>,
+    now: SystemTime,
+) {
+    r.apply(
+        scene,
+        AgentEvent::SessionStart {
+            agent_id: id,
+            source: "claude-code".into(),
+            session_id: format!("{id:?}").into(),
+            cwd: PathBuf::from(repo),
+            parent_id: parent,
+        },
+        now,
+        Transport::Hook,
+    );
+}
+
+fn caps(floors: &[usize]) -> [usize; pixtuoid_core::state::MAX_FLOORS] {
+    let mut c = [0; pixtuoid_core::state::MAX_FLOORS];
+    c[..floors.len()].copy_from_slice(floors);
+    c
+}
+
+/// Many sub-agents are never drawn (a brief one is a "+N" on its parent's
+/// badge), so a burst of them that opened a floor left the ground floor
+/// looking empty and the next session alone upstairs.
+#[test]
+fn a_sub_agent_never_opens_a_floor() {
+    let mut scene = SceneState::new(caps(&[2, 2]));
+    let mut r = Reducer::new();
+    let now = SystemTime::now();
+    let parent = AgentId::from_parts("claude-code", "parent");
+    let other = AgentId::from_parts("claude-code", "other");
+    let sub = AgentId::from_parts("claude-code", "sub");
+    seat(&mut r, &mut scene, parent, "/repo-a", None, now);
+    seat(&mut r, &mut scene, other, "/repo-b", None, now);
+    seat(&mut r, &mut scene, sub, "/repo-a", Some(parent), now);
+
+    assert!(
+        !scene.agents.contains_key(&sub),
+        "with the ground floor full the sub-agent waits unseated"
+    );
+    assert_eq!(scene.floors_in_use(), 1, "and no second floor opens for it");
+}
+
+/// A sub-agent sits with its parent's floor, so the team is on one screen;
+/// with that floor full it may take a floor already open, never a new one.
+#[test]
+fn a_sub_agent_sits_on_its_parents_floor_else_an_open_one() {
+    let mut scene = SceneState::new(caps(&[2, 2, 2]));
+    let mut r = Reducer::new();
+    let now = SystemTime::now();
+    let a = AgentId::from_parts("claude-code", "a");
+    let b = AgentId::from_parts("claude-code", "b");
+    let up = AgentId::from_parts("claude-code", "up");
+    seat(&mut r, &mut scene, a, "/repo-a", None, now);
+    seat(&mut r, &mut scene, b, "/repo-b", None, now);
+    seat(&mut r, &mut scene, up, "/repo-c", None, now);
+    assert_eq!(scene.agents[&up].floor_idx, 1, "the ground floor is full");
+
+    let up_sub = AgentId::from_parts("claude-code", "up-sub");
+    seat(&mut r, &mut scene, up_sub, "/repo-c", Some(up), now);
+    assert_eq!(scene.agents[&up_sub].floor_idx, 1, "beside its parent");
+
+    // Both open floors are full now: a's sub must not open the third.
+    let a_sub = AgentId::from_parts("claude-code", "a-sub");
+    seat(&mut r, &mut scene, a_sub, "/repo-a", Some(a), now);
+    assert!(!scene.agents.contains_key(&a_sub));
+    assert_eq!(scene.floors_in_use(), 2);
+
+    // A session still opens one: it is a figure that needs a desk.
+    let c = AgentId::from_parts("claude-code", "c");
+    seat(&mut r, &mut scene, c, "/repo-d", None, now);
+    assert_eq!(scene.agents[&c].floor_idx, 2);
+}
+
+/// A seat was frozen at allocation, so one who overflowed upstairs kept a
+/// floor open alone after the ground floor emptied.
+#[test]
+fn an_idle_agent_upstairs_moves_down_once_a_lower_desk_frees() {
+    let mut scene = SceneState::new(caps(&[1, 1]));
+    let mut r = Reducer::new();
+    let now = SystemTime::now();
+    let a = AgentId::from_parts("claude-code", "a");
+    let b = AgentId::from_parts("claude-code", "b");
+    seat(&mut r, &mut scene, a, "/repo-a", None, now);
+    seat(&mut r, &mut scene, b, "/repo-b", None, now);
+    assert_eq!(scene.agents[&b].floor_idx, 1);
+
+    // b is at work: it stays where you may be watching it.
+    scene.agents.remove(&a);
+    scene.agents.get_mut(&b).unwrap().state = ActivityState::Running { item: None };
+    r.tick(&mut scene, now);
+    assert_eq!(scene.agents[&b].floor_idx, 1, "a working agent is not moved");
+
+    scene.agents.get_mut(&b).unwrap().state = ActivityState::Idle;
+    r.tick(&mut scene, now);
+    let slot = &scene.agents[&b];
+    assert_eq!(slot.floor_idx, 0, "idle, it takes the freed ground-floor desk");
+    assert_eq!(slot.desk_index, GlobalDeskIndex(0));
+    assert_eq!(scene.floors_in_use(), 1, "and the second floor closes");
+}
+
+/// Moving down must not split a team: a sub-agent keeps its parent's floor,
+/// and a parent waits for its sub-agents before it moves.
+#[test]
+fn moving_down_keeps_a_team_on_one_floor() {
+    let mut scene = SceneState::new(caps(&[2, 2]));
+    let mut r = Reducer::new();
+    let now = SystemTime::now();
+    let a = AgentId::from_parts("claude-code", "a");
+    let b = AgentId::from_parts("claude-code", "b");
+    let up = AgentId::from_parts("claude-code", "up");
+    let sub = AgentId::from_parts("claude-code", "up-sub");
+    seat(&mut r, &mut scene, a, "/repo-a", None, now);
+    seat(&mut r, &mut scene, b, "/repo-b", None, now);
+    seat(&mut r, &mut scene, up, "/repo-c", None, now);
+    seat(&mut r, &mut scene, sub, "/repo-c", Some(up), now);
+    assert_eq!(scene.agents[&sub].floor_idx, 1);
+
+    scene.agents.remove(&a);
+    scene.agents.remove(&b);
+    r.tick(&mut scene, now);
+    assert_eq!(scene.agents[&up].floor_idx, 1, "the parent waits for its sub-agent");
+    assert_eq!(scene.agents[&sub].floor_idx, 1, "the sub-agent stays beside it");
+
+    scene.agents.remove(&sub);
+    r.tick(&mut scene, now);
+    assert_eq!(scene.agents[&up].floor_idx, 0, "alone, the parent moves down");
+}
