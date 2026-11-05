@@ -31,10 +31,22 @@ pub(crate) enum Screen {
     Lit {
         glow: pixtuoid_core::sprite::Rgb,
         scan: u16,
+        /// agent-office: the picture its occupant's phase puts on the glass in
+        /// place of the scanline, at this step of its animation.
+        show: Option<(crate::desk_show::DeskShow, u8)>,
     },
 }
 
 impl Screen {
+    /// agent-office: a lit screen showing `show` instead of its scanline; any
+    /// other screen as it is.
+    pub(super) fn with_show(self, show: Option<(crate::desk_show::DeskShow, u8)>) -> Self {
+        match self {
+            Self::Lit { glow, scan, .. } => Self::Lit { glow, scan, show },
+            other => other,
+        }
+    }
+
     /// A desk's screen: lit by `glow` with its scanline on `scan`, else
     /// standing by at `idle` ([`crate::lighting::screen_idle`]) in `theme`'s
     /// idle tint, else dark.
@@ -45,7 +57,11 @@ impl Screen {
         theme: &Theme,
     ) -> Self {
         if let Some(glow) = glow {
-            return Self::Lit { glow, scan };
+            return Self::Lit {
+                glow,
+                scan,
+                show: None,
+            };
         }
         let share = idle / crate::lighting::SCREEN_IDLE_MAX;
         let stops = (share.clamp(0.0, 1.0) * f32::from(STANDBY_STOPS)).round() as u8;
