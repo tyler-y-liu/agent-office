@@ -429,10 +429,27 @@ fn flap_roll(
     segs
 }
 
+static PERSONAS_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// agent-office: keep L2 on the tally, or let it alternate with the persona
+/// lines again. The floating window says who waits in readable text, where
+/// the board's art font is too small to read.
+pub fn set_personas_shown(shown: bool) {
+    PERSONAS_HIDDEN.store(!shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// agent-office: whether L2 alternates with the persona lines.
+fn personas_shown() -> bool {
+    !PERSONAS_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// L2 at `now_ms` — see [`FLAP_HALF_MS`] for the timeline.
 fn board_mood_at(counts: StateCounts, now_ms: u64) -> Vec<BoardSegment> {
     let lit = lamp_lit(now_ms);
     let tally = board_mood_segments(counts, lit);
+    if !personas_shown() {
+        return tally;
+    }
     let half = now_ms / FLAP_HALF_MS;
     let Some(persona) = board_persona_segments(OfficeMood::of(counts), half / 2, lit) else {
         return tally;
