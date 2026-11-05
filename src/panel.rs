@@ -56,9 +56,6 @@ pub struct PanelState {
     pub reveal: bool,
     /// The card under the pointer.
     pub hovered: Option<AgentId>,
-    /// Lunch or a typhoon: the idle are drawn in the cha chaan teng, not on
-    /// the rooftop, and their group's header says so.
-    pub in_pantry: bool,
     /// Task lines are summarized: a raw one is then marked as not yet.
     pub summaries: bool,
 }
@@ -157,18 +154,73 @@ impl Group {
         }
     }
 
-    /// The group's header: what it needs from you, then where they are;
-    /// `in_pantry` while the idle are down in the cha chaan teng.
-    pub fn title(self, in_pantry: bool) -> &'static str {
+    /// The group's header: what it needs from you. Where its agents are is
+    /// left out: they walk there, and a room named over someone still at
+    /// their desk sent you looking in the wrong place.
+    pub fn title(self) -> &'static str {
         match self {
-            Self::Waiting => "等你 · 等候区",
-            Self::Stuck => "卡住 · 工位",
-            Self::Done => "做完待看 · 茶水间",
-            Self::Working => "干活 · 工位",
-            Self::Idle if in_pantry => "闲着 · 茶餐厅",
-            Self::Idle => "闲着 · 天台",
+            Self::Waiting => "等你",
+            Self::Stuck => "卡住",
+            Self::Done => "做完待看",
+            Self::Working => "干活",
+            Self::Idle => "闲着",
         }
     }
+
+    /// The word the panel's header counts this group by.
+    fn tally_word(self) -> &'static str {
+        match self {
+            Self::Done => "待看",
+            g => g.title(),
+        }
+    }
+
+    /// Its colour, the same on the panel's header and cards and on its
+    /// agents' name badges in the office.
+    pub fn color(self) -> Color {
+        match self {
+            Self::Waiting => WAIT,
+            Self::Stuck => STUCK,
+            Self::Done => TASK,
+            Self::Working => WORK,
+            Self::Idle => DIM,
+        }
+    }
+}
+
+/// The panel's header: how many sessions need what of you, in the order the
+/// groups are listed, and the working and idle after. A group with no one in
+/// it is left out; with no one needing you it says so first, so a glance
+/// answers "do I have anything to do" without reading the cards.
+fn header_spans(roots: &[Group], waiting: usize) -> Vec<Span<'static>> {
+    let count = |g: Group| match g {
+        // The footer's and the Dock's count, a subagent's prompt included.
+        Group::Waiting => waiting,
+        g => roots.iter().filter(|&&r| r == g).count(),
+    };
+    let bold = |c: Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::raw(" ")];
+    let needs = [Group::Waiting, Group::Stuck, Group::Done];
+    if needs.iter().all(|&g| count(g) == 0) {
+        spans.push(Span::styled("暂时不用你", bold(TEXT)));
+    }
+    for g in needs.into_iter().chain([Group::Working, Group::Idle]) {
+        let n = count(g);
+        if n == 0 {
+            continue;
+        }
+        if spans.len() > 1 {
+            spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+        }
+        let style = if needs.contains(&g) {
+            bold(g.color())
+        } else {
+            Style::default().fg(g.color())
+        };
+        spans.push(Span::styled(format!("{n} {}", g.tally_word()), style));
+    }
+    spans.push(Span::raw(" "));
+    spans
 }
 
 /// The agents in display order: roots grouped by [`Group`], those waiting on
@@ -285,16 +337,6 @@ pub fn step(order: &[(AgentId, u8)], cur: Option<AgentId>, delta: isize) -> Opti
             (i as isize + delta).clamp(0, order.len() as isize - 1) as usize
         });
     Some(order[i].0)
-}
-
-fn group_color(g: Group) -> Color {
-    match g {
-        Group::Waiting => WAIT,
-        Group::Stuck => STUCK,
-        Group::Done => TASK,
-        Group::Working => WORK,
-        Group::Idle => DIM,
-    }
 }
 
 /// The first letter of the repository a label names (`cc·repo`), as an
@@ -694,18 +736,17 @@ pub fn render(
     // Counted as the footer and the Dock count: a question to you waits as a
     // prompt does.
     let waiting = waiting(scene, views, &order, &state.seen).len();
-    let title = if waiting > 0 {
-        format!(" 任务 · {} 个 agent · {waiting} 个等你 ", order.len())
-    } else {
-        format!(" 任务 · {} 个 agent ", order.len())
-    };
+    let roots: Vec<Group> = order
+        .iter()
+        .filter(|(_, d)| *d == 0)
+        .filter_map(|(id, _)| scene.agents.get(id))
+        .map(|s| group_of(s))
+        .collect();
+    let title = Line::from(header_spans(&roots, waiting));
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(Color::Rgb(0x3b, 0x40, 0x4c)))
-        .title(Span::styled(
-            title,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ));
+        .title(title);
     let inner = block.inner(area);
     block.render(area, buf);
     let inner = Rect {
@@ -787,9 +828,9 @@ pub fn render(
                     lines.insert(
                         0,
                         Line::from(Span::styled(
-                            format!("{} ({n})", group.title(state.in_pantry)),
+                            format!("{} ({n})", group.title()),
                             Style::default()
-                                .fg(group_color(group))
+                                .fg(Group::color(group))
                                 .add_modifier(Modifier::BOLD),
                         )),
                     );
@@ -911,6 +952,21 @@ fn on_wait(line: Line<'static>) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header answers "is there anything for me" at a glance: what needs
+    /// you is counted by name, in its group's colour, and with nothing
+    /// needing you it says so rather than leaving you to read every card.
+    #[test]
+    fn the_header_counts_what_needs_you_first() {
+        let text = |sp: &[Span]| sp.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let roots = [Group::Done, Group::Working, Group::Stuck, Group::Done, Group::Idle];
+        let spans = header_spans(&roots, 1);
+        assert_eq!(text(&spans).trim(), "1 等你 · 1 卡住 · 2 待看 · 1 干活 · 1 闲着");
+        let stuck = spans.iter().find(|s| s.content.contains("卡住")).unwrap();
+        assert_eq!(stuck.style.fg, Some(STUCK));
+        let calm = header_spans(&[Group::Working, Group::Working], 0);
+        assert_eq!(text(&calm).trim(), "暂时不用你 · 2 干活");
+    }
     use crate::pipeline::CC_SOURCE;
     use pixtuoid_core::Reducer;
     use pixtuoid_core::source::{AgentEvent, Transport};

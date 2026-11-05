@@ -663,6 +663,7 @@ impl Win {
             cat_hit = self.paint_goings_on_under(&mut canvas, &frame, &tags, &signs, stage, now);
             self.paint_rooms(&mut canvas, &frame, &tags, &signs, &rooms, stage);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
+            let tags = in_group_inks(tags, &frame, &self.core.ui.seen, now);
             let stuck: Vec<AgentId> = frame
                 .scene
                 .agents
@@ -2193,6 +2194,29 @@ fn paint_first_waiting(
 }
 
 /// Set the placed badges and task labels in the readable faces.
+/// `tags` with each name in its agent's panel group colour: pixtuoid inks a
+/// name by the session's raw state, which has no stuck and no done, so a
+/// stuck one read as working and a done one as idle beside a card that said
+/// otherwise. The idle keep pixtuoid's quiet ink.
+fn in_group_inks(
+    mut tags: Vec<Tag>,
+    frame: &crate::core::Frame,
+    seen: &HashMap<AgentId, SystemTime>,
+    now: SystemTime,
+) -> Vec<Tag> {
+    for t in &mut tags {
+        let Some(slot) = frame.scene.agents.get(&t.agent) else {
+            continue;
+        };
+        let read = crate::panel::read_since_idle(slot, seen);
+        let group = crate::panel::Group::of(slot, frame.views.get(&t.agent), now, read);
+        if group != crate::panel::Group::Idle {
+            t.ink = color_u32(group.color(), t.ink);
+        }
+    }
+    tags
+}
+
 fn paint_tags(
     canvas: &mut Canvas,
     faces: &mut Faces,

@@ -194,13 +194,29 @@ fn outcome_message(input: &OutcomeInput) -> String {
 
 /// `line` without its 「问：」 when `reply` asks nothing: a 「问：」 lines the
 /// session up as waiting on you and banners it, and the model also reads one
-/// into a turn that ended waiting on its own background work.
+/// into a turn that ended waiting on its own background work. A reply asks
+/// with a question mark, or by handing you the call in words at its end
+/// (「还要你定两件事：…」 ends on a full stop and still waits on you).
 fn unasked(line: String, reply: &str) -> String {
+    let tail: String = {
+        let n = reply.chars().count();
+        reply.chars().skip(n.saturating_sub(ASK_TAIL)).collect()
+    };
+    let asks = reply.contains(['？', '?']) || ASKS_YOU.iter().any(|p| tail.contains(p));
     match line.strip_prefix("问：") {
-        Some(rest) if !reply.contains(['？', '?']) => rest.trim().to_owned(),
+        Some(rest) if !asks => rest.trim().to_owned(),
         _ => line,
     }
 }
+
+/// How far from a reply's end [`ASKS_YOU`] is looked for: a hand-off closes
+/// the reply, and the same words earlier on recount what was decided.
+const ASK_TAIL: usize = 200;
+
+/// Words that hand the developer a decision or a reply.
+const ASKS_YOU: [&str; 10] = [
+    "要你定", "你来定", "你定一下", "你决定", "你选", "需要你", "等你", "拍板", "请确认", "告诉我",
+];
 
 /// The model's line as a label: one line, no quotes or closing stop, capped.
 fn clean(raw: &str) -> Option<String> {
@@ -266,6 +282,21 @@ mod tests {
             "问：要合并吗"
         );
         assert_eq!(unasked("登录页已修好".into(), "修好了"), "登录页已修好");
+    }
+
+    /// A reply that hands you a decision without a question mark still waits
+    /// on you: dropping its 「问：」 filed a turn waiting on a spending call as
+    /// done, with no banner and no place in the queue.
+    #[test]
+    fn a_decision_handed_over_in_words_is_still_a_question() {
+        let reply = "先走 A + 不签名。\n\n还要你定两件事：仓库是公开（A）还是另建公开仓库（B），以及要不要花 99 美元/年做签名。";
+        assert_eq!(
+            unasked("问：仓库公开还是另建，是否花99美元签名".into(), reply),
+            "问：仓库公开还是另建，是否花99美元签名"
+        );
+        // The same words long before the end recount a call already made.
+        let recount = format!("按你决定的方案做完了。{}已推送。", "测试全过，".repeat(60));
+        assert_eq!(unasked("问：要发版吗".into(), &recount), "要发版吗");
     }
 
     #[test]

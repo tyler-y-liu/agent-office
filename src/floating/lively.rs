@@ -722,7 +722,9 @@ pub(super) fn tally_lines(stats: &crate::fun::stats::Stats) -> [String; 2] {
     [
         format!("今日完成 {} 轮", stats.turns),
         format!(
-            "卡住 {} · {} token",
+            // "Stuck N" read as N stuck now, beside a panel with none: it is
+            // the day's count.
+            "卡过 {} · {} token",
             stats.stuck,
             crate::fun::stats::tokens_short(stats.tokens)
         ),
@@ -858,7 +860,8 @@ mod tests {
     }
 
     /// The board's tally says what was done in the office's language, short
-    /// enough for the board's line.
+    /// enough for the board's line; its stuck count reads as the day's, not
+    /// as how many are stuck now, which the panel's header says.
     #[test]
     fn the_tally_reads_turns_stuck_and_tokens() {
         let stats = crate::fun::stats::Stats {
@@ -869,7 +872,7 @@ mod tests {
         };
         assert_eq!(
             tally_lines(&stats),
-            ["今日完成 12 轮", "卡住 2 · 1.2M token"]
+            ["今日完成 12 轮", "卡过 2 · 1.2M token"]
         );
         assert!(
             tally_lines(&stats)

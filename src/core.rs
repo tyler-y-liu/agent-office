@@ -354,7 +354,6 @@ impl Core {
         let outlook = *self.outlook_rx.borrow();
         // A typhoon closes the rooftop; at lunch everyone is down for a meal.
         let in_pantry = clock.lunch() || outlook.typhoon();
-        self.ui.in_pantry = in_pantry;
         Frame {
             office: as_seen(&scene, &views, &self.ui.seen, in_pantry, now),
             scene,
