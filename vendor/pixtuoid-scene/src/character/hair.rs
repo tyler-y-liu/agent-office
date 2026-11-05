@@ -4,25 +4,180 @@
 //! ([`dress_for`]), so the classic 1x art never is.
 
 use crate::pack::OfficeArt;
-use pixtuoid_core::AgentId;
 use pixtuoid_core::id::{fnv1a, splitmix64};
 use pixtuoid_core::sprite::format::{Density, Hairstyle};
-use pixtuoid_core::sprite::{Frame, HeadMark, Pixel, Rgb, Sprite};
+use pixtuoid_core::sprite::{Frame, HeadMark, HeadView, Pixel, Rgb, Sprite};
 
 /// Separates the pick's seed from the other per-agent draws that finalize the
 /// same id through `splitmix64` (`physics`, `pose::pure`), so the style is no
 /// function of theirs.
 const HAIRSTYLE_SALT: u64 = 0x6861_6972_7374_796c;
 
-/// The name of the style `agent` wears: the one that scores highest under
+/// The name of the style worn under `look` (agent-office: the agent's look
+/// seed, its repository's, rather than its id): the one that scores highest under
 /// rendezvous hashing, so adding a style to a pack moves only the agents that
 /// now prefer it. It is picked by name, whatever the density, so an agent keeps
 /// their style when the renderer lands on another.
-fn pick(pack: &OfficeArt, agent: AgentId) -> Option<&str> {
-    let seed = splitmix64(splitmix64(agent.raw() ^ HAIRSTYLE_SALT));
+fn pick(pack: &OfficeArt, look: u64) -> Option<&str> {
+    let seed = splitmix64(splitmix64(look ^ HAIRSTYLE_SALT));
     pack.hairstyles()
         .map(Hairstyle::name)
         .max_by_key(|name| splitmix64(seed ^ fnv1a(name.bytes().map(u64::from))))
+}
+
+/// agent-office: what an agent from another harness wears over its hair, so
+/// where it comes from reads at a glance: Codex a cap, Cursor headphones, dsh
+/// glasses. Claude Code's own wear nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Accessory {
+    Cap,
+    Headphones,
+    Glasses,
+}
+
+/// A run of an accessory's pixels on the 4x grid, from the head mark: columns
+/// `x0..=x1`, rows `y0..=y1`, in `.4`.
+type Patch = (i8, i8, i8, i8, Rgb);
+
+const CAP: Rgb = Rgb {
+    r: 0x10,
+    g: 0x8a,
+    b: 0x6c,
+};
+const CAP_BRIM: Rgb = Rgb {
+    r: 0x0b,
+    g: 0x5e,
+    b: 0x4a,
+};
+const BAND: Rgb = Rgb {
+    r: 0x2a,
+    g: 0x2d,
+    b: 0x34,
+};
+const CUP: Rgb = Rgb {
+    r: 0x3f,
+    g: 0xc1,
+    b: 0xe0,
+};
+const FRAME: Rgb = Rgb {
+    r: 0x24,
+    g: 0x4c,
+    b: 0xd8,
+};
+
+// The heads these are laid on (tools/people.py): on the 4x grid a front or back
+// head spans 11 columns either side of its mark and rows from 9 above it to 12
+// below, its eyes 3 to 6 rows below and 4 to 6 columns out; a side head faces
+// east, from 7 columns behind its mark to 12 before, its eye 8 to 9 before.
+const CAP_FRONT: &[Patch] = &[
+    (-7, -13, 7, -13, CAP),
+    (-9, -12, 9, -9, CAP),
+    (-10, -8, 10, -6, CAP),
+    (-12, -5, 12, -5, CAP_BRIM),
+    (-1, -14, 1, -14, CAP_BRIM),
+];
+const CAP_BACK: &[Patch] = &[
+    (-7, -13, 7, -13, CAP),
+    (-9, -12, 9, -9, CAP),
+    (-10, -8, 10, -5, CAP),
+    (-3, -6, 3, -6, CAP_BRIM),
+    (-1, -14, 1, -14, CAP_BRIM),
+];
+const CAP_SIDE: &[Patch] = &[
+    (-3, -13, 9, -13, CAP),
+    (-6, -12, 11, -9, CAP),
+    (-7, -8, 12, -6, CAP),
+    (8, -5, 14, -5, CAP_BRIM),
+    (2, -14, 4, -14, CAP_BRIM),
+];
+const CAP_CROWN: &[Patch] = &[(-8, -8, 8, 8, CAP), (-1, -1, 1, 1, CAP_BRIM)];
+
+const PHONES_FRONT: &[Patch] = &[
+    (-8, -12, 8, -11, BAND),
+    (-11, -10, -10, 0, BAND),
+    (10, -10, 11, 0, BAND),
+    (-13, 1, -10, 7, CUP),
+    (10, 1, 13, 7, CUP),
+];
+const PHONES_SIDE: &[Patch] = &[
+    (-5, -12, 5, -11, BAND),
+    (-2, 1, 3, 8, CUP),
+    (-1, -10, 1, 0, BAND),
+];
+const PHONES_CROWN: &[Patch] = &[
+    (-1, -10, 1, 10, BAND),
+    (-3, -12, 3, -10, CUP),
+    (-3, 10, 3, 12, CUP),
+];
+
+const GLASSES_FRONT: &[Patch] = &[
+    (-8, 2, -2, 2, FRAME),
+    (-8, 7, -2, 7, FRAME),
+    (-8, 3, -8, 6, FRAME),
+    (-2, 3, -2, 6, FRAME),
+    (2, 2, 8, 2, FRAME),
+    (2, 7, 8, 7, FRAME),
+    (2, 3, 2, 6, FRAME),
+    (8, 3, 8, 6, FRAME),
+    (-1, 3, 1, 3, FRAME),
+    (-11, 3, -9, 3, FRAME),
+    (9, 3, 11, 3, FRAME),
+];
+const GLASSES_BACK: &[Patch] = &[(-12, 3, -11, 3, FRAME), (11, 3, 12, 3, FRAME)];
+const GLASSES_SIDE: &[Patch] = &[
+    (6, 2, 11, 2, FRAME),
+    (6, 7, 11, 7, FRAME),
+    (6, 3, 6, 6, FRAME),
+    (11, 3, 11, 6, FRAME),
+    (0, 3, 5, 3, FRAME),
+];
+
+impl Accessory {
+    /// What an agent of `source` wears; `None` for Claude Code's own.
+    pub(crate) fn of(source: &str) -> Option<Self> {
+        use pixtuoid_core::source::{codex, cursor, dsh};
+        match source {
+            codex::SOURCE_NAME => Some(Accessory::Cap),
+            cursor::SOURCE_NAME => Some(Accessory::Headphones),
+            dsh::SOURCE_NAME => Some(Accessory::Glasses),
+            _ => None,
+        }
+    }
+
+    fn patches(self, view: HeadView) -> &'static [Patch] {
+        match (self, view) {
+            (Accessory::Cap, HeadView::Front) => CAP_FRONT,
+            (Accessory::Cap, HeadView::Back) => CAP_BACK,
+            (Accessory::Cap, HeadView::Side) => CAP_SIDE,
+            (Accessory::Cap, HeadView::Crown) => CAP_CROWN,
+            (Accessory::Headphones, HeadView::Front | HeadView::Back) => PHONES_FRONT,
+            (Accessory::Headphones, HeadView::Side) => PHONES_SIDE,
+            (Accessory::Headphones, HeadView::Crown) => PHONES_CROWN,
+            (Accessory::Glasses, HeadView::Front) => GLASSES_FRONT,
+            (Accessory::Glasses, HeadView::Back) => GLASSES_BACK,
+            (Accessory::Glasses, HeadView::Side) => GLASSES_SIDE,
+            // Face down, the frames are under the head.
+            (Accessory::Glasses, _) | (Accessory::Cap | Accessory::Headphones, _) => &[],
+        }
+    }
+
+    /// Its pixels on a frame of art density `density` whose head is `head`:
+    /// each column, row and colour, the 4x patches scaled to the density.
+    pub(crate) fn pixels(
+        self,
+        head: HeadMark,
+        density: u16,
+    ) -> impl Iterator<Item = (i32, i32, Rgb)> {
+        let d = i32::from(density);
+        let at = move |v: i8| (i32::from(v) * d).div_euclid(4);
+        let (mx, my) = (i32::from(head.x), i32::from(head.y()));
+        self.patches(head.view)
+            .iter()
+            .flat_map(move |&(x0, y0, x1, y1, c)| {
+                (at(y0)..=at(y1))
+                    .flat_map(move |y| (at(x0)..=at(x1)).map(move |x| (mx + x, my + y, c)))
+            })
+    }
 }
 
 /// How a character frame is dressed: its head, the style its agent wears at
@@ -35,21 +190,29 @@ pub(crate) struct Dress {
     /// The dressed figure's topmost drawn row, counted from the frame's top:
     /// negative where it rises over it.
     pub(crate) crest: i32,
+    /// agent-office: what it wears over its hair, and the art's density it is
+    /// laid at.
+    pub(crate) accessory: Option<(Accessory, u16)>,
 }
 
-/// The [`Dress`] of `body`, frame `head`'s art at `density`, for `agent`:
-/// `None` at 1x, in a build without `cutaway-assets`, or on an unmarked frame,
-/// which is drawn as it is.
+/// The [`Dress`] of `body`, frame `head`'s art at `density`, for an agent of
+/// look seed `look` wearing `accessory`: `None` at 1x, in a build without
+/// `cutaway-assets`, or on an unmarked frame, which is drawn as it is.
 pub(crate) fn dress_for(
     pack: &OfficeArt,
-    agent: AgentId,
+    look: u64,
+    accessory: Option<Accessory>,
     body: &Frame,
     head: Option<HeadMark>,
     density: Density,
 ) -> Option<Dress> {
     let head = head.filter(|_| cfg!(feature = "cutaway-assets") && density.get() > 1)?;
-    let style = pick(pack, agent).and_then(|name| pack.hairstyle(name, density));
-    Some(Dress::of(body, head, style))
+    let style = pick(pack, look).and_then(|name| pack.hairstyle(name, density));
+    let dress = Dress::of(body, head, style);
+    Some(match accessory {
+        Some(a) => dress.wearing(a, density.get()),
+        None => dress,
+    })
 }
 
 impl Dress {
@@ -59,7 +222,22 @@ impl Dress {
             head,
             style: style.map(|s| s.name().to_owned()),
             crest: crest(body, head, style),
+            accessory: None,
         }
+    }
+
+    /// agent-office: the dress with `accessory` on, at art density `density`;
+    /// the frame rises for it where it stands over the hair.
+    fn wearing(mut self, accessory: Accessory, density: u16) -> Self {
+        let top = accessory
+            .pixels(self.head, density)
+            .map(|(_, y, _)| y)
+            .min();
+        if let Some(top) = top {
+            self.crest = self.crest.min(top - 1);
+        }
+        self.accessory = Some((accessory, density));
+        self
     }
 
     /// How many art rows the dressed frame rises over the frame as drawn.
@@ -135,6 +313,18 @@ pub(crate) fn dress(
     if let Some((f, dx, dy)) = dressed(layers.and_then(|l| l.over())) {
         lay(&f, dx, dy);
     }
+    // agent-office: the accessory over the hair, inside the one outline.
+    if let Some((accessory, density)) = dress.accessory {
+        for (x, y, c) in accessory.pixels(head, density) {
+            let (tx, ty) = (x, y + i32::from(up));
+            if let (Ok(tx), Ok(ty)) = (u16::try_from(tx), u16::try_from(ty))
+                && tx < w
+                && ty < h
+            {
+                px[usize::from(ty) * usize::from(w) + usize::from(tx)] = Some(c);
+            }
+        }
+    }
     let (w_i, h_i) = (i32::from(w), i32::from(h));
     let idx = |x: i32, y: i32| y as usize * usize::from(w) + x as usize;
     let opaque = |px: &[Pixel], x: i32, y: i32| {
@@ -175,6 +365,7 @@ pub(crate) fn dress(
 mod tests {
     use super::*;
     use crate::display::pen::test_density;
+    use pixtuoid_core::AgentId;
     use pixtuoid_core::sprite::format::{Piece, load_filled_pack};
     #[cfg(feature = "cutaway-assets")]
     use strum::VariantArray as _;
@@ -227,7 +418,8 @@ mod tests {
     fn dressed(pack: &OfficeArt, agent: AgentId) -> (Dress, Frame) {
         let sprite = pack.piece(Piece::Seated);
         let body = sprite.first();
-        let dress = dress_for(pack, agent, body, sprite.head(0), TWO).expect("a marked 2x frame");
+        let dress = dress_for(pack, agent.raw(), None, body, sprite.head(0), TWO)
+            .expect("a marked 2x frame");
         let style = dress.style.as_deref().and_then(|n| pack.hairstyle(n, TWO));
         let f = super::dress(
             body,
@@ -246,9 +438,9 @@ mod tests {
         let mut moved = 0;
         for i in 0..200u64 {
             let id = AgentId::from_parts("claude-code", &i.to_string());
-            let before = pick(&few, id).expect("a style");
-            assert_eq!(pick(&few, id), Some(before), "stable");
-            let after = pick(&more, id).expect("a style");
+            let before = pick(&few, id.raw()).expect("a style");
+            assert_eq!(pick(&few, id.raw()), Some(before), "stable");
+            let after = pick(&more, id.raw()).expect("a style");
             if after != before {
                 assert_eq!(after, "curls", "an agent only ever moves to the new style");
                 moved += 1;
@@ -267,10 +459,11 @@ mod tests {
         let sprite = pack.piece(Piece::Seated);
         let body = sprite.first();
         let agent = AgentId::from_parts("x", "y");
-        assert!(dress_for(&pack, agent, body, sprite.head(0), Density::ONE).is_none());
-        assert!(dress_for(&pack, agent, body, None, TWO).is_none());
+        assert!(dress_for(&pack, agent.raw(), None, body, sprite.head(0), Density::ONE).is_none());
+        assert!(dress_for(&pack, agent.raw(), None, body, None, TWO).is_none());
         let four = test_density(4);
-        let bare = dress_for(&pack, agent, body, sprite.head(0), four).expect("marked at 4x");
+        let bare =
+            dress_for(&pack, agent.raw(), None, body, sprite.head(0), four).expect("marked at 4x");
         assert_eq!(bare.style, None, "no style at 4x: the head is bare");
     }
 
@@ -454,5 +647,70 @@ mod tests {
         }
         assert!(flaws.is_empty(), "{flaws:#?}");
         assert!(dressed > 0, "the bundled pack dresses its characters");
+    }
+
+    /// agent-office: a Codex, Cursor or dsh worker must read as one at a
+    /// glance, so each wears its own thing and Claude Code's wear nothing.
+    #[test]
+    fn each_harness_wears_its_own_accessory() {
+        use pixtuoid_core::source::{claude_code, codex, cursor, dsh};
+        assert_eq!(Accessory::of(claude_code::SOURCE_NAME), None);
+        let worn = [codex::SOURCE_NAME, cursor::SOURCE_NAME, dsh::SOURCE_NAME]
+            .map(|s| Accessory::of(s).expect("another harness wears something"));
+        assert_eq!(
+            worn,
+            [Accessory::Cap, Accessory::Headphones, Accessory::Glasses]
+        );
+    }
+
+    /// agent-office: an accessory is laid whole on every bundled character
+    /// in every style, the frame rising for a cap over the hair, so no pose
+    /// cuts it off and no hair covers it; and a face shows it, so it is seen.
+    #[test]
+    #[cfg(feature = "cutaway-assets")]
+    fn every_bundled_character_wears_its_accessory_whole() {
+        let pack = crate::pack::test_office();
+        let line = pack.character_outline();
+        let mut flaws = Vec::new();
+        let mut shown = 0;
+        for &p in Piece::VARIANTS
+            .iter()
+            .filter(|p| p.kind() == pixtuoid_core::sprite::format::PieceKind::Character)
+        {
+            for (d, sprite) in pack.variants_of(p) {
+                for (i, body) in sprite.frames().iter().enumerate() {
+                    let Some(head) = sprite.head(i) else {
+                        continue;
+                    };
+                    for style in pack.hairstyles().map(Some).chain([None]) {
+                        for acc in [Accessory::Cap, Accessory::Headphones, Accessory::Glasses] {
+                            let dr = Dress::of(body, head, style).wearing(acc, d.get());
+                            let f = dress(body, &dr, style, &[], line);
+                            let up = i32::from(dr.rise());
+                            // A later patch is laid over an earlier one.
+                            let laid: std::collections::BTreeMap<_, _> = acc
+                                .pixels(head, d.get())
+                                .map(|(x, y, c)| ((x, y), c))
+                                .collect();
+                            for ((x, y), c) in laid {
+                                let got = u16::try_from(x)
+                                    .ok()
+                                    .zip(u16::try_from(y + up).ok())
+                                    .and_then(|(x, y)| f.get(x, y).copied().flatten());
+                                if got != Some(c) {
+                                    flaws.push(format!(
+                                        "{}@{d}x[{i}] {acc:?} at ({x}, {y})",
+                                        p.name()
+                                    ));
+                                }
+                                shown += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(flaws.is_empty(), "{flaws:#?}");
+        assert!(shown > 0, "the bundled pack's characters wear them");
     }
 }

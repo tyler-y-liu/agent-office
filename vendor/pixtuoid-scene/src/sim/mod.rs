@@ -1031,7 +1031,10 @@ pub(crate) fn resolve_characters(
                 if agent.exiting_at.is_some() && coffee.contains_key(&agent.agent_id) {
                     carrying_coffee = true;
                 }
-                if carrying_coffee {
+                // agent-office: the milk tea an idle agent carries to the
+                // pantry goes with it, so it leaves no cup on its desk.
+                let to_pantry = matches!(agent.state, ActivityState::Idle);
+                if carrying_coffee && !to_pantry {
                     new_coffee_carriers.push(agent.agent_id);
                 }
                 let walker_top_left = walking_top_left(segment.at(), CHARACTER_SPRITE_W);
@@ -1162,7 +1165,10 @@ pub(crate) fn outfit_seed_for(agent: &AgentSlot) -> u64 {
     if agent.unknown_cwd || agent.cwd.as_os_str().is_empty() {
         agent.agent_id.raw()
     } else {
-        cwd_outfit_seed(&normalize_path_key(&agent.cwd.to_string_lossy()))
+        // agent-office: by the repository's root, as its bench is, so a
+        // session in one of its worktrees dresses as its others do.
+        let root = pixtuoid_core::state::project_root(&agent.cwd);
+        cwd_outfit_seed(&normalize_path_key(&root.to_string_lossy()))
     }
 }
 

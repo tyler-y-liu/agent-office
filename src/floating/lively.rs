@@ -242,8 +242,9 @@ pub(super) fn mood(canvas: &mut Canvas, s: Stage, t: &Tag, mood: Mood) {
     }
 }
 
-/// The shop cat sitting by a stuck figure's feet, its tail flicking.
-pub(super) fn cat_by(canvas: &mut Canvas, s: Stage, t: &Tag) {
+/// The shop cat sitting by a stuck figure's feet, its tail flicking; where
+/// it sits, for a click.
+pub(super) fn cat_by(canvas: &mut Canvas, s: Stage, t: &Tag) -> Area {
     let u = s.u;
     let (cx, top) = figure(t);
     let x = cx + figure_w(u) / 2;
@@ -251,6 +252,39 @@ pub(super) fn cat_by(canvas: &mut Canvas, s: Stage, t: &Tag) {
     sprite(canvas, x, y, u, CAT);
     if (s.ms / 700).is_multiple_of(3) {
         sprite(canvas, x, y + 2 * u, u, CAT_TAIL_UP);
+    }
+    Area {
+        x,
+        y,
+        w: (sprite_w(CAT) * u) as u32,
+        h: (CAT.len() as i64 * u) as u32,
+    }
+}
+
+const ARM: &[&str] = &["p", "p", "p", "B"];
+
+/// An idle figure stretching, `ago` into it: both arms up over its head and
+/// pumping, with a yawn's 〜 beside it.
+pub(super) fn stretch(canvas: &mut Canvas, s: Stage, t: &Tag, ago: Duration) {
+    let u = s.u;
+    let (cx, top) = figure(t);
+    // Up in the first quarter second, then two slow pumps.
+    let reach =
+        ((ago.as_millis() / 250).min(1) as i64 + i64::from((ago.as_millis() / 400) % 2 == 1)) * u;
+    let half = figure_w(u) / 3;
+    let y = top + figure_h(u) / 4 - reach;
+    for x in [cx - half - u, cx + half] {
+        sprite(canvas, x, y, u, ARM);
+        sprite(canvas, x - u, y - 2 * u, u, &["pp.", "pp."][..]);
+    }
+    for i in 0..3i64 {
+        canvas.fill(
+            cx + half + 3 * u + i * u,
+            top + (i % 2) * u,
+            u as u32,
+            u as u32,
+            0x00c8_ccd2,
+        );
     }
 }
 
@@ -413,6 +447,123 @@ pub(super) fn chitchat(
     let base = area.y + i64::from(pad) + i64::from(faces.ascent(px));
     faces.draw(canvas, area.x + i64::from(pad), base, line, 0x0020_2020, px);
     Some(area)
+}
+
+/// The cat's word in a bubble over the point it was clicked at.
+pub(super) fn meow(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    s: Stage,
+    (x, y): (i64, i64),
+    line: &str,
+) {
+    let px = pt_px(10.0, s.scale_factor);
+    let pad = tag_pad(s.scale_factor);
+    let w = Faces::cells(line) * faces.cell_w(px) + 2 * pad;
+    let h = px + 2 * pad;
+    let tail = s.u.max(2);
+    let ax = (x - i64::from(w / 2)).max(0);
+    let ay = (y - i64::from(h) - 3 * tail).max(0);
+    const PAPER: u32 = 0x00f4_f1e8;
+    canvas.fill(ax, ay, w, h, PAPER);
+    canvas.fill(x, ay + i64::from(h), tail as u32, tail as u32, PAPER);
+    let base = ay + i64::from(pad) + i64::from(faces.ascent(px));
+    faces.draw(canvas, ax + i64::from(pad), base, line, 0x0020_2020, px);
+}
+
+/// How long the evening board's replay of the day runs.
+pub(super) const REPLAY_FOR: Duration = Duration::from_secs(10);
+/// The part of it the day's turns take to fill in, hour by hour; the
+/// honours follow.
+const REPLAY_DAY: Duration = Duration::from_secs(6);
+
+const TROPHY: &[&str] = &[
+    "yyyyyyy", "yyyyyyy", "y.yyy.y", "yy.y.yy", "..yyy..", "...y...", "..yyy..", ".ooooo.",
+];
+
+/// The day replayed on a card over the office, `ago` into its ten seconds:
+/// the turns finishing hour by hour on a bar for each hour, then who
+/// finished most, with a trophy, and who was stuck longest.
+pub(super) fn replay(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    s: Stage,
+    stats: &crate::fun::stats::Stats,
+    ago: Duration,
+) {
+    let px = pt_px(11.0, s.scale_factor);
+    let pad = i64::from(tag_pad(s.scale_factor)) * 3;
+    let line_h = i64::from(px) + pad;
+    let (ow, oh) = (i64::from(s.w), i64::from(s.h));
+    let w = (ow * 3 / 5).clamp(200.min(ow), ow);
+    let h = (line_h * 7 + pad * 2).min(oh);
+    let (x, y) = ((ow - w) / 2, ((oh - h) / 2).max(0));
+    canvas.fill(x - 2, y - 2, (w + 4) as u32, (h + 4) as u32, 0x00ff_4fa3);
+    canvas.fill(x, y, w as u32, h as u32, 0x0016_1220);
+    let text = |canvas: &mut Canvas, faces: &mut Faces, row: i64, line: &str, ink: u32| {
+        let base = y + pad + row * line_h + i64::from(faces.ascent(px));
+        faces.draw(canvas, x + pad, base, line, ink, px);
+    };
+    text(canvas, faces, 0, "今日回顾", 0x00ff_4fa3);
+
+    // The day so far, its hours filling in one after another.
+    let t = (ago.as_secs_f64() / REPLAY_DAY.as_secs_f64()).min(1.0);
+    let hours_shown = (t * 24.0).ceil() as usize;
+    let done: u32 = stats.hours.iter().take(hours_shown).sum();
+    let clock = format!(
+        "{:02}:00  完成 {done} 轮",
+        hours_shown.min(24).saturating_sub(1)
+    );
+    text(canvas, faces, 1, &clock, 0x00e6_e6e6);
+    let chart_top = y + pad + 2 * line_h;
+    let chart_h = line_h * 2;
+    let peak = stats.hours.iter().copied().max().unwrap_or(0).max(1);
+    let bar_w = ((w - 2 * pad) / 24).max(1);
+    for (i, &n) in stats.hours.iter().enumerate().take(hours_shown) {
+        let bh = (chart_h * i64::from(n) / i64::from(peak)).max(i64::from(n > 0) * 2);
+        let bx = x + pad + i as i64 * bar_w;
+        canvas.fill(
+            bx,
+            chart_top + chart_h - bh,
+            (bar_w - 1).max(1) as u32,
+            bh as u32,
+            0x0063_e6be,
+        );
+    }
+    canvas.fill(
+        x + pad,
+        chart_top + chart_h,
+        (w - 2 * pad) as u32,
+        1,
+        0x0060_6070,
+    );
+
+    if ago < REPLAY_DAY {
+        return;
+    }
+    let recap = stats.recap();
+    let u = s.u.max(1);
+    let row = 5;
+    let most = match &recap.most {
+        Some((name, n)) => format!("最多：{name} {n} 轮"),
+        None => "今日未有人完成".to_owned(),
+    };
+    // The trophy drops in and bounces where the winner's line ends.
+    let since = (ago - REPLAY_DAY).as_secs_f64();
+    let bounce = ((since * 6.0).sin().abs() * (1.0 - since / 4.0).max(0.0) * 4.0) as i64 * u;
+    let tx = x + w - pad - sprite_w(TROPHY) * u;
+    let ty = y + pad + row * line_h - TROPHY.len() as i64 * u / 2 - bounce;
+    text(canvas, faces, row, &most, 0x00f2_c14e);
+    if recap.most.is_some() {
+        sprite(canvas, tx, ty, u, TROPHY);
+    }
+    if ago >= REPLAY_DAY + Duration::from_millis(1_200) {
+        let stuck = match &recap.stuck {
+            Some((name, secs)) => format!("卡最久：{name} {} 分钟", secs.div_ceil(60)),
+            None => "今日冇人卡住".to_owned(),
+        };
+        text(canvas, faces, row + 1, &stuck, 0x00ff_8a8a);
+    }
 }
 
 /// A repository's stars by its bench plate, and from the top tier a

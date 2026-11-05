@@ -128,6 +128,15 @@ struct Win {
     last_click: Option<(AgentId, Instant)>,
     /// The sign clicked for what its zone is for, by its text, and when.
     about: Option<(String, Instant)>,
+    /// What a click last got out of the office, and when.
+    reaction: Option<(Reaction, Instant)>,
+    /// How many times each idle worker has been clicked, so it answers
+    /// something new each time.
+    pokes: HashMap<AgentId, u64>,
+    /// When the evening board's replay of the day was started.
+    replay: Option<Instant>,
+    /// The sounds, when they are on.
+    sound: Option<(crate::fun::sound::Ear, crate::fun::sound::Speaker)>,
     next_frame: Instant,
     occluded: bool,
     /// The frame, and the office at art density before its upscale: kept
@@ -177,7 +186,25 @@ struct Layout {
     tag_hits: Vec<(Area, AgentId)>,
     /// Each door sign and bench plate drawn, by its text.
     sign_hits: Vec<(Area, String)>,
+    /// The evening board's tally, which a click replays the day on.
+    board_hits: Vec<Area>,
+    /// The cat sitting with a stuck worker, where it is drawn.
+    cat_hit: Option<Area>,
+    /// Window pixels to a logical unit, which the scene's hits are in.
+    unit: i64,
 }
+
+/// What a click got out of the office.
+#[derive(Clone, Copy)]
+enum Reaction {
+    /// An idle worker, poked.
+    Worker(AgentId, crate::fun::Poke),
+    /// The shop cat, at this window point.
+    Cat(i64, i64),
+}
+
+/// How long a click's reaction stays up.
+const REACTION_FOR: Duration = Duration::from_millis(2_200);
 
 struct Office {
     session: OfficeSession,
@@ -411,6 +438,10 @@ impl Floating<'_> {
             last: None,
             last_click: None,
             about: None,
+            reaction: None,
+            pokes: HashMap::new(),
+            replay: None,
+            sound: crate::fun::sound::enabled().then(Default::default),
             next_frame: Instant::now(),
             occluded: false,
             canvas: Canvas::new(0, 0, 0),
@@ -452,7 +483,14 @@ impl Win {
         let min = pixtuoid_scene::layout::min_layout_size();
         let mut tag_hits = Vec::new();
         let mut sign_hits = Vec::new();
+        let mut board_hits = Vec::new();
+        let mut cat_hit = None;
         let mut inks = HashMap::new();
+        if let Some((ear, speaker)) = &mut self.sound {
+            for chime in ear.hear(&frame.scene, &frame.views) {
+                speaker.play(chime);
+            }
+        }
         if fit.logical().w < min.w || fit.logical().h < min.h {
             let base = i64::from(g.row_h) + i64::from(self.faces.ascent(g.px));
             self.faces.draw(
@@ -463,7 +501,7 @@ impl Win {
                 TEXT,
                 g.px,
             );
-        } else if let Some((tags, mut signs, speakers)) = {
+        } else if let Some((tags, mut signs, speakers, boards)) = {
             let now = SystemTime::now();
             let board = frame
                 .clock
@@ -499,7 +537,8 @@ impl Win {
                     * i64::from(fit.scale().get()),
                 ms: lively::ms_of(now),
             };
-            self.paint_goings_on_under(&mut canvas, &frame, &tags, &mut signs, stage, now);
+            cat_hit =
+                self.paint_goings_on_under(&mut canvas, &frame, &tags, &mut signs, stage, now);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
             self.paint_honours(&mut canvas, &signs, stage);
             let stuck: Vec<AgentId> = frame
@@ -525,6 +564,26 @@ impl Win {
                 self.core.ui.selected,
             );
             self.paint_goings_on_over(&mut canvas, &frame, &tags, &signs, &speakers, stage, now);
+            self.paint_reaction(&mut canvas, &tags, stage);
+            let u = i64::from(fit.upscale());
+            if frame.clock.evening() {
+                board_hits = boards
+                    .iter()
+                    .map(|a| Area {
+                        x: a.x * u,
+                        y: a.y * u,
+                        w: a.w * u as u32,
+                        h: a.h * u as u32,
+                    })
+                    .collect();
+            }
+            match self.replay {
+                Some(at) if at.elapsed() < lively::REPLAY_FOR => {
+                    let stats = &self.core.watch.stats;
+                    lively::replay(&mut canvas, &mut self.faces, stage, stats, at.elapsed());
+                }
+                _ => self.replay = None,
+            }
             inks = tags.iter().map(|t| (t.agent, t.marker_rgb)).collect();
             tag_hits = tags
                 .iter()
@@ -590,6 +649,9 @@ impl Win {
             panel_rows,
             tag_hits,
             sign_hits,
+            board_hits,
+            cat_hit,
+            unit: i64::from(fit.scale().get()),
         });
         let mut buffer = self
             .surface
@@ -614,7 +676,7 @@ impl Win {
         labels: &HashMap<AgentId, String>,
         scale_factor: f64,
         extras: OfficeExtras,
-    ) -> Option<(Vec<Tag>, Vec<DoorSign>, Vec<AgentId>)> {
+    ) -> Option<Drawn> {
         let _feed = self.office.session.render(
             fit.look(WorldText::Host),
             RenderInputs {
@@ -648,6 +710,7 @@ impl Win {
         let mut tags = Vec::new();
         let mut signs = Vec::new();
         let mut speakers = Vec::new();
+        let mut boards = Vec::new();
         if let Picture::Floor(floor) = picture
             && let Some(text) = floor.text
         {
@@ -656,7 +719,7 @@ impl Win {
             signs = door_signs(&mut self.faces, text, d, u, scale_factor);
             let avoid: Vec<Area> = signs.iter().map(|s| s.area).collect();
             tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor, &avoid);
-            paint_world_text(art, text, d, extras.board.as_ref());
+            boards = paint_world_text(art, text, d, extras.board.as_ref());
             speakers = text
                 .bubbles
                 .iter()
@@ -666,7 +729,7 @@ impl Win {
                 })
                 .collect();
         }
-        Some((tags, signs, speakers))
+        Some((tags, signs, speakers, boards))
     }
 
     /// Scroll the panel's cards when the pointer is over the panel. Up the
@@ -704,6 +767,19 @@ impl Win {
             w: 1,
             h: 1,
         };
+        let in_office = x < last.panel_x;
+        // A click on the office puts the replay away, whatever is under it.
+        if in_office && self.replay.take().is_some() {
+            return;
+        }
+        if in_office && last.board_hits.iter().any(|r| r.meets(&point)) {
+            self.replay = Some(Instant::now());
+            return;
+        }
+        if in_office && last.cat_hit.is_some_and(|r| r.meets(&point)) {
+            self.reaction = Some((Reaction::Cat(point.x, point.y), Instant::now()));
+            return;
+        }
         if let Some((_, text)) = last
             .sign_hits
             .iter()
@@ -765,6 +841,14 @@ impl Win {
                 Some(pixtuoid_scene::hit::SceneHit::Figure(
                     pixtuoid_scene::display::HoverTarget::Agent(id),
                 )) => Some(*id),
+                Some(pixtuoid_scene::hit::SceneHit::Figure(
+                    pixtuoid_scene::display::HoverTarget::Pet(pet),
+                )) => {
+                    let (cx, cy) = (i64::from(pet.centre.x), i64::from(pet.centre.y));
+                    let at = (cx * last.unit, cy * last.unit);
+                    self.reaction = Some((Reaction::Cat(at.0, at.1), Instant::now()));
+                    return;
+                }
                 _ => None,
             }
         };
@@ -780,9 +864,25 @@ impl Win {
         } else {
             self.last_click = Some((id, now));
             self.core.select(id, &mut self.office);
+            // An idle worker clicked in the office has something to say for
+            // itself; one at work is left to it.
+            let idle = self.core.scene().agents.get(&id).is_some_and(|s| {
+                s.exiting_at.is_none() && matches!(s.state, pixtuoid_core::ActivityState::Idle)
+            });
+            if in_office && idle {
+                let n = self.pokes.entry(id).or_default();
+                let poke = crate::fun::poke(id, *n);
+                *n += 1;
+                self.reaction = Some((Reaction::Worker(id, poke), Instant::now()));
+            }
         }
     }
 }
+
+/// What [`Win::render_office`] leaves for the window to set over the office:
+/// the badges, the signs, who is chatting, and the wall board's lines, on
+/// the art grid.
+type Drawn = (Vec<Tag>, Vec<DoorSign>, Vec<AgentId>, Vec<Area>);
 
 /// What the office is drawn with beyond the scene itself.
 struct OfficeExtras {
@@ -798,7 +898,8 @@ const CHITCHAT_TURN_MS: u64 = 4_000;
 impl Win {
     /// What goes under the readable text: the gold of a top bench's plate,
     /// the late-night dark, the festival's dress, and what stands by each
-    /// figure (supper, a briefcase, its mood, the cat, confetti).
+    /// figure (supper, a briefcase, its mood, the cat, confetti); where the
+    /// cat sits, when it does.
     fn paint_goings_on_under(
         &mut self,
         canvas: &mut Canvas,
@@ -807,7 +908,7 @@ impl Win {
         signs: &mut [DoorSign],
         stage: lively::Stage,
         now: SystemTime,
-    ) {
+    ) -> Option<Area> {
         let repos = &self.core.watch.stats.repos;
         for sign in signs.iter_mut() {
             let turns = sign.repo.as_ref().and_then(|r| repos.get(r)).copied();
@@ -858,10 +959,36 @@ impl Win {
                 lively::confetti(canvas, stage, t, ago);
             }
         }
-        if let Some(id) = crate::fun::cat_visits(&stuck)
-            && let Some(t) = tags.iter().find(|t| t.agent == id)
-        {
-            lively::cat_by(canvas, stage, t);
+        let id = crate::fun::cat_visits(&stuck)?;
+        let t = tags.iter().find(|t| t.agent == id)?;
+        Some(lively::cat_by(canvas, stage, t))
+    }
+
+    /// What the last click got: a worker's stretch or word, the cat's meow.
+    fn paint_reaction(&mut self, canvas: &mut Canvas, tags: &[Tag], stage: lively::Stage) {
+        let Some((reaction, at)) = self.reaction else {
+            return;
+        };
+        let ago = at.elapsed();
+        if ago >= REACTION_FOR {
+            self.reaction = None;
+            return;
+        }
+        match reaction {
+            Reaction::Worker(id, poke) => {
+                let Some(t) = tags.iter().find(|t| t.agent == id) else {
+                    return;
+                };
+                match poke {
+                    crate::fun::Poke::Stretch => lively::stretch(canvas, stage, t, ago),
+                    crate::fun::Poke::Say(line) => {
+                        lively::chitchat(canvas, &mut self.faces, stage, t, line, &[]);
+                    }
+                }
+            }
+            Reaction::Cat(x, y) => {
+                lively::meow(canvas, &mut self.faces, stage, (x, y), crate::fun::MEOW);
+            }
         }
     }
 
@@ -1224,8 +1351,14 @@ fn place_tags(
 /// chitchat bubbles are left to the window, which sets them in Chinese
 /// ([`lively::chitchat`]); `board`, when given, takes the place of the wall
 /// board's two lines.
-fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, board: Option<&[String; 2]>) {
+fn paint_world_text(
+    art: &mut Canvas,
+    text: HostText<'_>,
+    d: u32,
+    board: Option<&[String; 2]>,
+) -> Vec<Area> {
     let mut signs: Vec<Area> = Vec::new();
+    let mut boards = Vec::new();
     let mut lines = board.into_iter().flatten();
     // Door signs are set in the readable faces over the upscaled office
     // ([`door_signs`]): the art font has no Chinese.
@@ -1259,8 +1392,12 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, board: Option<
             continue;
         }
         signs.push(rect);
+        if run.role == TextRole::Board {
+            boards.push(rect);
+        }
         paint_run(art, run, rect);
     }
+    boards
 }
 
 /// Whether the window sets a sign of `role` in the readable faces rather

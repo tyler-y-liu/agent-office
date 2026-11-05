@@ -497,6 +497,13 @@ impl HeadMark {
             y: mark.y,
         })
     }
+
+    /// agent-office: the mark's row, for what the office lays on a head
+    /// beyond a pack's hairstyles (an agent's accessory).
+    #[must_use]
+    pub fn y(&self) -> u16 {
+        self.y
+    }
 }
 
 /// What a head mark's name starts with, before its view.

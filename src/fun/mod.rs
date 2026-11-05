@@ -3,6 +3,7 @@
 //! takes it, what the chitchat says, the day's tally and Hong Kong's weather.
 
 pub mod hko;
+pub mod sound;
 pub mod stats;
 
 use std::time::{Duration, SystemTime};
@@ -328,6 +329,37 @@ pub fn chitchat(
     }
 }
 
+/// How an idle worker takes a click: a stretch, or a word back in Cantonese.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poke {
+    Stretch,
+    Say(&'static str),
+}
+
+const POKED_TALK: &[&str] = &[
+    "做紧嘢啊！",
+    "咪搞我啦",
+    "唞下先…",
+    "有咩吩咐？",
+    "饮紧奶茶呀",
+    "得闲先讲",
+    "老细早晨！",
+    "我好忙㗎！",
+];
+
+/// What `agent` does on its `nth` click: every third a stretch, else a line,
+/// so clicking on gets something new each time.
+pub fn poke(agent: AgentId, nth: u64) -> Poke {
+    if nth % 3 == 2 {
+        return Poke::Stretch;
+    }
+    let seed = mix(agent.raw() ^ nth.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    Poke::Say(POKED_TALK[(seed % POKED_TALK.len() as u64) as usize])
+}
+
+/// What the shop cat says when clicked.
+pub const MEOW: &str = "喵～";
+
 /// A cheap, well-spread hash (splitmix64's finaliser).
 pub fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -473,5 +505,23 @@ mod tests {
         assert!(overtime(slot, Some(&long), &day, now));
         slot.state = ActivityState::Idle;
         assert!(!overtime(slot, Some(&long), &night, now));
+    }
+
+    /// A click always gets a reaction, and clicking on varies it: a stretch
+    /// comes round, and the lines change, or the joke would wear thin at once.
+    #[test]
+    fn a_poked_worker_stretches_or_answers_back() {
+        let id = AgentId::from_parts("claude-code", "a");
+        let pokes: Vec<Poke> = (0..12).map(|n| poke(id, n)).collect();
+        assert!(pokes.contains(&Poke::Stretch));
+        let said: std::collections::HashSet<_> = pokes
+            .iter()
+            .filter_map(|p| match p {
+                Poke::Say(l) => Some(*l),
+                Poke::Stretch => None,
+            })
+            .collect();
+        assert!(said.len() > 2, "the answers vary: {said:?}");
+        assert!(said.iter().all(|l| POKED_TALK.contains(l)));
     }
 }

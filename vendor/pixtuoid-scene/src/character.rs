@@ -11,7 +11,7 @@ use crate::frame_cache::FrameCache;
 use crate::sim::{CharacterGlow, outfit_seed_for};
 
 mod colors;
-mod hair;
+pub(crate) mod hair;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -192,7 +192,16 @@ fn character_key_at(
         },
         outfit: outfit_seed_for(agent),
         palette: agent_overrides(agent, glow_tint, burn),
-        dress: dress_for(pack, agent.agent_id, dense.frame, dense.head, density),
+        // agent-office: the style follows the repository, as the outfit does,
+        // and the agent's source picks what it wears over it.
+        dress: dress_for(
+            pack,
+            outfit_seed_for(agent),
+            hair::Accessory::of(&agent.source),
+            dense.frame,
+            dense.head,
+            density,
+        ),
     }
 }
 
