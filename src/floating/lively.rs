@@ -105,10 +105,20 @@ const SHOWS_AFTER: Duration = Duration::from_secs(15);
 /// How long its ticket takes to fly over from whoever handed it the work.
 const HANDOFF_FOR: Duration = Duration::from_secs(3);
 
+/// How long after the office opens a subagent still counts as found by its
+/// first look round rather than started since.
+const FIRST_LOOK: Duration = Duration::from_secs(5);
+
 /// How far along a subagent's ticket is, 0 to 1, while it flies: from the
 /// moment the figure shows (before, there is no one to land on) for
-/// [`HANDOFF_FOR`]; `None` before and after.
-pub(super) fn handoff_progress(created_at: SystemTime, now: SystemTime) -> Option<f32> {
+/// [`HANDOFF_FOR`]; `None` before and after, and for one the office found
+/// already at work when it `opened` (its handoff was long ago).
+pub(super) fn handoff_progress(
+    created_at: SystemTime,
+    opened: SystemTime,
+    now: SystemTime,
+) -> Option<f32> {
+    created_at.duration_since(opened + FIRST_LOOK).ok()?;
     let since = now.duration_since(created_at + SHOWS_AFTER).ok()?;
     (since < HANDOFF_FOR).then(|| since.as_secs_f32() / HANDOFF_FOR.as_secs_f32())
 }
@@ -921,11 +931,14 @@ mod tests {
     fn a_handoff_ticket_flies_once_the_sub_shows_and_lands() {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let at = |s: f32| t0 + Duration::from_secs_f32(s);
-        assert_eq!(handoff_progress(t0, at(10.0)), None, "not shown yet");
-        assert_eq!(handoff_progress(t0, at(15.0)), Some(0.0));
-        let mid = handoff_progress(t0, at(16.5)).unwrap();
+        let opened = t0 - Duration::from_secs(60);
+        assert_eq!(handoff_progress(t0, opened, at(10.0)), None, "not shown yet");
+        assert_eq!(handoff_progress(t0, opened, at(15.0)), Some(0.0));
+        let mid = handoff_progress(t0, opened, at(16.5)).unwrap();
         assert!((mid - 0.5).abs() < 0.01, "{mid}");
-        assert_eq!(handoff_progress(t0, at(18.0)), None, "landed");
-        assert_eq!(handoff_progress(t0, t0), None);
+        assert_eq!(handoff_progress(t0, opened, at(18.0)), None, "landed");
+        assert_eq!(handoff_progress(t0, opened, t0), None);
+        // Found at work when the office opened: handed its work before.
+        assert_eq!(handoff_progress(t0, t0, at(16.5)), None, "no ticket on a restart");
     }
 }

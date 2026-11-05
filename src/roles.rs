@@ -574,7 +574,6 @@ pub fn dispatch(role: Role, dir: &Path, task: &str, terminal: bool) -> Result<St
     if let Some(why) = not_ready(role, terminal) {
         anyhow::bail!(why);
     }
-    let dir = repo_root(dir);
     if terminal {
         let bin = claude_bin().context("找不到 claude 命令：装好 Claude Code 或去掉 --terminal")?;
         std::env::set_current_dir(&dir)
@@ -602,13 +601,14 @@ pub fn dispatch(role: Role, dir: &Path, task: &str, terminal: bool) -> Result<St
 /// `agent-office dispatch`.
 pub fn dispatch_cli(args: &[&str]) -> Result<()> {
     let d = parse_dispatch(args)?;
+    // A directory named is taken as it is, a worktree included; run from
+    // inside a worktree, the session goes to its repository instead.
     let dir = match d.dir {
-        Some(p) => p,
-        None => std::env::current_dir()?,
+        Some(p) => p
+            .canonicalize()
+            .with_context(|| format!("没有 {} 这个目录", p.display()))?,
+        None => repo_root(&std::env::current_dir()?),
     };
-    let dir = dir
-        .canonicalize()
-        .with_context(|| format!("没有 {} 这个目录", dir.display()))?;
     println!("{}", dispatch(d.role, &dir, &d.task, d.terminal)?);
     Ok(())
 }

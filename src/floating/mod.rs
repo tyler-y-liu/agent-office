@@ -152,6 +152,9 @@ struct Win {
     about: Option<(String, Instant)>,
     /// The role picker `p` opens is showing: the next key picks or closes.
     picker: bool,
+    /// When the office opened: subagents already running then were handed
+    /// their work before it, and get no ticket.
+    opened: SystemTime,
     /// What a click last got out of the office, and when.
     reaction: Option<(Reaction, Instant)>,
     /// How many times each idle worker has been clicked, so it answers
@@ -387,6 +390,9 @@ impl ApplicationHandler for Floating<'_> {
                 button: MouseButton::Left,
                 ..
             } => {
+                // A click is not a pick: the picker goes, so a digit typed
+                // later does not dispatch into whatever got selected.
+                win.picker = false;
                 win.click();
                 win.next_frame = Instant::now();
             }
@@ -557,6 +563,7 @@ impl Floating<'_> {
             cursor_in: false,
             about: None,
             picker: false,
+            opened: SystemTime::now(),
             reaction: None,
             pokes: HashMap::new(),
             replay: None,
@@ -1371,7 +1378,7 @@ impl Win {
             };
             let (Some(from), Some(p)) = (
                 tags.iter().find(|o| o.agent == parent),
-                lively::handoff_progress(slot.created_at, now),
+                lively::handoff_progress(slot.created_at, self.opened, now),
             ) else {
                 continue;
             };

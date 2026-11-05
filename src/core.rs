@@ -504,13 +504,20 @@ impl Core {
                 None => self.note("先选中一个 agent", Tone::Failed),
             },
             Action::Dispatch(role) => {
-                let dir = self
-                    .ui
-                    .selected
-                    .and_then(|id| self.scene().agents.get(&id).map(|s| s.cwd.clone()));
-                match dir {
+                let scene = self.scene();
+                let slot = self.ui.selected.and_then(|id| scene.agents.get(&id));
+                match slot {
                     None => self.note("先选中一个小人：新会话开在它的仓库里", Tone::Failed),
-                    Some(dir) => match crate::roles::dispatch(role, &dir, "", false) {
+                    Some(s) if s.unknown_cwd => {
+                        self.note("不知道它在哪个目录，换一个小人", Tone::Failed)
+                    }
+                    // The repository it is seated with, a worktree's included.
+                    Some(s) => match crate::roles::dispatch(
+                        role,
+                        pixtuoid_core::state::project_root(&s.cwd),
+                        "",
+                        false,
+                    ) {
                         Ok(_) => self.note(
                             &format!("已在 Claude 开好「{}」的新会话，写上任务发送", role.post().zh),
                             Tone::Ok,

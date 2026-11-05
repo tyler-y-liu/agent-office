@@ -92,9 +92,16 @@ fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Ve
         .find(|v| v.role == Some(crate::roles::Role::Pm) && !v.todos.is_empty());
     if let Some(v) = plan {
         use crate::tasks::extract::TodoState;
-        return v
-            .todos
-            .iter()
+        // What is under way first: the board fits a few lines, and a plan
+        // whose done items come first would show only those.
+        let mut todos: Vec<_> = v.todos.iter().collect();
+        todos.sort_by_key(|(state, _)| match state {
+            TodoState::Doing => 0,
+            TodoState::Pending => 1,
+            TodoState::Done => 2,
+        });
+        return todos
+            .into_iter()
             .map(|(state, what)| {
                 let mark = match state {
                     TodoState::Done => "✓",
@@ -556,7 +563,7 @@ mod tests {
         let views = |v: &TaskView| std::sync::Arc::new([(pm, v.clone())].into_iter().collect());
         assert_eq!(
             board_lines_of(&[pm], &scene, &views(&view)),
-            ["✓ 后端：加接口", "▸ 测试：跑测试", "· 审查：看改动"]
+            ["▸ 测试：跑测试", "· 审查：看改动", "✓ 后端：加接口"]
         );
         // Any other session's todos are its own business, not the board's.
         view.role = Some(crate::roles::Role::Frontend);
