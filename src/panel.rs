@@ -614,7 +614,6 @@ pub fn render(
             read_since_idle(s, &state.seen),
         )
     };
-    let hues = pixtuoid_scene::badge::repo_hues(scene.agents.values());
     let waiting = order
         .iter()
         .filter(|(id, _)| {
@@ -668,7 +667,7 @@ pub fn render(
                 slot,
                 *depth,
                 views.get(id),
-                pixtuoid_scene::badge::repo_hue(slot, &hues).or_else(|| inks.get(id).copied()),
+                pixtuoid_scene::badge::repo_hue(slot).or_else(|| inks.get(id).copied()),
                 sel && state.expanded,
                 read_since_idle(slot, &state.seen),
                 inner.width,

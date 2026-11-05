@@ -337,6 +337,8 @@ pub(crate) fn sit_down_as(
             )
         },
     );
+    // agent-office: as the reducer would, so the sitter wears its colour.
+    scene.assign_repo_hues();
     let mut session = FloorSession::new(std::sync::Arc::new(pack.clone()));
     let mut frames = Vec::new();
     let mut seated_at = None;

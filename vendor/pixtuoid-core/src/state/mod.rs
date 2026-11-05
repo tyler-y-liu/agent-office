@@ -359,6 +359,11 @@ pub struct AgentSlot {
     /// The most recent Usage reading (see [`UsageObservation`]).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_usage: Option<UsageObservation>,
+    /// agent-office: its repository's colour, an index under
+    /// [`REPO_HUE_COUNT`] that [`SceneState::assign_repo_hues`] deals; `None`
+    /// while its directory is unknown. Derived, so not serialized.
+    #[serde(skip)]
+    pub repo_hue: Option<u8>,
 }
 
 fn u64_is_zero(v: &u64) -> bool {
@@ -709,7 +714,71 @@ pub fn project_root(cwd: &Path) -> &Path {
         .unwrap_or(cwd)
 }
 
+/// agent-office: how many colours a repository can wear — the length of the
+/// scene's repository palette.
+pub const REPO_HUE_COUNT: u8 = 8;
+
+/// agent-office: the colour `root` asks for first. FNV-1a over the path's
+/// bytes, not std's hasher, whose output may change between Rust releases:
+/// a repository should ask for the same colour every run.
+fn preferred_repo_hue(root: &Path) -> u8 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in root.as_os_str().as_encoded_bytes() {
+        h = (h ^ u32::from(*b)).wrapping_mul(0x0100_0193);
+    }
+    (h % u32::from(REPO_HUE_COUNT)) as u8
+}
+
 impl SceneState {
+    /// agent-office: give every agent its repository's colour
+    /// ([`AgentSlot::repo_hue`]), so a repository's sitters and cards read
+    /// as one project. A repository keeps the colour its sessions
+    /// already wear while one of them is left — another repository coming or
+    /// going never recolours it. A repository without one takes the colour
+    /// its path asks for ([`preferred_repo_hue`]), else the next free, so up
+    /// to eight never share one and a repository reopened in a quiet office
+    /// wears its own colour again. Run after every change to the agents.
+    pub fn assign_repo_hues(&mut self) {
+        let mut agents: Vec<&AgentSlot> =
+            self.agents.values().filter(|a| !a.unknown_cwd).collect();
+        // The oldest session settles a repository whose sessions disagree
+        // (one whose directory changed brings another's colour along).
+        agents.sort_by_key(|a| (a.created_at, a.agent_id));
+        let mut held: HashMap<&Path, u8> = HashMap::new();
+        for a in &agents {
+            if let Some(h) = a.repo_hue {
+                held.entry(project_root(&a.cwd)).or_insert(h);
+            }
+        }
+        for a in &agents {
+            let root = project_root(&a.cwd);
+            if held.contains_key(root) {
+                continue;
+            }
+            let want = preferred_repo_hue(root);
+            let free = (0..REPO_HUE_COUNT)
+                .map(|i| (want + i) % REPO_HUE_COUNT)
+                .find(|h| !held.values().any(|t| t == h));
+            held.insert(root, free.unwrap_or(want));
+        }
+        let dealt: Vec<(AgentId, Option<u8>)> = self
+            .agents
+            .values()
+            .map(|a| {
+                let hue = (!a.unknown_cwd)
+                    .then(|| held.get(project_root(&a.cwd)).copied())
+                    .flatten();
+                (a.agent_id, hue)
+            })
+            .collect();
+        for (id, hue) in dealt {
+            if let Some(a) = self.agents.get_mut(&id) {
+                a.repo_hue = hue;
+            }
+        }
+    }
+
+
     /// An empty scene with the given per-floor desk capacities.
     pub fn new(floor_capacities: [usize; MAX_FLOORS]) -> Self {
         Self {
@@ -880,6 +949,7 @@ mod tests {
             effort: None,
             tokens_used: 0,
             last_usage: None,
+            repo_hue: None,
         }
     }
 

@@ -206,7 +206,7 @@ impl Badge {
             agent: agent.agent_id,
             at: anchor,
             // agent-office: its repository's colour.
-            marker: crate::badge::repo_hue(agent, &namesakes.2).unwrap_or(ink.marker),
+            marker: crate::badge::repo_hue(agent).unwrap_or(ink.marker),
             name: TextSpan::new(text, ink.name),
             plate: crate::badge::badge_plate_colour(theme),
         }
