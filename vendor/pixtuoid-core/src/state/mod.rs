@@ -912,16 +912,20 @@ impl SceneState {
             // The session seats first so its sub-agents sit by it.
             team.sort_by_key(|id| (*id != root, self.agents[id].created_at));
             let floor = self.agents[&root].floor_idx;
-            let seated = team.iter().all(|id| {
-                let a = &self.agents[id];
-                a.floor_idx == floor && self.floor_range(floor).contains(&a.desk_index.0)
-            });
             let taken: std::collections::HashSet<usize> = self
                 .agents
                 .values()
                 .filter(|a| !team.contains(&a.agent_id))
                 .map(|a| a.desk_index.0)
                 .collect();
+            // A desk another holds counts as unseated: a caller that dropped
+            // agents and settled the rest may since have given it away.
+            let seated = team.iter().all(|id| {
+                let a = &self.agents[id];
+                a.floor_idx == floor
+                    && self.floor_range(floor).contains(&a.desk_index.0)
+                    && !taken.contains(&a.desk_index.0)
+            });
             let room = |f: usize| self.floor_range(f).filter(|i| !taken.contains(i)).count();
             let limit = if seated { floor } else { MAX_FLOORS };
             let Some(to) = (0..limit).find(|&f| room(f) >= team.len()) else {
