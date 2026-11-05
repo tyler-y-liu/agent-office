@@ -722,6 +722,9 @@ pub fn sub_meta(transcript: &Path) -> Option<SubMeta> {
 #[derive(Debug)]
 pub struct Tail {
     pub path: PathBuf,
+    /// The file's mtime as of the last poll: when the session last did
+    /// anything, which the slot does not know for one found already open.
+    pub modified: Option<SystemTime>,
     offset: u64,
     partial: Vec<u8>,
     skip_partial: bool,
@@ -731,6 +734,7 @@ impl Tail {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
+            modified: None,
             offset: 0,
             partial: Vec::new(),
             skip_partial: false,
@@ -740,7 +744,9 @@ impl Tail {
     /// Feed every complete new line into `t`; whether any arrived.
     pub fn poll(&mut self, t: &mut Transcript) -> std::io::Result<bool> {
         let mut f = File::open(&self.path)?;
-        let len = f.metadata()?.len();
+        let meta = f.metadata()?;
+        self.modified = meta.modified().ok();
+        let len = meta.len();
         if len < self.offset {
             // Rewritten from scratch: start over.
             *t = Transcript::default();

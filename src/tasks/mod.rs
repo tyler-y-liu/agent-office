@@ -50,6 +50,8 @@ pub struct TaskView {
     pub reply: Option<String>,
     /// The last thing it pulled off worth a cheer, and when.
     pub cheer: Option<(Cheer, SystemTime)>,
+    /// When the transcript was last written.
+    pub written_at: Option<SystemTime>,
 }
 
 /// Why an agent looks stuck.
@@ -538,6 +540,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         outcome_summarized: outcome.is_some_and(|(_, s)| s),
         reply: t.last_reply.clone(),
         cheer: t.cheer,
+        written_at: e.tail.modified,
     }
 }
 

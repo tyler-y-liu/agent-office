@@ -152,6 +152,33 @@ pub fn as_seen(
     Arc::new(drawn)
 }
 
+/// `scene` with each idle session's idle stretch starting no later than its
+/// transcript's last write. A session found already open when agent-office
+/// starts gets a fresh slot that reads idle since launch, however long ago it
+/// last did anything; the transcript knows. While it runs, the last write
+/// trails the turn's end, so a live session is left as it is.
+pub fn idle_since_written(scene: &Arc<SceneState>, views: &tasks::TaskViews) -> Arc<SceneState> {
+    let stale: Vec<(AgentId, SystemTime)> = scene
+        .agents
+        .values()
+        .filter(|s| matches!(s.state, pixtuoid_core::ActivityState::Idle))
+        .filter_map(|s| {
+            let at = views.get(&s.agent_id)?.written_at?;
+            (at < s.state_started_at).then_some((s.agent_id, at))
+        })
+        .collect();
+    if stale.is_empty() {
+        return Arc::clone(scene);
+    }
+    let mut fixed = (**scene).clone();
+    for (id, at) in stale {
+        if let Some(s) = fixed.agents.get_mut(&id) {
+            s.state_started_at = at;
+        }
+    }
+    Arc::new(fixed)
+}
+
 /// How far short of the rooftop's an idle stretch held in the pantry is
 /// drawn: enough that a frame's lag never tips it over.
 const PANTRY_MARGIN: Duration = Duration::from_secs(60);
@@ -191,8 +218,8 @@ impl Core {
 
     /// The state to draw now; drops a selection whose agent left.
     pub fn frame(&mut self) -> Frame {
-        let scene = self.scene();
         let views = self.views_rx.borrow().clone();
+        let scene = idle_since_written(&self.scene(), &views);
         let now = SystemTime::now();
         let order = panel::order(&scene, &views, now, &self.ui.seen);
         if self
@@ -536,5 +563,57 @@ mod tests {
         assert!(idle_ms(&ids[1]) < rooftop, "read, but down for lunch");
         assert_eq!(idle_ms(&ids[2]), 30_000, "just idle, left as it is");
         assert_eq!(idle_ms(&ids[3]), 3_600_000, "working, left at its desk");
+    }
+
+    /// A session already open when agent-office starts last worked hours
+    /// ago, but its slot is new: without the transcript's word it would read
+    /// "空闲 8m" and sit in the pantry as if it had just finished. One that
+    /// went idle after its last write keeps its own clock.
+    #[test]
+    fn an_idle_session_found_open_counts_from_its_last_write() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let launch = t0 + Duration::from_secs(18 * 3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["old", "fresh", "busy"]
+            .iter()
+            .map(|sid| {
+                let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+                r.apply(
+                    &mut scene,
+                    AgentEvent::SessionStart {
+                        agent_id: id,
+                        source: pipeline::CC_SOURCE.into(),
+                        session_id: (*sid).into(),
+                        cwd: "/repo".into(),
+                        parent_id: None,
+                    },
+                    launch,
+                    Transport::Jsonl,
+                );
+                id
+            })
+            .collect();
+        scene.agents.get_mut(&ids[2]).unwrap().state =
+            pixtuoid_core::ActivityState::Running { item: None };
+        let written = |at| tasks::TaskView {
+            written_at: Some(at),
+            ..Default::default()
+        };
+        let views: tasks::TaskViews = Arc::new(HashMap::from([
+            (ids[0], written(t0)),
+            (ids[1], written(launch + Duration::from_secs(2))),
+            (ids[2], written(t0)),
+        ]));
+        let scene = Arc::new(scene);
+        let fixed = idle_since_written(&scene, &views);
+        let started = |id| fixed.agents[id].state_started_at;
+        assert_eq!(started(&ids[0]), t0, "idle since its last write");
+        assert_eq!(started(&ids[1]), launch, "a later write keeps the slot's clock");
+        assert_eq!(started(&ids[2]), launch, "a working session is not idle");
+        assert!(Arc::ptr_eq(
+            &idle_since_written(&scene, &Arc::new(HashMap::new())),
+            &scene
+        ));
     }
 }
