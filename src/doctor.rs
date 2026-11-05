@@ -68,6 +68,9 @@ pub fn run() -> Result<()> {
         );
     }
 
+    let (all_in, roles) = crate::roles::doctor_line();
+    println!("[{}] roles     {roles}", if all_in { "✓" } else { " " });
+
     let socket = crate::hook::socket_path();
     match socket_in_use(&socket) {
         Some(w) => println!("[!] socket    {w}"),

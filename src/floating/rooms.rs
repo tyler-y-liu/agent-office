@@ -66,7 +66,8 @@ pub(super) fn in_meeting(t: &Tag, rooms: &[Room]) -> bool {
 }
 
 /// What a meeting room's whiteboard says: the task of each subagent in
-/// `room`, oldest first, by its summary, else its type, else its name.
+/// `room`, oldest first, by its summary, else its type, else its name; a
+/// role's post before it.
 pub(super) fn board_lines(
     room: &Area,
     tags: &[Tag],
@@ -91,8 +92,15 @@ fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Ve
     subs.iter()
         .map(|s| {
             let v = views.get(&s.agent_id);
-            v.and_then(|v| v.line.clone())
-                .or_else(|| v.and_then(|v| v.agent_type.clone()))
+            let line = v.and_then(|v| v.line.clone());
+            // Who does what: a role's post goes before its task.
+            match (v.and_then(|v| v.role), line) {
+                (Some(r), Some(l)) => return format!("{}：{l}", r.post().zh),
+                (Some(r), None) => return r.post().zh.to_owned(),
+                (None, Some(l)) => return l,
+                (None, None) => {}
+            }
+            v.and_then(|v| v.agent_type.clone())
                 .unwrap_or_else(|| pixtuoid_scene::badge::shown_label(&s.label).to_owned())
         })
         .collect()
@@ -450,7 +458,17 @@ mod tests {
         let p = start("p", None, t0);
         let late = start("agent-late", Some(p), t0 + Duration::from_secs(9));
         let early = start("agent-early", Some(p), t0 + Duration::from_secs(1));
+        let qa = start("agent-qa", Some(p), t0 + Duration::from_secs(20));
         let mut views = std::collections::HashMap::new();
+        // A PM's team: the board says which post took which part.
+        views.insert(
+            qa,
+            TaskView {
+                line: Some("跑全量测试".into()),
+                role: Some(crate::roles::Role::Qa),
+                ..TaskView::default()
+            },
+        );
         views.insert(
             late,
             TaskView {
@@ -473,8 +491,12 @@ mod tests {
             },
         );
         assert_eq!(
-            board_lines_of(&[late, p, early], &scene, &std::sync::Arc::new(views)),
-            vec!["Explore".to_owned(), "查登录 bug".to_owned()]
+            board_lines_of(&[qa, late, p, early], &scene, &std::sync::Arc::new(views)),
+            vec![
+                "Explore".to_owned(),
+                "查登录 bug".to_owned(),
+                "测试：跑全量测试".to_owned()
+            ]
         );
     }
 
@@ -530,6 +552,7 @@ mod tests {
             marker_rgb: pixtuoid_core::sprite::Rgb { r: 0, g: 0, b: 0 },
             name: String::new(),
             ink: 0,
+            role: None,
             task: None,
             full: false,
         };

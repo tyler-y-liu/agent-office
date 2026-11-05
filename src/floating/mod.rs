@@ -38,6 +38,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 use crate::core::{Action, Core, Floors};
+use crate::roles::Role;
 use crate::panel;
 use crate::text::truncate_cells;
 use font::{Canvas, LINE_H, rgb};
@@ -640,6 +641,11 @@ impl Win {
                 sf,
                 OfficeExtras {
                     weather,
+                    roles: frame
+                        .views
+                        .iter()
+                        .filter_map(|(id, v)| Some((*id, v.role?)))
+                        .collect(),
                     board,
                     now,
                 },
@@ -900,6 +906,7 @@ impl Win {
                 text,
                 (d, u, win_w),
                 labels,
+                &extras.roles,
                 full,
                 scale_factor,
                 &avoid,
@@ -1152,6 +1159,8 @@ type Drawn = (
 /// What the office is drawn with beyond the scene itself.
 struct OfficeExtras {
     weather: WeatherPolicy,
+    /// Each worker's post, worn on its badge whether or not labels show.
+    roles: HashMap<AgentId, Role>,
     /// The wall board's two lines, in place of its own.
     board: Option<[String; 2]>,
     now: SystemTime,
@@ -1621,6 +1630,8 @@ pub(crate) struct Tag {
     marker_rgb: Rgb,
     name: String,
     ink: u32,
+    /// Its post, worn as a chip of the role's colour before its name.
+    role: Option<Role>,
     task: Option<String>,
     /// Its whole name and its task shown; else its name cut short
     /// ([`short_name`]) and no task.
@@ -1691,11 +1702,13 @@ fn tag_pad(scale_factor: f64) -> u32 {
 /// the row, left out when no tier is free or it would leave the window's
 /// top. The full ones take their rows first. The names and tasks are set
 /// here rather than baked because 8 art pixels are too small to read.
+#[expect(clippy::too_many_arguments, reason = "one frame's tags, placed once")]
 fn place_tags(
     faces: &mut Faces,
     text: HostText<'_>,
     (d, u, win_w): (u32, u32, u32),
     labels: &HashMap<AgentId, String>,
+    roles: &HashMap<AgentId, Role>,
     full: &[AgentId],
     scale_factor: f64,
     avoid: &[Area],
@@ -1716,8 +1729,12 @@ fn place_tags(
             } else {
                 short_name(b.name.text())
             };
+            let role = roles.get(&b.agent).copied();
+            // The chip is part of the badge, so a neighbour steps clear of it
+            // too, and a short badge keeps it: the post reads in a crowd.
+            let chip = role.map_or(0, |r| role_chip_w(faces, r, name_px, pad) + pad);
             let (w, h) = (
-                Faces::cells(&name) * faces.cell_w(name_px) + 3 * pad,
+                Faces::cells(&name) * faces.cell_w(name_px) + 3 * pad + chip,
                 name_px + 2 * pad,
             );
             let cx = (at.x + i64::from(at.w / 2)) * i64::from(u);
@@ -1737,6 +1754,7 @@ fn place_tags(
                 marker_rgb: b.marker,
                 name,
                 ink: to_u32(b.name.ink),
+                role,
                 task: labels
                     .get(&b.agent)
                     .filter(|_| shown)
@@ -2192,6 +2210,11 @@ fn paint_first_waiting(
     faces.draw(canvas, x + i64::from(pad), base, "!", PANEL_BG, px);
 }
 
+/// A role chip's width on a badge: its glyph with a pad either side.
+fn role_chip_w(faces: &mut Faces, role: Role, name_px: u32, pad: u32) -> u32 {
+    Faces::cells(role.post().glyph) * faces.cell_w(name_px) + 2 * pad
+}
+
 /// Set the placed badges and task labels in the readable faces.
 fn paint_tags(
     canvas: &mut Canvas,
@@ -2212,14 +2235,15 @@ fn paint_tags(
             t.ink
         };
         let base = r.y + i64::from(pad) + i64::from(faces.ascent(name_px));
-        faces.draw(
-            canvas,
-            r.x + i64::from(2 * pad),
-            base,
-            &t.name,
-            ink,
-            name_px,
-        );
+        let mut x = r.x + i64::from(2 * pad);
+        if let Some(role) = t.role {
+            let post = role.post();
+            let w = role_chip_w(faces, role, name_px, pad);
+            canvas.fill(r.x + i64::from(pad), r.y, w, r.h, to_u32(post.ink));
+            faces.draw(canvas, r.x + i64::from(2 * pad), base, post.glyph, PANEL_BG, name_px);
+            x = r.x + i64::from(pad + w + pad);
+        }
+        faces.draw(canvas, x, base, &t.name, ink, name_px);
     }
     for t in tags {
         let (Some(r), Some(task)) = (t.label, &t.task) else {
@@ -2450,6 +2474,7 @@ mod tests {
             text,
             (d, u, win_w),
             &labels,
+            &HashMap::new(),
             &[id(2), id(6)],
             2.0,
             &[],
@@ -2478,5 +2503,45 @@ mod tests {
                 "full tags do not overlap"
             );
         }
+    }
+    /// A role's chip is drawn inside its badge: placed without it, a chip
+    /// would cover the name of the figure beside it. With it counted, the
+    /// badge is wider and its neighbour still steps clear.
+    #[test]
+    fn a_role_chip_widens_its_badge_so_a_neighbour_still_steps_clear() {
+        let Ok(mut faces) = Faces::load() else {
+            return;
+        };
+        let ink = Rgb { r: 9, g: 9, b: 9 };
+        let id = |n: usize| AgentId::from_parts("claude-code", &format!("s{n}"));
+        let badges: Vec<Badge> = (0..2)
+            .map(|n| Badge {
+                agent: id(n),
+                at: pixtuoid_scene::layout::Point {
+                    x: 40 + 12 * n as u16,
+                    y: 40,
+                },
+                marker: ink,
+                name: pixtuoid_scene::display::TextSpan::new("cc·repo", ink),
+                plate: ink,
+            })
+            .collect();
+        let text = HostText {
+            badges: &badges,
+            bubbles: &[],
+            signs: &[],
+            dim: pixtuoid_scene::look::Dim::NONE,
+        };
+        let place = |faces: &mut Faces, roles: &HashMap<AgentId, Role>| {
+            place_tags(faces, text, (1, 4, 400), &HashMap::new(), roles, &[], 2.0, &[])
+        };
+        let plain = place(&mut faces, &HashMap::new());
+        let roles: HashMap<AgentId, Role> = [(id(0), Role::Frontend), (id(1), Role::Qa)].into();
+        let worn = place(&mut faces, &roles);
+        for (p, w) in plain.iter().zip(&worn) {
+            assert_eq!(w.role, roles.get(&w.agent).copied());
+            assert!(w.badge.w > p.badge.w, "the chip widens the badge");
+        }
+        assert!(!worn[0].badge.meets(&worn[1].badge), "neighbours step clear");
     }
 }

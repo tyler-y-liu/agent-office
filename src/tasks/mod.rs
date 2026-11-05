@@ -38,6 +38,9 @@ pub struct TaskView {
     pub todo: Option<String>,
     pub recent_tools: Vec<String>,
     pub agent_type: Option<String>,
+    /// Its post in the office: a subagent's `office-*` type, else the role
+    /// its prompt's marker gave the session.
+    pub role: Option<crate::roles::Role>,
     pub phase: Option<Phase>,
     pub stuck: Option<Stuck>,
     /// When the current turn began: the human's last prompt.
@@ -641,6 +644,15 @@ fn summary_input(t: &Transcript, cwd: &Path) -> SummaryInput {
     }
 }
 
+/// A subagent's type is what it was started as; a marker in the prompt a PM
+/// wrote it is only text, so the type wins.
+fn role_of(e: &Entry) -> Option<crate::roles::Role> {
+    let typed = e.sub.as_ref().and_then(|s| s.agent_type.as_deref());
+    typed
+        .and_then(crate::roles::Role::of_agent_type)
+        .or(e.transcript.role)
+}
+
 fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
     let t = &e.transcript;
     // An outcome read from an earlier reply describes an earlier turn.
@@ -665,6 +677,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         todo: t.todo_active.clone(),
         recent_tools: t.recent_tools.iter().cloned().collect(),
         agent_type: e.sub.as_ref().and_then(|s| s.agent_type.clone()),
+        role: role_of(e),
         phase: t.phase,
         stuck: stuck(t, working, now.duration_since(e.grew_at), stuck_limits()),
         turn_started: t.turn_started,
@@ -850,6 +863,30 @@ mod tests {
             sub_meta_at: Instant::now(),
             grew_at: Instant::now(),
         }
+    }
+
+    /// A PM's prompt to a subagent may well quote a marker; the subagent is
+    /// what it was started as. And Claude Code's own Explore is no post.
+    #[test]
+    fn an_office_type_outranks_a_marker_and_a_builtin_is_no_role() {
+        use crate::roles::Role;
+        let mut e = entry();
+        e.transcript.role = Some(Role::Pm);
+        let sub = |t: &str| {
+            Some(extract::SubMeta {
+                agent_type: Some(t.into()),
+                ..Default::default()
+            })
+        };
+        e.sub = sub("office-qa");
+        assert_eq!(view(&e, true, Instant::now()).role, Some(Role::Qa));
+        e.sub = sub("Explore");
+        e.transcript.role = None;
+        let v = view(&e, true, Instant::now());
+        assert_eq!((v.role, v.agent_type.as_deref()), (None, Some("Explore")));
+        e.sub = None;
+        e.transcript.role = Some(Role::Ux);
+        assert_eq!(view(&e, true, Instant::now()).role, Some(Role::Ux));
     }
 
     /// Old task logs go, recent ones and anything that is not a task log

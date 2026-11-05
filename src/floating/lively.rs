@@ -769,6 +769,7 @@ mod tests {
             marker_rgb: pixtuoid_core::sprite::Rgb { r: 0, g: 0, b: 0 },
             name: String::new(),
             ink: 0,
+            role: None,
             task: None,
             full: true,
         };
@@ -829,6 +830,7 @@ mod tests {
             marker_rgb: pixtuoid_core::sprite::Rgb { r: 0, g: 0, b: 0 },
             name: String::new(),
             ink: 0,
+            role: None,
             task: None,
             full: true,
         };

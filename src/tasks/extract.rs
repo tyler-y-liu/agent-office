@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
+use crate::roles::Role;
 use crate::text::{one_line, truncate_cells};
 
 const KEEP_PROMPTS: usize = 3;
@@ -48,6 +49,9 @@ pub struct Transcript {
     pub(super) cheering: Vec<(String, Cheer)>,
     /// The last thing worth cheering and when its result came in.
     pub cheer: Option<(Cheer, SystemTime)>,
+    /// The post its prompt's `[office:<id>]` marker gave it; a later prompt
+    /// without one keeps it, one with another changes it.
+    pub role: Option<Role>,
 }
 
 /// Something the agent just pulled off that the office cheers.
@@ -242,6 +246,18 @@ impl Transcript {
     }
 
     fn push_prompt(&mut self, text: &str) {
+        // The marker and the role's card are how the session was briefed,
+        // not its task: kept out of the summary and the raw-prompt line.
+        let text = match crate::roles::parse_marker(text) {
+            Some((role, rest)) => {
+                self.role = Some(role);
+                let Some(task) = crate::roles::task_of(rest) else {
+                    return;
+                };
+                task
+            }
+            None => text,
+        };
         let Some(p) = human_prompt(text) else { return };
         if self.prompts.back() == Some(&p) {
             return;
@@ -734,6 +750,25 @@ pub fn sub_meta(transcript: &Path) -> Option<SubMeta> {
     })
 }
 
+/// How much of a transcript's head is read for the role its first prompt
+/// gave it: that prompt is among the first few lines.
+const HEAD_READ: u64 = 256 << 10;
+
+/// The role a transcript's head gives it, read apart from the tail.
+fn head_role(f: &mut File) -> Option<Role> {
+    let mut head = Vec::new();
+    f.seek(SeekFrom::Start(0)).ok()?;
+    f.take(HEAD_READ).read_to_end(&mut head).ok()?;
+    let mut t = Transcript::default();
+    // The last line may be cut short; feed skips what does not parse.
+    for line in head.split(|&b| b == b'\n') {
+        if let Ok(s) = std::str::from_utf8(line) {
+            t.feed(s);
+        }
+    }
+    t.role
+}
+
 /// Reads what a transcript gained since the last poll.
 #[derive(Debug)]
 pub struct Tail {
@@ -778,6 +813,8 @@ impl Tail {
             return Ok(false);
         }
         if self.offset == 0 && len > FIRST_READ {
+            // The role is set by the first prompt, which a tail read skips.
+            t.role = head_role(&mut f);
             self.offset = len - FIRST_READ;
             // Mid-line: drop up to the first newline as a partial.
             self.skip_partial = true;
@@ -1309,6 +1346,82 @@ mod tests {
             parse_timestamp("2000-02-29T00:00:00.5Z"),
             Some(SystemTime::UNIX_EPOCH + Duration::new(951_782_400, 500_000_000))
         );
+    }
+
+    /// A dispatched session's first prompt is its role's card and then the
+    /// task: the card is the same for every session of that role, so a
+    /// summary or raw line made of it would tell no two of them apart.
+    #[test]
+    fn the_marker_and_card_stay_out_of_the_task() {
+        let mut t = Transcript::default();
+        t.feed(&user(json!(
+            "[office:frontend] 角色：前端\n你是这间办公室的前端工程师。\n\n任务：设置页加暗色模式"
+        )));
+        assert_eq!(t.role, Some(Role::Frontend));
+        assert_eq!(t.latest_prompt(), Some("设置页加暗色模式"));
+        // Claude Code's own note of it reads the same.
+        let mut l = Transcript::default();
+        l.feed(&json!({"type":"last-prompt","lastPrompt":"[office:qa] 跑一遍测试"}).to_string());
+        assert_eq!(
+            (l.role, l.latest_prompt()),
+            (Some(Role::Qa), Some("跑一遍测试"))
+        );
+    }
+
+    /// The role is the session's post for good: the user's follow-ups carry
+    /// no marker and must not take it away, while a new marker reassigns it.
+    #[test]
+    fn a_role_sticks_across_later_prompts_and_a_new_marker_changes_it() {
+        let mut t = Transcript::default();
+        t.feed(&user(json!("[office:ux]\n任务：还没定，先问我要做什么。")));
+        assert_eq!(t.role, Some(Role::Ux));
+        assert_eq!(t.latest_prompt(), None, "no task yet is no prompt");
+        t.feed(&user(json!("看看设置页")));
+        assert_eq!(
+            (t.role, t.latest_prompt()),
+            (Some(Role::Ux), Some("看看设置页"))
+        );
+        t.feed(&user(json!("[office:reviewer] 审一下这次改动")));
+        assert_eq!(t.role, Some(Role::Reviewer));
+        t.feed(&user(json!("提到 [office:qa] 的这行不算")));
+        assert_eq!(t.role, Some(Role::Reviewer));
+    }
+
+    #[test]
+    fn a_codex_user_message_carries_a_role_too() {
+        let mut t = Transcript::default();
+        t.feed(&rollout(
+            "event_msg",
+            json!({"type":"user_message","message":"[office:backend] 加个接口"}),
+        ));
+        assert_eq!(
+            (t.role, t.latest_prompt()),
+            (Some(Role::Backend), Some("加个接口"))
+        );
+    }
+
+    /// A long session's first read starts 4 MiB from its end, past the
+    /// prompt that gave it its role: without the head read every long
+    /// session would lose its post on a restart.
+    #[test]
+    fn a_huge_transcript_still_knows_its_role_from_its_head() {
+        let dir = std::env::temp_dir().join(format!("agent-office-bigrole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jsonl");
+        let filler = tool("Read", json!({"file_path": "x".repeat(1000)}));
+        let mut body = format!("{}\n", user(json!("[office:qa] 跑全量测试")));
+        while body.len() as u64 <= FIRST_READ + 4096 {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        body.push_str(&user(json!("再跑一次")));
+        body.push('\n');
+        std::fs::write(&path, &body).unwrap();
+        let mut t = Transcript::default();
+        Tail::new(path).poll(&mut t).unwrap();
+        assert_eq!(t.latest_prompt(), Some("再跑一次"));
+        assert_eq!(t.role, Some(Role::Qa));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -539,8 +539,12 @@ fn card(
     let body_w = w.saturating_sub(pad.len() as u16);
     let marker = ink.map_or(DIM, rgb);
     let (st, st_color) = status(slot, view, read, SystemTime::now());
+    let role = view.and_then(|v| v.role).map(crate::roles::Role::post);
+    // A role's chip says what an `office-*` type would.
     let name = match view.and_then(|v| v.agent_type.as_deref()) {
-        Some(t) if depth > 0 && !look.name.contains(t) => format!("{t} {}", look.name),
+        Some(t) if depth > 0 && role.is_none() && !look.name.contains(t) => {
+            format!("{t} {}", look.name)
+        }
         _ => look.name.to_owned(),
     };
     // The selected card says whether Enter opens or folds it.
@@ -551,14 +555,16 @@ fn card(
     };
     let chip = format!(" {st} ");
     let avatar = format!(" {} ", avatar_initial(&slot.label));
+    let role_chip = role.map(|p| format!("{} ", p.glyph));
     let name_w = w.saturating_sub(
         indent.chars().count() as u16
             + crate::text::cells(&avatar)
+            + role_chip.as_deref().map_or(0, crate::text::cells)
             + 1
             + crate::text::cells(&chip)
             + 1,
     );
-    let mut lines = vec![Line::from(vec![
+    let mut first = vec![
         Span::raw(indent.clone()),
         Span::styled(
             avatar,
@@ -567,14 +573,30 @@ fn card(
                 .fg(CHIP_INK)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
-        Span::styled(
-            truncate_cells(&name, name_w),
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(chip, Style::default().bg(st_color).fg(CHIP_INK)),
-    ])];
+    ];
+    if let (Some(p), Some(c)) = (role, role_chip) {
+        first.push(Span::styled(
+            c,
+            Style::default()
+                .bg(rgb(p.ink))
+                .fg(CHIP_INK)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let mut lines = vec![Line::from(
+        first
+            .into_iter()
+            .chain([
+                Span::raw(" "),
+                Span::styled(
+                    truncate_cells(&name, name_w),
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(chip, Style::default().bg(st_color).fg(CHIP_INK)),
+            ])
+            .collect::<Vec<_>>(),
+    )];
     let task = view.and_then(|v| v.line.clone());
     let summarized = view.is_some_and(|v| v.summarized);
     let pending = view.is_some_and(|v| v.pending);
@@ -1339,6 +1361,46 @@ mod tests {
         let chip = first.last().expect("a chip");
         assert_eq!(chip.style.bg, Some(WAIT), "the status on its colour");
         assert!(chip.content.contains("等你确认"));
+    }
+
+    /// The post is what tells two sessions of one repository apart at a
+    /// glance: a role's card wears its chip, while a built-in subagent type
+    /// is no post and still reads as before its name.
+    #[test]
+    fn a_role_card_wears_its_chip_and_explore_keeps_its_type() {
+        use crate::roles::Role;
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let slot = scene.agents.get(&a).unwrap();
+        let look = CardLook {
+            name: "agent-office",
+            ink: None,
+            selected: false,
+            expanded: false,
+            read: false,
+            summaries: true,
+        };
+        let qa = TaskView {
+            role: Some(Role::Qa),
+            agent_type: Some("office-qa".into()),
+            ..TaskView::default()
+        };
+        let lines = card(slot, 1, Some(&qa), &look, 40);
+        let first = &lines[0].spans;
+        let chip = first
+            .iter()
+            .find(|s| s.style.bg == Some(rgb(Role::Qa.post().ink)))
+            .expect("a role chip");
+        assert_eq!(chip.content.trim(), "测");
+        assert!(!first.iter().any(|s| s.content.contains("office-qa")));
+        let explore = TaskView {
+            agent_type: Some("Explore".into()),
+            ..TaskView::default()
+        };
+        let lines = card(slot, 1, Some(&explore), &look, 40);
+        assert!(lines[0].spans.iter().any(|s| s.content.contains("Explore agent-office")));
     }
 
     /// A finished session waits in the pantry, under 做完待看, until you open

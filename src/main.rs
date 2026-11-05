@@ -14,6 +14,7 @@ mod jump;
 mod notify;
 mod panel;
 mod pipeline;
+mod roles;
 mod tasks;
 mod text;
 
@@ -57,6 +58,7 @@ fn main() -> Result<()> {
             };
         }
         Some(&"doctor") => return doctor::run(),
+        Some(&"roles") => return roles::cli(&args[1..]),
         _ => {}
     }
     let socket = hook::socket_path();
