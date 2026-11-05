@@ -660,8 +660,7 @@ impl Win {
                     * i64::from(fit.scale().get()),
                 ms: lively::ms_of(now),
             };
-            cat_hit =
-                self.paint_goings_on_under(&mut canvas, &frame, &tags, &signs, stage, now);
+            cat_hit = self.paint_goings_on_under(&mut canvas, &frame, &tags, &signs, stage, now);
             self.paint_rooms(&mut canvas, &frame, &tags, &signs, &rooms, stage);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
             let stuck: Vec<AgentId> = frame
@@ -691,7 +690,16 @@ impl Win {
                 sf,
                 self.core.ui.selected,
             );
-            self.paint_goings_on_over(&mut canvas, &frame, &tags, &signs, &speakers, stage, now);
+            self.paint_goings_on_over(
+                &mut canvas,
+                &frame,
+                &tags,
+                &signs,
+                &speakers,
+                &rooms,
+                stage,
+                now,
+            );
             self.paint_reaction(&mut canvas, &tags, stage);
             self.quick |= self.reaction.is_some()
                 || self.pending_poke.is_some()
@@ -1297,6 +1305,7 @@ impl Win {
         tags: &[Tag],
         signs: &[DoorSign],
         speakers: &[AgentId],
+        rooms: &[rooms::Room],
         stage: lively::Stage,
         now: SystemTime,
     ) {
@@ -1328,6 +1337,12 @@ impl Win {
         for id in speakers {
             let Some(t) = tags.iter().find(|t| t.agent == *id) else {
                 continue;
+            };
+            // A typhoon is news even in a meeting; lunch is not.
+            let occasion = if occasion != Occasion::Typhoon && rooms::in_meeting(t, rooms) {
+                Occasion::Meeting
+            } else {
+                occasion
             };
             let line = crate::fun::chitchat(*id, frame.views.get(id), occasion, turn, now);
             if let Some(a) = lively::chitchat(canvas, &mut self.faces, stage, t, line, &taken) {

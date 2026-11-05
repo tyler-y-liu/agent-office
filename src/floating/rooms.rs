@@ -57,6 +57,14 @@ fn in_room(t: &Tag, room: &Area) -> bool {
         && (room.y..room.y + i64::from(room.h)).contains(&t.figure_top)
 }
 
+/// Whether the figure whose badge is `t` sits in one of the meeting rooms
+/// proper: the rooftop, the waiting area and your office are not meetings.
+pub(super) fn in_meeting(t: &Tag, rooms: &[Room]) -> bool {
+    rooms
+        .iter()
+        .any(|r| r.style == RoomStyle::Office && in_room(t, &r.area))
+}
+
 /// What a meeting room's whiteboard says: the task of each subagent in
 /// `room`, oldest first, by its summary, else its type, else its name.
 pub(super) fn board_lines(
@@ -478,5 +486,56 @@ mod tests {
         assert_eq!(ticket_digits(7), [0, 7]);
         assert_eq!(ticket_digits(42), [4, 2]);
         assert_eq!(ticket_digits(130), [9, 9]);
+    }
+
+    /// Only a meeting room proper is a meeting: someone up on the rooftop or
+    /// waiting by your office may still talk lunch.
+    #[test]
+    fn a_meeting_is_a_meeting_room_only() {
+        let area = |x| Area {
+            x,
+            y: 0,
+            w: 100,
+            h: 100,
+        };
+        let rooms = [
+            Room {
+                style: RoomStyle::Office,
+                area: area(0),
+                l: 1,
+            },
+            Room {
+                style: RoomStyle::Rooftop,
+                area: area(200),
+                l: 1,
+            },
+            Room {
+                style: RoomStyle::Waiting,
+                area: area(400),
+                l: 1,
+            },
+        ];
+        let at = |x| Tag {
+            agent: AgentId::from_parts(CC_SOURCE, "a"),
+            badge: Area {
+                x,
+                y: 0,
+                w: 10,
+                h: 4,
+            },
+            figure_top: 50,
+            label: None,
+            plate: 0,
+            marker: 0,
+            marker_rgb: pixtuoid_core::sprite::Rgb { r: 0, g: 0, b: 0 },
+            name: String::new(),
+            ink: 0,
+            task: None,
+            full: false,
+        };
+        assert!(in_meeting(&at(40), &rooms));
+        assert!(!in_meeting(&at(240), &rooms), "rooftop");
+        assert!(!in_meeting(&at(440), &rooms), "waiting area");
+        assert!(!in_meeting(&at(140), &rooms), "the corridor");
     }
 }
