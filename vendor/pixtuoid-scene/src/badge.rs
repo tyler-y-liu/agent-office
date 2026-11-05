@@ -176,14 +176,21 @@ impl Namesakes {
         self
     }
 
+    /// agent-office: `agent`'s label as shown ([`shown_label`]), with its
+    /// namesake number when it shares the label, untruncated.
+    pub(crate) fn name(&self, agent: &AgentSlot) -> String {
+        let label = shown_label(&agent.label);
+        match self.0.get(&agent.agent_id) {
+            Some(n) => format!("{label}{LABEL_SEP}{n}"),
+            None => label.to_owned(),
+        }
+    }
+
     /// `agent`'s badge text, disambiguated and truncated, with no marker.
     pub(crate) fn text(&self, agent: &AgentSlot) -> String {
         // agent-office: a namesake carries its start order, not a hash of its
         // session id, so the suffix says which session it is.
-        let raw: std::borrow::Cow<'_, str> = match self.0.get(&agent.agent_id) {
-            Some(n) => std::borrow::Cow::Owned(format!("{}{LABEL_SEP}{n}", agent.label)),
-            None => std::borrow::Cow::Borrowed(&*agent.label),
-        };
+        let raw = self.name(agent);
         let marker = crate::display::text::cells(BADGE_MARKER.encode_utf8(&mut [0; 4]));
         // agent-office: the "+N" is kept whole and the name truncated to fit.
         let team = match self.1.get(&agent.agent_id) {
@@ -193,6 +200,27 @@ impl Namesakes {
         let room = BADGE_CELLS.saturating_sub(marker + crate::display::text::cells(&team));
         format!("{}{team}", truncate_label(&raw, room))
     }
+}
+
+/// agent-office: `label` as the office shows it: Claude Code's sessions,
+/// the usual kind, without their `cc·` source prefix, which on every name
+/// was noise; other sources keep theirs, as their figures' accessories do.
+pub fn shown_label(label: &str) -> &str {
+    label.strip_prefix("cc\u{b7}").unwrap_or(label)
+}
+
+/// agent-office: each of `agents`' names as its badge reads before
+/// truncation: [`shown_label`] with its namesake number, so a card beside
+/// the office names the same session its badge does.
+pub fn shown_names<'a>(
+    agents: impl IntoIterator<Item = &'a AgentSlot>,
+) -> HashMap<pixtuoid_core::AgentId, String> {
+    let agents: Vec<&AgentSlot> = agents.into_iter().collect();
+    let names = Namesakes::of(agents.iter().copied());
+    agents
+        .iter()
+        .map(|a| (a.agent_id, names.name(a)))
+        .collect()
 }
 
 /// agent-office: the agents among `agents` whose label `counts` says is
@@ -547,11 +575,24 @@ mod tests {
             other.clone(),
         ]);
         let namesakes = Namesakes::of(s.agents.values());
-        assert_eq!(namesakes.text(&early), "cc\u{b7}repo\u{b7}1");
-        assert_eq!(namesakes.text(&middle), "cc\u{b7}repo\u{b7}2");
-        assert_eq!(namesakes.text(&late), "cc\u{b7}repo\u{b7}3");
+        assert_eq!(namesakes.text(&early), "repo\u{b7}1");
+        assert_eq!(namesakes.text(&middle), "repo\u{b7}2");
+        assert_eq!(namesakes.text(&late), "repo\u{b7}3");
         // A label no one else wears stays bare.
-        assert_eq!(namesakes.text(&other), "cc\u{b7}other");
+        assert_eq!(namesakes.text(&other), "other");
+        // The panel's cards name each session as its badge does, so the two
+        // can be matched by eye.
+        let names = super::shown_names(s.agents.values());
+        assert_eq!(names[&middle.agent_id], "repo\u{b7}2");
+    }
+
+    /// agent-office: Claude Code is the usual source, so its `cc·` on every
+    /// name said nothing; another source's prefix is what tells it apart.
+    #[test]
+    fn only_claude_codes_prefix_is_dropped() {
+        assert_eq!(super::shown_label("cc\u{b7}blog"), "blog");
+        assert_eq!(super::shown_label("cx\u{b7}blog"), "cx\u{b7}blog");
+        assert_eq!(super::shown_label("ccx\u{b7}blog"), "ccx\u{b7}blog");
     }
 
     #[test]

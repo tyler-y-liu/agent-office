@@ -60,7 +60,11 @@ impl Notifier {
         now: SystemTime,
         focused: bool,
     ) -> Tick {
-        let waiting: Vec<(AgentId, Wait, SystemTime)> = panel::order(scene, views, now, seen)
+        let order = panel::order(scene, views, now, seen);
+        // The badge counts every wait, as the window does; only a banner
+        // waits out a prompt's first seconds.
+        let all = panel::waiting(scene, views, &order, seen).len();
+        let waiting: Vec<(AgentId, Wait, SystemTime)> = order
             .into_iter()
             .filter_map(|(id, _)| {
                 let slot = scene.agents.get(&id)?;
@@ -94,7 +98,9 @@ impl Notifier {
             };
             tick.alerts.push(Alert {
                 agent: id,
-                title: slot.label.to_string(),
+                title: pixtuoid_scene::badge::shown_names(scene.agents.values())
+                    .remove(&id)
+                    .unwrap_or_else(|| slot.label.to_string()),
                 subtitle,
                 body: body.unwrap_or_default(),
             });
@@ -103,8 +109,8 @@ impl Notifier {
         self.unseen |= !tick.alerts.is_empty();
         self.told
             .retain(|told| waiting.iter().any(|&(id, _, since)| *told == (id, since)));
-        if self.badge != Some(waiting.len()) {
-            self.badge = Some(waiting.len());
+        if self.badge != Some(all) {
+            self.badge = Some(all);
             tick.badge = self.badge;
         }
         tick
@@ -251,15 +257,15 @@ mod tests {
         let mut n = Notifier::default();
         primed(&mut n, &scene, &v, 100);
         prompt(&mut scene, ids[0], 100);
-        assert!(
-            primed(&mut n, &scene, &v, 105).alerts.is_empty(),
-            "too soon"
-        );
+        let soon = primed(&mut n, &scene, &v, 105);
+        assert!(soon.alerts.is_empty(), "too soon");
+        // The Dock counts it at once, as the window's own count does: two
+        // counts of the same waits disagreeing read as a bug.
+        assert_eq!(soon.badge, Some(1));
         let t = primed(&mut n, &scene, &v, 121);
         assert_eq!(t.alerts.len(), 1);
         assert_eq!(t.alerts[0].subtitle, "等你确认");
         assert_eq!(t.alerts[0].body, "修登录页");
-        assert_eq!(t.badge, Some(1));
         assert!(n.unseen);
         let again = primed(&mut n, &scene, &v, 140);
         assert!(again.alerts.is_empty(), "told once");

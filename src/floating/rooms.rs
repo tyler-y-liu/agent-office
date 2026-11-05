@@ -85,7 +85,7 @@ fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Ve
             let v = views.get(&s.agent_id);
             v.and_then(|v| v.line.clone())
                 .or_else(|| v.and_then(|v| v.agent_type.clone()))
-                .unwrap_or_else(|| s.label.to_string())
+                .unwrap_or_else(|| pixtuoid_scene::badge::shown_label(&s.label).to_owned())
         })
         .collect()
 }

@@ -19,8 +19,10 @@ use crate::text::{one_line, truncate_cells};
 const DIM: Color = Color::Rgb(0x8a, 0x8f, 0x98);
 const TEXT: Color = Color::Rgb(0xe6, 0xe6, 0xe6);
 const TASK: Color = Color::Rgb(0xff, 0xe8, 0xa3);
-pub const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
-const WORK: Color = Color::Rgb(0x7d, 0xcf, 0xff);
+/// Waiting and working in the office's own badge colours (the harbour
+/// theme's), so a card and its figure's name read as the same state.
+pub const WAIT: Color = Color::Rgb(0xe0, 0xaf, 0x68);
+const WORK: Color = Color::Rgb(0x9e, 0xce, 0x6a);
 const STUCK: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);
 /// The panel's own background, which a faded card's colours sink toward.
@@ -28,8 +30,13 @@ const PANEL_BG: Color = Color::Rgb(0x16, 0x18, 0x1d);
 /// A card waiting on you sits on a solid warm ground: it is the one to act on.
 const WAIT_BG: Color = Color::Rgb(0x4a, 0x30, 0x1e);
 const WAIT_SELECTED_BG: Color = Color::Rgb(0x5e, 0x3e, 0x28);
-/// How far an idle card's colours sink into the panel: it needs nothing.
-const IDLE_FADE: f32 = 0.55;
+/// Secondary text on that warm ground, where [`DIM`] fell to 3.7:1.
+const DIM_ON_WAIT: Color = Color::Rgb(0xb8, 0xbc, 0xc4);
+/// The card under the pointer, which a click selects.
+const HOVER_BG: Color = Color::Rgb(0x1f, 0x23, 0x2b);
+/// How far an idle card's colours sink into the panel: it needs nothing,
+/// but its dim text must still read (past this it fell near 2:1).
+const IDLE_FADE: f32 = 0.35;
 /// Text on a coloured chip or avatar.
 const CHIP_INK: Color = Color::Rgb(0x16, 0x18, 0x1d);
 
@@ -47,6 +54,13 @@ pub struct PanelState {
     /// Bring the selected card into view on the next draw. Only when the
     /// selection or its size changes, so the wheel can scroll away from it.
     pub reveal: bool,
+    /// The card under the pointer.
+    pub hovered: Option<AgentId>,
+    /// Lunch or a typhoon: the idle are drawn in the cha chaan teng, not on
+    /// the rooftop, and their group's header says so.
+    pub in_pantry: bool,
+    /// Task lines are summarized: a raw one is then marked as not yet.
+    pub summaries: bool,
 }
 
 impl PanelState {
@@ -143,13 +157,15 @@ impl Group {
         }
     }
 
-    /// The group's header: what it needs from you, then where they are.
-    pub fn title(self) -> &'static str {
+    /// The group's header: what it needs from you, then where they are;
+    /// `in_pantry` while the idle are down in the cha chaan teng.
+    pub fn title(self, in_pantry: bool) -> &'static str {
         match self {
             Self::Waiting => "等你 · 等候区",
             Self::Stuck => "卡住 · 工位",
             Self::Done => "做完待看 · 茶水间",
             Self::Working => "干活 · 工位",
+            Self::Idle if in_pantry => "闲着 · 茶餐厅",
             Self::Idle => "闲着 · 天台",
         }
     }
@@ -192,6 +208,23 @@ pub fn order(
         push_tree(&cc, r, 0, &mut out);
     }
     out
+}
+
+/// The sessions in `order` waiting on you ([`waits_on_you`]): the one count
+/// the panel's title, the footer and the waiting room's ticket machine show,
+/// so no two of them disagree.
+pub fn waiting(
+    scene: &SceneState,
+    views: &TaskViews,
+    order: &[(AgentId, u8)],
+    seen: &HashMap<AgentId, SystemTime>,
+) -> Vec<AgentId> {
+    order
+        .iter()
+        .filter_map(|(id, _)| scene.agents.get(id))
+        .filter(|s| waits_on_you(s, views.get(&s.agent_id), read_since_idle(s, seen)).is_some())
+        .map(|s| s.agent_id)
+        .collect()
 }
 
 /// The session to deal with next: the one in your office's guest chair, so
@@ -278,7 +311,12 @@ fn rgb(c: Rgb) -> Color {
 }
 
 /// `read` says it was opened since it went idle ([`read_since_idle`]).
-fn status(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> (String, Color) {
+fn status(
+    slot: &AgentSlot,
+    view: Option<&TaskView>,
+    read: bool,
+    now: SystemTime,
+) -> (String, Color) {
     if slot.exiting_at.is_some() {
         return ("离开中".into(), DIM);
     }
@@ -296,7 +334,7 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> (String, Col
             };
             let took = view
                 .and_then(|v| v.turn_started)
-                .and_then(|t| turn_took(t, SystemTime::now()));
+                .and_then(|t| turn_took(t, now));
             match took {
                 Some(took) => (format!("{what} {took}"), WORK),
                 None => (what, WORK),
@@ -311,6 +349,11 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> (String, Col
         // card says why, or "空闲 7m" up there reads as a bug.
         ActivityState::Idle if read => {
             (format!("✓ 已看 · 空闲 {}", ago(slot.state_started_at)), DIM)
+        }
+        // In the pantry to be read: its chip says done, in its group's
+        // colour, not idle under a header that says to read it.
+        ActivityState::Idle if Group::of(slot, view, now, read) == Group::Done => {
+            (format!("✓ 做完 {}", ago(slot.state_started_at)), TASK)
         }
         ActivityState::Idle => (format!("· 空闲 {}", ago(slot.state_started_at)), DIM),
     }
@@ -453,15 +496,30 @@ fn faded(line: Line<'static>) -> Line<'static> {
     Line::from(spans)
 }
 
+/// How a card is drawn beyond its agent: what its badge calls it, its
+/// repository's colour, and the panel's state for it.
+struct CardLook<'a> {
+    name: &'a str,
+    ink: Option<Rgb>,
+    selected: bool,
+    expanded: bool,
+    read: bool,
+    summaries: bool,
+}
+
 fn card(
     slot: &AgentSlot,
     depth: u8,
     view: Option<&TaskView>,
-    ink: Option<Rgb>,
-    expanded: bool,
-    read: bool,
+    look: &CardLook<'_>,
     w: u16,
 ) -> Vec<Line<'static>> {
+    let CardLook {
+        ink,
+        expanded,
+        read,
+        ..
+    } = *look;
     let nest = "  ".repeat(usize::from(depth.saturating_sub(1)));
     let indent = if depth == 0 {
         String::new()
@@ -476,10 +534,16 @@ fn card(
     let pad = pad.as_str();
     let body_w = w.saturating_sub(pad.len() as u16);
     let marker = ink.map_or(DIM, rgb);
-    let (st, st_color) = status(slot, view, read);
+    let (st, st_color) = status(slot, view, read, SystemTime::now());
     let name = match view.and_then(|v| v.agent_type.as_deref()) {
-        Some(t) if depth > 0 && !slot.label.contains(t) => format!("{t} {}", &*slot.label),
-        _ => slot.label.to_string(),
+        Some(t) if depth > 0 && !look.name.contains(t) => format!("{t} {}", look.name),
+        _ => look.name.to_owned(),
+    };
+    // The selected card says whether Enter opens or folds it.
+    let name = match (look.selected, expanded) {
+        (true, true) => format!("▾ {name}"),
+        (true, false) => format!("▸ {name}"),
+        _ => name,
     };
     let chip = format!(" {st} ");
     let avatar = format!(" {} ", avatar_initial(&slot.label));
@@ -517,11 +581,13 @@ fn card(
             Style::default().fg(TASK).add_modifier(Modifier::BOLD),
         )),
         Some(t) => {
+            // With summaries off a raw line is all there is: no mark for it.
+            let mark = look.summaries && !pending;
             spans.push(Span::styled(
-                truncate_cells(&t, body_w.saturating_sub(8)),
+                truncate_cells(&t, body_w.saturating_sub(if mark { 8 } else { 2 })),
                 Style::default().fg(DIM),
             ));
-            if !pending {
+            if mark {
                 spans.push(Span::styled(" ·未总结", Style::default().fg(DIM)));
             }
         }
@@ -535,7 +601,10 @@ fn card(
         lines.push(Line::from(vec![
             Span::raw(pad.to_owned()),
             Span::styled(
-                format!("↳ {}", truncate_cells(&d, body_w.saturating_sub(2))),
+                format!(
+                    "↳ {}",
+                    crate::text::fit_tool_line(&d, &slot.cwd, body_w.saturating_sub(2))
+                ),
                 Style::default().fg(c),
             ),
         ]));
@@ -571,7 +640,7 @@ fn card(
         }
         if let Some(t) = &v.todo {
             lines.push(Line::from(vec![
-                Span::styled(format!("{pad}todo "), Style::default().fg(DIM)),
+                Span::styled(format!("{pad}待办 "), Style::default().fg(DIM)),
                 Span::styled(
                     truncate_cells(t, body_w.saturating_sub(5)),
                     Style::default().fg(TEXT),
@@ -585,7 +654,10 @@ fn card(
             )));
             for t in v.recent_tools.iter().rev() {
                 lines.push(Line::from(Span::styled(
-                    format!("{pad}· {}", truncate_cells(t, body_w.saturating_sub(2))),
+                    format!(
+                        "{pad}· {}",
+                        crate::text::fit_tool_line(t, &slot.cwd, body_w.saturating_sub(2))
+                    ),
                     Style::default().fg(TEXT),
                 )));
             }
@@ -614,15 +686,10 @@ pub fn render(
             read_since_idle(s, &state.seen),
         )
     };
-    let waiting = order
-        .iter()
-        .filter(|(id, _)| {
-            scene
-                .agents
-                .get(id)
-                .is_some_and(|s| matches!(s.state, ActivityState::RequiresAction { .. }))
-        })
-        .count();
+    let names = pixtuoid_scene::badge::shown_names(scene.agents.values());
+    // Counted as the footer and the Dock count: a question to you waits as a
+    // prompt does.
+    let waiting = waiting(scene, views, &order, &state.seen).len();
     let title = if waiting > 0 {
         format!(" 任务 · {} 个 agent · {waiting} 个等你 ", order.len())
     } else {
@@ -648,7 +715,7 @@ pub fn render(
             inner.x,
             inner.y,
             &Line::from(Span::styled(
-                "还没有 Claude Code 会话在运行",
+                "还没有 agent 会话在运行",
                 Style::default().fg(DIM),
             )),
             inner.width,
@@ -661,24 +728,32 @@ pub fn render(
         .filter_map(|(id, depth)| {
             let slot = scene.agents.get(id)?;
             let sel = state.selected == Some(*id);
-            // The repository's colour, as its sitters' badges wear it in
-            // the office.
-            let mut lines = card(
-                slot,
-                *depth,
-                views.get(id),
-                pixtuoid_scene::badge::repo_hue(slot).or_else(|| inks.get(id).copied()),
-                sel && state.expanded,
-                read_since_idle(slot, &state.seen),
-                inner.width,
-            );
+            let look = CardLook {
+                name: names.get(id).map_or(&*slot.label, String::as_str),
+                // The repository's colour, as its sitters' badges wear it in
+                // the office.
+                ink: pixtuoid_scene::badge::repo_hue(slot).or_else(|| inks.get(id).copied()),
+                selected: sel,
+                expanded: sel && state.expanded,
+                read: read_since_idle(slot, &state.seen),
+                summaries: state.summaries,
+            };
+            let mut lines = card(slot, *depth, views.get(id), &look, inner.width);
             // A subagent's card goes with its root's.
             if *depth == 0 {
                 root_group = group_of(slot);
             }
             let group = root_group;
             if group == Group::Idle {
+                // It needs nothing from you: its name and chip are enough,
+                // and the busy cards above keep the room.
+                if !sel {
+                    lines.truncate(1);
+                }
                 lines = lines.into_iter().map(faded).collect();
+            }
+            if group == Group::Waiting {
+                lines = lines.into_iter().map(on_wait).collect();
             }
             let avatar_x = if *depth == 0 {
                 0
@@ -708,7 +783,7 @@ pub fn render(
                     lines.insert(
                         0,
                         Line::from(Span::styled(
-                            format!("{} ({n})", group.title()),
+                            format!("{} ({n})", group.title(state.in_pantry)),
                             Style::default()
                                 .fg(group_color(group))
                                 .add_modifier(Modifier::BOLD),
@@ -760,13 +835,19 @@ pub fn render(
         for (i, line) in c.lines.iter().enumerate() {
             if row >= start && row - start < h {
                 let y = inner.y + (row - start) as u16;
-                drawn.rows.push((y, c.id));
                 let own = i >= c.lead;
-                let bg = match (own && c.group == Group::Waiting, sel) {
-                    (true, true) => Some(WAIT_SELECTED_BG),
-                    (true, false) => Some(WAIT_BG),
-                    (false, true) => Some(SELECTED_BG),
-                    (false, false) => None,
+                // A group's header and the blank over it are no card's: a
+                // click there selects nothing, and no card's ground covers it.
+                if own {
+                    drawn.rows.push((y, c.id));
+                }
+                let hover = state.hovered == Some(c.id);
+                let bg = match (own, c.group == Group::Waiting, sel) {
+                    (false, _, _) => None,
+                    (true, true, true) => Some(WAIT_SELECTED_BG),
+                    (true, true, false) => Some(WAIT_BG),
+                    (true, false, true) => Some(SELECTED_BG),
+                    (true, false, false) => hover.then_some(HOVER_BG),
                 };
                 if let Some(bg) = bg {
                     buf.set_style(
@@ -792,7 +873,35 @@ pub fn render(
             drawn.outlines.push(rows);
         }
     }
+    // Cards past either edge, marked on the title row, which holds no card:
+    // without a mark a long list looked like it ended at the window.
+    let more = match (start > 0, y > start + h) {
+        (true, true) => Some(" ▲▼ "),
+        (true, false) => Some(" ▲ "),
+        (false, true) => Some(" ▼ "),
+        (false, false) => None,
+    };
+    if let Some(more) = more {
+        let w = crate::text::cells(more);
+        let x = inner.x + inner.width.saturating_sub(w);
+        buf.set_string(x, area.y, more, Style::default().fg(TEXT).bg(SELECTED_BG));
+    }
     drawn
+}
+
+/// `line` with its dim text lifted to read on a waiting card's ground.
+fn on_wait(line: Line<'static>) -> Line<'static> {
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|mut s| {
+            if s.style.fg == Some(DIM) {
+                s.style.fg = Some(DIM_ON_WAIT);
+            }
+            s
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -843,10 +952,10 @@ mod tests {
         let slot = scene.agents.get_mut(&a).unwrap();
         slot.state = ActivityState::Running { item: None };
         assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_some());
-        assert_eq!(status(slot, Some(&view), false).1, STUCK);
+        assert_eq!(status(slot, Some(&view), false, SystemTime::now()).1, STUCK);
         slot.state = ActivityState::RequiresAction { reason: None };
         assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
-        assert_eq!(status(slot, Some(&view), false).1, WAIT);
+        assert_eq!(status(slot, Some(&view), false, SystemTime::now()).1, WAIT);
         slot.state = ActivityState::Idle;
         assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
     }
@@ -964,6 +1073,71 @@ mod tests {
         // ... and the wheel can then scroll away from it.
         state.scroll_by(-1000);
         assert!(!draw(&mut state).iter().any(|(_, o)| *o == target));
+    }
+
+    /// A group's header belongs to no card: clicking it selected the card
+    /// under it, and a selected card's ground spread over the header and the
+    /// blank above it, so the selection looked a row taller than its card.
+    #[test]
+    fn a_selection_covers_its_card_and_not_its_groups_header() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 40, 12);
+        let mut state = PanelState {
+            selected: Some(a),
+            ..PanelState::default()
+        };
+        let mut buf = Buffer::empty(area);
+        let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
+        let first = drawn.rows.first().map(|(y, _)| *y).expect("a card");
+        let header = first - 1;
+        let header_text: String = (0..area.width)
+            .map(|x| buf[(x, header)].symbol().to_owned())
+            .collect();
+        assert!(
+            header_text.contains('('),
+            "the row over the card is its header"
+        );
+        assert!(drawn.rows.iter().all(|(y, _)| *y != header), "no card's");
+        assert_ne!(buf[(area.width - 1, header)].bg, SELECTED_BG);
+        assert_eq!(buf[(area.width - 1, first)].bg, SELECTED_BG);
+    }
+
+    /// A session idle on the rooftop needs nothing from you: its card is its
+    /// name and state alone, leaving the room to the cards that do, until you
+    /// select it.
+    #[test]
+    fn an_idle_card_is_one_line_until_selected() {
+        let now = SystemTime::now();
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(
+            &mut scene,
+            &mut r,
+            "a",
+            None,
+            now - Duration::from_secs(7200),
+        );
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Idle;
+        slot.state_started_at = now - Duration::from_secs(3600);
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 40, 12);
+        let rows = |state: &mut PanelState| {
+            let mut buf = Buffer::empty(area);
+            render(&mut buf, area, &scene, &views, &HashMap::new(), state)
+                .rows
+                .iter()
+                .filter(|(_, id)| *id == a)
+                .count()
+        };
+        let mut state = PanelState::default();
+        assert_eq!(rows(&mut state), 1);
+        state.selected = Some(a);
+        assert!(rows(&mut state) > 1, "selected, it shows its task");
     }
 
     /// The panel lists sessions by what they need from you, most urgent
@@ -1098,9 +1272,14 @@ mod tests {
         fresh.agents.get_mut(&prompt).unwrap().state_started_at = now - Duration::from_secs(5);
         assert_eq!(next_waiting(&fresh, &views, now, &none), Some(asked));
         assert!(
-            status(&scene.agents[&asked], views.get(&asked), false)
-                .0
-                .contains("等你回复")
+            status(
+                &scene.agents[&asked],
+                views.get(&asked),
+                false,
+                SystemTime::now()
+            )
+            .0
+            .contains("等你回复")
         );
 
         let opened = HashMap::from([(asked, now - Duration::from_secs(5))]);
@@ -1135,7 +1314,15 @@ mod tests {
         let slot = scene.agents.get_mut(&a).unwrap();
         slot.state = ActivityState::RequiresAction { reason: None };
         let ink = Rgb { r: 1, g: 2, b: 3 };
-        let lines = card(slot, 0, None, Some(ink), false, false, 40);
+        let look = CardLook {
+            name: &slot.label,
+            ink: Some(ink),
+            selected: false,
+            expanded: false,
+            read: false,
+            summaries: true,
+        };
+        let lines = card(slot, 0, None, &look, 40);
         let first = &lines[0].spans;
         let avatar = first
             .iter()
@@ -1172,8 +1359,16 @@ mod tests {
         assert_eq!(group(&opened), Group::Idle, "read");
         // Read a minute after it finished, it is up on the rooftop: the card
         // must say it was read, or a 1-minute idle up there reads as a bug.
-        assert!(status(&slot, None, false).0.starts_with("· 空闲 "));
-        assert!(status(&slot, None, true).0.starts_with("✓ 已看 · 空闲 "));
+        assert!(
+            status(&slot, None, true, now)
+                .0
+                .starts_with("✓ 已看 · 空闲 ")
+        );
+        // Unread, it is in the pantry under 做完待看: its chip says done, not
+        // idle, which read as nothing to look at.
+        assert!(status(&slot, None, false, now).0.starts_with("✓ 做完 "));
+        let later = now + Duration::from_secs(20 * 60);
+        assert!(status(&slot, None, false, later).0.starts_with("· 空闲 "));
         let while_working = HashMap::from([(a, now - Duration::from_secs(120))]);
         assert_eq!(
             group(&while_working),
@@ -1204,15 +1399,24 @@ mod tests {
                 kind: pixtuoid_core::state::ToolKind::Edit,
             }),
         };
-        assert_eq!(status(slot, Some(&view), false).0, "▸ 写码 12m");
+        assert_eq!(
+            status(slot, Some(&view), false, SystemTime::now()).0,
+            "▸ 写码 12m"
+        );
         slot.state = ActivityState::Running { item: None };
-        assert_eq!(status(slot, Some(&view), false).0, "… 思考中 12m");
+        assert_eq!(
+            status(slot, Some(&view), false, SystemTime::now()).0,
+            "… 思考中 12m"
+        );
         slot.state = ActivityState::RequiresAction { reason: None };
-        assert_eq!(status(slot, Some(&view), false).0, "! 等你确认");
+        assert_eq!(
+            status(slot, Some(&view), false, SystemTime::now()).0,
+            "! 等你确认"
+        );
         // No start known: the card says nothing rather than guess.
         slot.state = ActivityState::Running { item: None };
         assert_eq!(
-            status(slot, Some(&TaskView::default()), false).0,
+            status(slot, Some(&TaskView::default()), false, SystemTime::now()).0,
             "… 思考中"
         );
     }
