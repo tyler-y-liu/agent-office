@@ -283,6 +283,82 @@ mod tests {
         );
     }
 
+    /// agent-office restarts while a session is mid-turn, so its prompt
+    /// (`UserPromptSubmit`) is never seen. Its live calls still prove the
+    /// turn is open: without that the figure went idle after every call and
+    /// the card flipped between working and done until the turn's `Stop`.
+    /// A transcript replay of old calls is history and must not open one.
+    #[test]
+    fn a_turn_whose_prompt_went_unseen_still_keeps_its_session_working() {
+        use pixtuoid_core::source::claude_code::{SOURCE_NAME, decode_cc_line};
+        use pixtuoid_core::source::decoder::decode_hook_payload;
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentEvent, AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "5717f13f-3c42-4a73-bfa5-3cd14932f155";
+        let path = format!("/h/.claude/projects/-repo/{sid}.jsonl");
+        let id = AgentId::from_parts(SOURCE_NAME, sid);
+        let hook = |event: &str, call: &str| {
+            decode_hook_payload(json!({
+                "hook_event_name": event, "session_id": sid, "cwd": "/repo",
+                "transcript_path": path, "tool_name": "Read", "tool_use_id": call,
+                "tool_input": {"file_path": "/repo/a.rs"},
+            }))
+            .expect("decodes")
+            .into_iter()
+            .map(|e| (Transport::Hook, e))
+            .collect::<Vec<_>>()
+        };
+        let run = |steps: Vec<Vec<(Transport, AgentEvent)>>| {
+            let mut scene = SceneState::uniform(4);
+            let mut r = Reducer::new();
+            let mut now = SystemTime::UNIX_EPOCH;
+            let mut states = Vec::new();
+            for step in steps {
+                for (from, ev) in step {
+                    r.apply(&mut scene, ev, now, from);
+                }
+                now += Duration::from_secs(1);
+                states.push(scene.agents[&id].state.clone());
+            }
+            states
+        };
+        let between_calls = ActivityState::Running { item: None };
+
+        let resumed = run(vec![
+            hook("PreToolUse", "toolu_1"),
+            hook("PostToolUse", "toolu_1"),
+            hook("PreToolUse", "toolu_2"),
+            hook("PostToolUse", "toolu_2"),
+            hook("Stop", ""),
+        ]);
+        assert_eq!(resumed[1], between_calls, "a call's end is not the turn's");
+        assert_eq!(resumed[3], between_calls);
+        assert_eq!(resumed[4], ActivityState::Idle, "the turn's Stop still ends it");
+
+        let line = |v| {
+            decode_cc_line(&path, SOURCE_NAME, v)
+                .into_iter()
+                .map(|e| (Transport::Jsonl, e))
+                .collect::<Vec<_>>()
+        };
+        let replayed = run(vec![
+            hook("SessionStart", ""),
+            line(json!({"type": "assistant", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_0", "name": "Read",
+                "input": {"file_path": "/repo/a.rs"}}]}})),
+            line(json!({"type": "user", "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_0", "content": "ok"}]}})),
+        ]);
+        assert_eq!(
+            replayed[2],
+            ActivityState::Idle,
+            "an old call read back from the transcript opens no turn"
+        );
+    }
+
     /// A minute after its turn ends, Claude Code nudges the session with a
     /// `Notification`. It must leave the session idle, done since its `Stop`:
     /// read as a prompt it walked every finished session to your office and

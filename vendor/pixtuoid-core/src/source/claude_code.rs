@@ -192,7 +192,7 @@ pub(crate) fn decode_cc_hook_custom(obj: &HookObject) -> Result<Option<Vec<Agent
 
 /// agent-office: CC's hooks name no turn, so each prompt mints its own key;
 /// unique per run, so the ledger never takes a new turn for a closed one.
-fn fresh_turn() -> crate::state::TurnKey {
+pub(crate) fn fresh_turn() -> crate::state::TurnKey {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     crate::state::TurnKey::Id(format!("cc-{n}").into())
