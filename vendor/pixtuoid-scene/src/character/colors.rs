@@ -250,15 +250,15 @@ const HAIR_PRESETS: &[Rgb] = &[
         b: 0x10,
     }, // dark brown
     Rgb {
-        r: 0x8a,
-        g: 0x5a,
-        b: 0x36,
-    }, // light brown
-    Rgb {
-        r: 0xc7,
-        g: 0xa3,
+        r: 0xa0,
+        g: 0x70,
         b: 0x4a,
-    }, // blond
+    }, // milk-tea brown (agent-office: was #8a5a36, the deep-brown skin's own color)
+    Rgb {
+        r: 0xc8,
+        g: 0x9a,
+        b: 0x2c,
+    }, // blond (agent-office: deeper gold, apart from the medium skin)
     Rgb {
         r: 0xd8,
         g: 0x68,
@@ -276,32 +276,35 @@ const HAIR_PRESETS: &[Rgb] = &[
     }, // silver-grey
 ];
 const _: () = assert!(!HAIR_PRESETS.is_empty());
+// agent-office: lighter, warmer tones. A repository's workers all share one
+// skin, so with a handful of repos the old tan / deep-brown picks left the
+// whole office dark, and night lighting darkened them further.
 const SKIN_PRESETS: &[Rgb] = &[
+    Rgb {
+        r: 0xfc,
+        g: 0xe2,
+        b: 0xcc,
+    }, // porcelain
+    Rgb {
+        r: 0xf8,
+        g: 0xd5,
+        b: 0xb5,
+    }, // fair
     Rgb {
         r: 0xf4,
         g: 0xc7,
         b: 0x9a,
     }, // light peach
     Rgb {
+        r: 0xec,
+        g: 0xb8,
+        b: 0x8c,
+    }, // warm light
+    Rgb {
         r: 0xe0,
         g: 0xa8,
-        b: 0x70,
+        b: 0x78,
     }, // medium
-    Rgb {
-        r: 0xb8,
-        g: 0x80,
-        b: 0x50,
-    }, // tan
-    Rgb {
-        r: 0x8a,
-        g: 0x5a,
-        b: 0x36,
-    }, // deep brown
-    Rgb {
-        r: 0xc8,
-        g: 0x9a,
-        b: 0x64,
-    }, // warm tan
 ];
 const _: () = assert!(!SKIN_PRESETS.is_empty());
 
@@ -555,6 +558,19 @@ mod tests {
         let c = make_slot_cwd("/p/cccc.jsonl", "/demo/infra", false);
         assert_eq!(color_of(&b, HAIR_KEY), color_of(&c, HAIR_KEY));
         assert_eq!(color_of(&b, SKIN_KEY), color_of(&c, SKIN_KEY));
+    }
+
+    /// A head whose hair is the skin's color reads as one blob: the old
+    /// light-brown hair was the deep-brown skin's exact RGB.
+    #[test]
+    fn every_hair_color_reads_apart_from_every_skin() {
+        for h in HAIR_PRESETS {
+            for s in SKIN_PRESETS {
+                let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).pow(2);
+                let dist = f64::from(d(h.r, s.r) + d(h.g, s.g) + d(h.b, s.b)).sqrt();
+                assert!(dist > 60.0, "hair {h:?} too close to skin {s:?}: {dist}");
+            }
+        }
     }
 
     /// Pins `MAX_RAMP_LEVEL` against the colors a recolor feeds a ramp: every

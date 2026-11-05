@@ -37,7 +37,18 @@ SHIRT = set("BvWU")
 HOOD = "U"  # the shirt's deepest shade, so the hood takes each agent's colour
 HOOD_LIT = "v"
 SKIN, SKIN_SHADE, EYE, MOUTH = "S", "s", "e", "i"
-HEAD_KEYS = set("Sseim")
+IRIS = "ǂ"  # pack.toml [palette]: an eye's lower half, warm brown under the dark lid
+LIPS = "m"
+HEAD_KEYS = set("Sseim") | {IRIS}
+# A 3x4 eye inside the rows and columns the glasses frame (character/hair.rs):
+# dark, with a catch-light from the west, a warm glint of iris low in it, and
+# rounded lower corners, so it reads as an eye rather than a hole.
+EYE_FRONT = [
+    (EYE, EYE, EYE),
+    (CATCH, EYE, EYE),
+    (EYE, IRIS, EYE),
+    (None, EYE, None),
+]
 HAIR, HAIR_SHADE, HAIR_LIT, HAIR_SHINE = "H", "h", "Y", "Z"
 HAIR_TIE = "r"
 
@@ -141,20 +152,20 @@ def head(g, view, mark):
             g[y][x] = k
     if view == "front":
         for ex in (cx - 6, cx + 3):
-            for dy in range(4):
-                for dx in range(3):
-                    g[cy + 1 + dy][ex + dx] = EYE
-            g[cy + 1][ex] = CATCH
+            for dy, row in enumerate(EYE_FRONT):
+                for dx, k in enumerate(row):
+                    if k:
+                        g[cy + 1 + dy][ex + dx] = k
         for bx in (cx - 8, cx - 7, cx + 6, cx + 7):
             put(g, bx, cy + 5, BLUSH, {SKIN, SKIN_SHADE})
-        g[cy + 6][cx - 1] = MOUTH
-        g[cy + 6][cx] = MOUTH
+        g[cy + 6][cx - 1] = LIPS
+        g[cy + 6][cx] = LIPS
     elif view == "side":
         ex = cx + 5
-        for dy in range(4):
-            for dx in range(2):
-                g[cy + 1 + dy][ex + dx] = EYE
-        g[cy + 1][ex] = CATCH
+        for dy, row in enumerate([(EYE, EYE), (CATCH, EYE), (EYE, IRIS), (None, EYE)]):
+            for dx, k in enumerate(row):
+                if k:
+                    g[cy + 1 + dy][ex + dx] = k
         put(g, cx + 2, cy + 5, BLUSH, {SKIN})
         put(g, cx + 3, cy + 5, BLUSH, {SKIN})
         put(g, cx + 7, cy + 7, MOUTH, {SKIN})
@@ -279,16 +290,27 @@ def blank():
     return [["."] * w for _ in range(h)]
 
 
-def shade(g, cx, cy, rx):
-    """Light from the west: the east side and the underside turned away."""
+def shade(g, cx, cy, rx, ry=None):
+    """Light from the west: the east rim and every lower edge turned away, and
+    a curved band of shine across the upper west of the crown, so the hair
+    reads as round rather than as a cap split down the middle."""
+    ry = ry or rx
     for y, row in enumerate(g):
         for x, k in enumerate(row):
             if k != HAIR:
                 continue
-            if x >= cx + rx * 0.45 or at(g, x, y + 1) == ".":
+            below, east = at(g, x, y + 1), at(g, x + 1, y)
+            if below in (".", None) or x >= cx + rx * 0.6 or (east == "." and x > cx):
                 row[x] = HAIR_SHADE
-            elif x <= cx - rx * 0.4 and y <= cy - 3:
+                continue
+            d = ((x + 0.5 - (cx - 1)) / (rx + 1)) ** 2 + ((y + 0.5 - cy) / (ry + 1)) ** 2
+            if 0.5 <= d <= 0.66 and y < cy - 3 and x < cx + 4:
                 row[x] = HAIR_LIT
+    # A few glints at the brightest of the band.
+    for y, row in enumerate(g):
+        for x, k in enumerate(row):
+            if k == HAIR_LIT and at(g, x - 1, y) == HAIR_LIT and at(g, x + 1, y) == HAIR_LIT and (x + y) % 5 == 0:
+                row[x] = HAIR_SHINE
 
 
 def fill(g, test):
@@ -307,7 +329,8 @@ def hair_front(style):
     slant = s.get("slant", 0)
 
     def fringe(x):
-        f = cy + s["fringe"] + (cx - x) * slant
+        # Bangs end in points, not along a ruler.
+        f = cy + s["fringe"] + (cx - x) * slant + (0, 1, 2, 1)[(x - cx) % 4]
         if s.get("jag") and x % 3 == 0:
             f += 2
         if s.get("spikes") and x % 4 == 1:
@@ -335,15 +358,20 @@ def hair_front(style):
                 for xx in range(x - 3, x + 4):
                     if (xx - x) ** 2 + (yy - y) ** 2 <= 9 and yy < cy:
                         over[yy][xx] = HAIR
-    if s.get("bun"):
-        bx, by = cx, cy - ry - 3
-        for yy in range(by - 4, by + 5):
-            for xx in range(bx - 4, bx + 5):
-                if (xx - bx) ** 2 + (yy - by) ** 2 <= 17:
-                    over[yy][xx] = HAIR
-        over[by + 3][bx - 1] = HAIR_TIE
-        over[by + 3][bx] = HAIR_TIE
     shade(over, cx, cy, rx)
+    if s.get("bun"):
+        # A round ball on the crown, shaded on its own and tied off at its
+        # base, so it reads as a bun rather than as the head coming to a point.
+        bx, by = cx - 0.5, cy - ry - 4
+        ball = blank()
+        fill(ball, lambda x, y: (x + 0.5 - (bx + 0.5)) ** 2 + (y + 0.5 - by) ** 2 <= 21)
+        shade(ball, round(bx + 0.5), by, 4.5)
+        for y, row in enumerate(ball):
+            for x, k in enumerate(row):
+                if k != "." and y < by + 3:
+                    over[y][x] = k
+        for x in range(cx - 3, cx + 3):
+            over[by + 3][x] = HAIR_TIE
     if style == "side_part":
         for y in range(cy - ry - 1, cy - 5):
             if over[y][cx + 4] != ".":
@@ -362,7 +390,14 @@ def hair_front(style):
         return inside(x, y, cx, cy - 0.5, orx, ory) and y < cy
 
     fill(behind, volume)
+    if s.get("tail"):
+        # The ponytail swings out past the east of the head.
+        fill(behind, lambda x, y: cx + rx - 2 <= x <= cx + rx + 2 - (y > cy + 4) and cy - 6 <= y <= cy + 9 - (x > cx + rx))
     shade(behind, cx, cy, rx)
+    if s.get("tail"):
+        for y in (cy - 5, cy - 4):
+            for x in range(cx + rx - 1, cx + rx + 2):
+                behind[y][x] = HAIR_TIE
     return over, behind
 
 

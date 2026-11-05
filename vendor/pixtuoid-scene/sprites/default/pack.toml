@@ -41,6 +41,7 @@
 "I" = "#67676b"   # desk task-chair lit top edge (a flat shell reads as a hole in the floor)
 "ǀ" = "#ff4f9a"   # agent-office: the staff badge's lanyard
 "ǁ" = "#f29a9a"   # agent-office: cheeks
+"ǂ" = "#6a4030"   # agent-office: an eye's iris
 # --- the generator's materials (scripts/gen-art.py): every @Nx piece and the
 # 1x pieces it owns
 "O" = "#b07a42"   # wood, lit

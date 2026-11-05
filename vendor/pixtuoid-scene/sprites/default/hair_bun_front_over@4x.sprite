@@ -2,24 +2,24 @@
 # agent-office: drawn by tools/people.py; edit the script, not this file.
 @frame 0
 @mark head.front 16 18
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
-. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
-. . . . . . . . . . . . . . . H H H . . . . . . . . . . . . . .
-. . . . . . . . . . . . . . H H H H H . . . . . . . . . . . . .
-. . . . . . . . . . . . . H H H H H H H . . . . . . . . . . . .
-. . . . . . . . . . . . H H H H H H H H H . . . . . . . . . . .
-. . . . . . . . . . . . H H H H H H H H H . . . . . . . . . . .
-. . . . . . . . . . . . H H H H H H H H H . . . . . . . . . . .
-. . . . . . . . . . Y Y H H H H H H H H H h . . . . . . . . . .
-. . . . . . . . Y Y Y Y H H H r r H H H H h h h . . . . . . . .
-. . . . . . . Y Y Y Y Y H H H H H H H H H h h h h . . . . . . .
-. . . . . . Y Y Y Y Y Y H H H H H H H H H h h h h h . . . . . .
-. . . . . . Y Y Y Y Y Y H H H H H H H H H h h h h h . . . . . .
-. . . . . Y Y Y h h h h h h h h h h h h h h h h h h h . . . . .
-. . . . . Y Y Y . . . . . . . . . . . . . . . . h h h . . . . .
-. . . . Y Y Y Y . . . . . . . . . . . . . . . . h h h h . . . .
-. . . . Y Y Y Y . . . . . . . . . . . . . . . . h h h h . . . .
-. . . . Y Y Y Y . . . . . . . . . . . . . . . . h h h h . . . .
+. . . . . . . . . . . . . . . H H . . . . . . . . . . . . . . .
+. . . . . . . . . . . . . H H H H Y h . . . . . . . . . . . . .
+. . . . . . . . . . . . H H H H H H H h . . . . . . . . . . . .
+. . . . . . . . . . . . H H H H H H H h . . . . . . . . . . . .
+. . . . . . . . . . . H H H H H H H H h h . . . . . . . . . . .
+. . . . . . . . . . . h H H H H H H H h h . . . . . . . . . . .
+. . . . . . . . . . . . H H H H H H H h . . . . . . . . . . . .
+. . . . . . . . . . . . h H H H H H H h . . . . . . . . . . . .
+. . . . . . . . . . H H H r r r r r r H H h . . . . . . . . . .
+. . . . . . . . H H H H H H H H H H H H H H H h . . . . . . . .
+. . . . . . . H H H H H H Y Y Z Y H H H H H H h h . . . . . . .
+. . . . . . H H H H Y Y Y Y Z Y Y Y Y Y H H H h h h . . . . . .
+. . . . . . H H H Y Y H H H H H H H H Y H H H h h h . . . . . .
+. . . . . H H H h Y H H h H H H h H H H h H H h h h h . . . . .
+. . . . . H H Y . h H h . h H h . h H h . h H h h h h . . . . .
+. . . . H H Y Y . . h . . . h . . . h . . . h . h h h h . . . .
+. . . . H H Y H . . . . . . . . . . . . . . . . h h h h . . . .
+. . . . H H H H . . . . . . . . . . . . . . . . h h h h . . . .
 . . . . H H H H . . . . . . . . . . . . . . . . h h h h . . . .
 . . . h h h h h . . . . . . . . . . . . . . . . h h h h h . . .
 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
