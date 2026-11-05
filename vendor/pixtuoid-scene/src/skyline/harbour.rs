@@ -119,12 +119,12 @@ const AIRCRAFT: Rgb = Rgb {
     g: 58,
     b: 66,
 };
-/// Short of full red, so the painters' sun-disc probes don't take it for
-/// the low sun.
+/// Under r 200, so the painters' sun-disc probes (`r > 200` and warm) don't
+/// take it for the low sun on a dark winter morning.
 const PLANE_RED: Rgb = Rgb {
-    r: 236,
-    g: 60,
-    b: 50,
+    r: 196,
+    g: 44,
+    b: 38,
 };
 const PLANE_STROBE: Rgb = Rgb {
     r: 255,
