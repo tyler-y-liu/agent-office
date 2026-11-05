@@ -189,17 +189,31 @@ pub fn disconnect() -> Result<()> {
 }
 
 /// Whether the patch mounts our plugin and the plugin file is there.
+/// Whether our plugin is mounted and forwards the turn's start: one written
+/// by an older build lacks it, and its figures leave their desks between calls.
 pub fn installed() -> bool {
     let (Some(home), Some(dir)) = (home(), our_dir()) else {
         return false;
     };
-    plugin_path(&dir).is_file()
+    std::fs::read_to_string(plugin_path(&dir)).is_ok_and(|t| forwards_turn_start(&t))
         && read_patch(&home).is_ok_and(|t| items(&t).iter().any(|i| is_ours(i)))
+}
+
+fn forwards_turn_start(plugin: &str) -> bool {
+    plugin.contains("\"turn_start\"")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plugin from before the turn's start must read as not connected, so
+    /// doctor sends the user back to `connect dsh`.
+    #[test]
+    fn a_plugin_without_the_turn_start_is_not_connected() {
+        assert!(forwards_turn_start(TEMPLATE));
+        assert!(!forwards_turn_start(&TEMPLATE.replace("\"turn_start\"", "\"x\"")));
+    }
 
     /// pixtuoid's row, the user's own rows and their comments must survive a
     /// connect and a disconnect, and reconnecting must not stack a second row.
