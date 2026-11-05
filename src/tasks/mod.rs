@@ -1,6 +1,7 @@
 //! Each agent's task, as one line: a background loop tails the transcripts of
 //! the agents the office shows and keeps their summaries fresh. A dsh
-//! session's transcript is the task log agent-office's dsh plugin writes.
+//! session's transcript is the task log agent-office's dsh plugin writes; a
+//! Codex session's is its rollout.
 
 pub mod client;
 pub mod extract;
@@ -15,9 +16,9 @@ use pixtuoid_core::state::ActivityState;
 use pixtuoid_core::{AgentId, SceneState};
 use tokio::sync::{mpsc, watch};
 
-use crate::pipeline::{CC_SOURCE, is_shown_source};
+use crate::pipeline::{CC_SOURCE, CODEX_SOURCE, CURSOR_SOURCE, is_shown_source};
 use crate::text::truncate_cells;
-use client::{SUMMARY_CELLS, Summarizer, SummaryInput};
+use client::{OutcomeInput, SUMMARY_CELLS, Summarizer, SummaryInput};
 pub use extract::Phase;
 use extract::{SubMeta, Tail, Transcript};
 use trigger::Trigger;
@@ -38,6 +39,15 @@ pub struct TaskView {
     pub agent_type: Option<String>,
     pub phase: Option<Phase>,
     pub stuck: Option<Stuck>,
+    /// When the current turn began: the human's last prompt.
+    pub turn_started: Option<SystemTime>,
+    /// What the turn came to, from the agent's last reply: the model's line,
+    /// or the reply cut short when there is none.
+    pub outcome: Option<String>,
+    /// `outcome` came from the model.
+    pub outcome_summarized: bool,
+    /// The agent's last reply.
+    pub reply: Option<String>,
 }
 
 /// Why an agent looks stuck.
@@ -72,6 +82,16 @@ const LONG_CALLS: &[&str] = &[
     "subagent",
     "subagent_fork",
     "job_output",
+    // Codex's: its shells, a running command it feeds, and its wait on agents.
+    "exec_command",
+    "shell",
+    "local_shell",
+    "shell_command",
+    "write_stdin",
+    "wait",
+    // Cursor's shell.
+    "Shell",
+    "shell",
 ];
 
 fn stuck(t: &Transcript, working: bool, quiet: Duration) -> Option<Stuck> {
@@ -103,12 +123,19 @@ struct Entry {
     sub: Option<SubMeta>,
     trigger: Trigger,
     summary: Option<String>,
+    /// The outcome line and the reply it was read from.
+    outcome: Option<(String, String)>,
+    outcome_in_flight: bool,
+    /// After a failed outcome request, when to try again.
+    outcome_retry_at: Option<Instant>,
     /// When the transcript last gained a line.
     grew_at: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Locator {
+    /// Every transcript under a root, keyed by agent.
+    scan: fn(&Path) -> HashMap<AgentId, PathBuf>,
     paths: HashMap<AgentId, PathBuf>,
     /// Ids the last scan did not find, so an agent with no transcript costs
     /// one scan per [`RESCAN_MISSED`], not one per tick.
@@ -119,6 +146,15 @@ struct Locator {
 const RESCAN_MISSED: Duration = Duration::from_secs(30);
 
 impl Locator {
+    fn new(scan: fn(&Path) -> HashMap<AgentId, PathBuf>) -> Self {
+        Self {
+            scan,
+            paths: HashMap::new(),
+            missed: HashSet::new(),
+            last_scan: None,
+        }
+    }
+
     fn find(&mut self, id: AgentId, root: &Path, now: Instant) -> Option<PathBuf> {
         if let Some(p) = self.paths.get(&id) {
             return Some(p.clone());
@@ -130,7 +166,7 @@ impl Locator {
             return None;
         }
         self.last_scan = Some(now);
-        self.paths = scan(root);
+        self.paths = (self.scan)(root);
         self.missed.retain(|m| !self.paths.contains_key(m));
         let found = self.paths.get(&id).cloned();
         if found.is_none() {
@@ -171,6 +207,44 @@ fn scan(root: &Path) -> HashMap<AgentId, PathBuf> {
     out
 }
 
+/// Every rollout under Codex's `sessions/YYYY/MM/DD/`, keyed as pixtuoid keys
+/// Codex agents: by the UUID that ends `rollout-<time>-<UUID>.jsonl`.
+fn scan_codex(root: &Path) -> HashMap<AgentId, PathBuf> {
+    fn walk(dir: &Path, depth: u8, out: &mut HashMap<AgentId, PathBuf>) {
+        let Ok(items) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for item in items.flatten() {
+            let p = item.path();
+            if item.file_type().is_ok_and(|t| t.is_dir()) {
+                if depth < 3 {
+                    walk(&p, depth + 1, out);
+                }
+            } else if let Some(id) = codex_rollout_id(&p) {
+                out.insert(AgentId::from_parts(CODEX_SOURCE, id), p);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(root, 0, &mut out);
+    out
+}
+
+/// The session UUID a rollout's file name ends in.
+fn codex_rollout_id(path: &Path) -> Option<&str> {
+    if path.extension()? != "jsonl" {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?.strip_prefix("rollout-")?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    let b = id.as_bytes();
+    let uuid = b.iter().enumerate().all(|(i, &c)| match i {
+        8 | 13 | 18 | 23 => c == b'-',
+        _ => c.is_ascii_hexdigit(),
+    });
+    uuid.then_some(id)
+}
+
 /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`, as Claude Code resolves it.
 pub fn claude_dir() -> Option<PathBuf> {
     pixtuoid_core::source::claude_code::claude_config_dir()
@@ -181,9 +255,9 @@ pub fn projects_root() -> Option<PathBuf> {
     claude_dir().map(|d| d.join("projects"))
 }
 
-/// The task log agent-office's dsh plugin keeps for `session_id`, named the
-/// way the plugin names it.
-fn dsh_log(dir: &Path, session_id: &str) -> PathBuf {
+/// The task log agent-office keeps for `session_id` (its dsh plugin, its
+/// Cursor forwarder), named the way the plugin names it.
+pub fn task_log(dir: &Path, session_id: &str) -> PathBuf {
     let safe: String = session_id
         .chars()
         .map(|c| {
@@ -216,9 +290,15 @@ async fn run(
 ) {
     let root = projects_root();
     let dsh_dir = crate::dsh::transcripts_dir();
+    let cursor_dir = crate::cursor::transcripts_dir();
     let mut entries: HashMap<AgentId, Entry> = HashMap::new();
-    let mut locator = Locator::default();
+    let codex_root = pixtuoid_core::source::codex::codex_home().join("sessions");
+    let mut locator = Locator::new(scan);
+    let mut codex_locator = Locator::new(scan_codex);
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, Option<String>)>();
+    // Each outcome reply with the agent reply it was asked for.
+    let (outcome_tx, mut outcome_rx) =
+        mpsc::unbounded_channel::<(AgentId, String, Option<String>)>();
     let mut tick = tokio::time::interval(Duration::from_millis(700));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -233,6 +313,18 @@ async fn run(
                             e.summary = Some(line);
                         }
                         None => e.trigger.failed(Instant::now()),
+                    }
+                }
+            }
+            Some((id, reply, out)) = outcome_rx.recv() => {
+                if let Some(e) = entries.get_mut(&id) {
+                    e.outcome_in_flight = false;
+                    match out {
+                        Some(line) => {
+                            e.outcome = Some((reply, line));
+                            e.outcome_retry_at = None;
+                        }
+                        None => e.outcome_retry_at = Some(Instant::now() + trigger::RETRY_AFTER),
                     }
                 }
             }
@@ -252,13 +344,17 @@ async fn run(
                     continue;
                 }
                 if !entries.contains_key(id) {
-                    let path = if &*slot.source == crate::dsh::SOURCE {
-                        dsh_dir
+                    let path = match &*slot.source {
+                        crate::dsh::SOURCE => dsh_dir
                             .as_deref()
-                            .map(|d| dsh_log(d, &slot.session_id))
-                            .filter(|p| p.is_file())
-                    } else {
-                        root.as_deref().and_then(|r| locator.find(*id, r, now))
+                            .map(|d| task_log(d, &slot.session_id))
+                            .filter(|p| p.is_file()),
+                        CURSOR_SOURCE => cursor_dir
+                            .as_deref()
+                            .map(|d| task_log(d, &slot.session_id))
+                            .filter(|p| p.is_file()),
+                        CODEX_SOURCE => codex_locator.find(*id, &codex_root, now),
+                        _ => root.as_deref().and_then(|r| locator.find(*id, r, now)),
                     };
                     let Some(path) = path else {
                         continue;
@@ -272,6 +368,9 @@ async fn run(
                             sub,
                             trigger: Trigger::default(),
                             summary: None,
+                            outcome: None,
+                            outcome_in_flight: false,
+                            outcome_retry_at: None,
                             grew_at: now,
                         },
                     );
@@ -281,6 +380,22 @@ async fn run(
                 };
                 if e.tail.poll(&mut e.transcript).is_ok_and(|grew| grew) {
                     e.grew_at = now;
+                }
+                if let Some(s) = &summarizer
+                    && let Some(reply) = outcome_due(e, slot, SystemTime::now(), now)
+                {
+                    e.outcome_in_flight = true;
+                    let input = OutcomeInput {
+                        project: project_of(&slot.cwd),
+                        task: e.transcript.latest_prompt().map(str::to_owned),
+                        reply: reply.clone(),
+                    };
+                    let (s, tx, id) = (s.clone(), outcome_tx.clone(), *id);
+                    tokio::spawn(async move {
+                        let out = s.summarize_outcome(&input).await;
+                        debug_log(id, "outcome", &out);
+                        let _ = tx.send((id, reply, out.ok()));
+                    });
                 }
                 // Claude Code may write a subagent's meta.json after its transcript.
                 if e.sub.as_ref().is_none_or(|s| s.description.is_none()) {
@@ -304,17 +419,7 @@ async fn run(
                     let (s, tx, id) = (s.clone(), done_tx.clone(), *id);
                     tokio::spawn(async move {
                         let out = s.summarize(&input).await;
-                        if let Ok(path) = std::env::var("AGENT_OFFICE_DEBUG") {
-                            let line =
-                                format!("{id} {:?}\n", out.as_ref().map_err(|e| format!("{e:#}")));
-                            let _ = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(path)
-                                .and_then(|mut f| {
-                                    std::io::Write::write_all(&mut f, line.as_bytes())
-                                });
-                        }
+                        debug_log(id, "task", &out);
                         let _ = tx.send((id, out.ok()));
                     });
                 }
@@ -340,13 +445,54 @@ async fn run(
     }
 }
 
+/// `AGENT_OFFICE_DEBUG`: append each summary result to that file.
+fn debug_log(id: AgentId, kind: &str, out: &anyhow::Result<String>) {
+    let Ok(path) = std::env::var("AGENT_OFFICE_DEBUG") else {
+        return;
+    };
+    let line = format!(
+        "{id} {kind} {:?}\n",
+        out.as_ref().map_err(|e| format!("{e:#}"))
+    );
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
+fn project_of(cwd: &Path) -> String {
+    cwd.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The reply to ask an outcome for now, if any: the agent has stopped (idle
+/// a moment, so the turn's last lines are in) and its last reply has no
+/// outcome yet, none is out, and no failed one is waiting to be retried.
+fn outcome_due(
+    e: &Entry,
+    slot: &pixtuoid_core::AgentSlot,
+    wall: SystemTime,
+    now: Instant,
+) -> Option<String> {
+    let reply = e.transcript.last_reply.as_ref()?;
+    let settled = wall
+        .duration_since(slot.state_started_at)
+        .is_ok_and(|d| d >= trigger::DEBOUNCE);
+    let due = matches!(slot.state, ActivityState::Idle)
+        && slot.exiting_at.is_none()
+        && settled
+        && !e.outcome_in_flight
+        && e.outcome.as_ref().is_none_or(|(r, _)| r != reply)
+        && e.outcome_retry_at.is_none_or(|t| now >= t);
+    due.then(|| reply.clone())
+}
+
 fn summary_input(t: &Transcript, cwd: &Path) -> SummaryInput {
     let n = t.prompts.len();
     SummaryInput {
-        project: cwd
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        project: project_of(cwd),
         latest_prompt: t.latest_prompt().unwrap_or_default().to_owned(),
         earlier_prompts: t
             .prompts
@@ -361,6 +507,11 @@ fn summary_input(t: &Transcript, cwd: &Path) -> SummaryInput {
 
 fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
     let t = &e.transcript;
+    // An outcome read from an earlier reply describes an earlier turn.
+    let outcome = t.last_reply.as_ref().map(|r| match &e.outcome {
+        Some((of, line)) if of == r => (line.clone(), true),
+        _ => (truncate_cells(r, SUMMARY_CELLS), false),
+    });
     let desc = e.sub.as_ref().and_then(|s| s.description.clone());
     let (line, summarized) = match (desc, &e.summary) {
         (Some(d), _) => (Some(d), true),
@@ -380,6 +531,10 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         agent_type: e.sub.as_ref().and_then(|s| s.agent_type.clone()),
         phase: t.phase,
         stuck: stuck(t, working, now.duration_since(e.grew_at)),
+        turn_started: t.turn_started,
+        outcome: outcome.as_ref().map(|(o, _)| o.clone()),
+        outcome_summarized: outcome.is_some_and(|(_, s)| s),
+        reply: t.last_reply.clone(),
     }
 }
 
@@ -418,18 +573,38 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// pixtuoid keys a Codex agent by the UUID its rollout's name ends in,
+    /// so the reader must key it the same, or a Codex figure never gets its
+    /// task line; anything else under `sessions/` is not a rollout.
+    #[test]
+    fn codex_rollouts_are_keyed_by_their_session_uuid() {
+        let root =
+            std::env::temp_dir().join(format!("agent-office-codex-scan-{}", std::process::id()));
+        let day = root.join("2026/11/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let uuid = "019e7762-9ded-7e33-be41-946ecf105bf4";
+        let rollout = day.join(format!("rollout-2026-11-05T09-30-15-{uuid}.jsonl"));
+        std::fs::write(&rollout, "").unwrap();
+        std::fs::write(day.join("history.jsonl"), "").unwrap();
+        std::fs::write(day.join("rollout-2026-11-05T09-30-15-notauuid.jsonl"), "").unwrap();
+        let found = scan_codex(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[&AgentId::from_parts(CODEX_SOURCE, uuid)], rollout);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// The plugin and the reader must agree on the file name, or a dsh
     /// session never gets a task line.
     #[test]
     fn a_dsh_log_is_named_the_way_the_plugin_names_it() {
         let dir = Path::new("/t");
         assert_eq!(
-            dsh_log(dir, "session-209513f0-7740"),
+            task_log(dir, "session-209513f0-7740"),
             Path::new("/t/session-209513f0-7740.jsonl")
         );
         // The plugin's `replace(/[^A-Za-z0-9._-]/gu, "_")`: per code point,
         // as `chars()` is, so a non-BMP character is one `_` on both sides.
-        assert_eq!(dsh_log(dir, "../a/b c🙂"), Path::new("/t/.._a_b_c_.jsonl"));
+        assert_eq!(task_log(dir, "../a/b c🙂"), Path::new("/t/.._a_b_c_.jsonl"));
         let plugin = include_str!("../dsh_plugin.mjs");
         assert!(plugin.contains(r#"sessionId.replace(/[^A-Za-z0-9._-]/gu, "_") + ".jsonl""#));
     }
@@ -468,16 +643,109 @@ mod tests {
         assert_eq!(stuck(&t, true, Duration::ZERO), Some(Stuck::Failing(3)));
     }
 
-    #[test]
-    fn without_a_summary_the_line_is_the_raw_prompt_marked_unsummarized() {
-        let mut e = Entry {
+    fn entry() -> Entry {
+        Entry {
             tail: Tail::new(PathBuf::new()),
             transcript: Transcript::default(),
             sub: None,
             trigger: Trigger::default(),
             summary: None,
+            outcome: None,
+            outcome_in_flight: false,
+            outcome_retry_at: None,
             grew_at: Instant::now(),
-        };
+        }
+    }
+
+    fn idle_slot(since: SystemTime) -> pixtuoid_core::AgentSlot {
+        let mut scene = SceneState::uniform(8);
+        let id = AgentId::from_parts(CC_SOURCE, "s");
+        pixtuoid_core::Reducer::new().apply(
+            &mut scene,
+            pixtuoid_core::AgentEvent::SessionStart {
+                agent_id: id,
+                source: CC_SOURCE.into(),
+                session_id: "s".into(),
+                cwd: "/repo".into(),
+                parent_id: None,
+            },
+            since,
+            pixtuoid_core::Transport::Hook,
+        );
+        let mut slot = scene.agents.remove(&id).unwrap();
+        slot.state = ActivityState::Idle;
+        slot.state_started_at = since;
+        slot
+    }
+
+    /// One request per finished turn: asked once the agent has stopped and
+    /// its last lines are in, never while it works or for a reply already
+    /// read, and a failed one waits before it is tried again.
+    #[test]
+    fn an_outcome_is_asked_once_per_reply_after_the_agent_stops() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = Instant::now();
+        let mut e = entry();
+        let mut slot = idle_slot(t0);
+        let settled = t0 + trigger::DEBOUNCE;
+        assert_eq!(outcome_due(&e, &slot, settled, now), None, "no reply yet");
+        e.transcript.last_reply = Some("已修好".into());
+        assert_eq!(
+            outcome_due(&e, &slot, t0 + Duration::from_secs(1), now),
+            None,
+            "its last lines may still be landing"
+        );
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now).as_deref(),
+            Some("已修好")
+        );
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(outcome_due(&e, &slot, settled, now), None, "still working");
+        slot.state = ActivityState::Idle;
+        e.outcome_in_flight = true;
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now),
+            None,
+            "one out already"
+        );
+        e.outcome_in_flight = false;
+        e.outcome = Some(("已修好".into(), "登录页已修好".into()));
+        assert_eq!(outcome_due(&e, &slot, settled, now), None, "already read");
+        e.transcript.last_reply = Some("要删旧接口吗？".into());
+        assert!(
+            outcome_due(&e, &slot, settled, now).is_some(),
+            "a new turn's reply"
+        );
+        e.outcome_retry_at = Some(now + Duration::from_secs(30));
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now),
+            None,
+            "waits after a failure"
+        );
+        assert!(outcome_due(&e, &slot, settled, now + Duration::from_secs(30)).is_some());
+    }
+
+    /// An outcome read from an earlier reply describes an earlier turn: the
+    /// card falls back to the new reply rather than show a stale result.
+    #[test]
+    fn an_outcome_shows_only_for_the_reply_it_was_read_from() {
+        let mut e = entry();
+        e.transcript.last_reply = Some("已修好，补了测试".into());
+        e.outcome = Some(("已修好，补了测试".into(), "登录页已修好".into()));
+        let v = view(&e, false, Instant::now());
+        assert_eq!(v.outcome.as_deref(), Some("登录页已修好"));
+        assert!(v.outcome_summarized);
+        e.transcript.last_reply = Some("要删旧接口吗？".into());
+        let v = view(&e, false, Instant::now());
+        assert_eq!(v.outcome.as_deref(), Some("要删旧接口吗？"));
+        assert!(!v.outcome_summarized);
+        e.transcript.last_reply = None;
+        assert_eq!(view(&e, false, Instant::now()).outcome, None);
+    }
+
+    #[test]
+    fn without_a_summary_the_line_is_the_raw_prompt_marked_unsummarized() {
+        let mut e = entry();
         e.transcript
             .prompts
             .push_back("请帮我把登录页的报错修好然后补一个回归测试再部署".into());

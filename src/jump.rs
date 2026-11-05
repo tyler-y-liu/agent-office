@@ -23,7 +23,12 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<(), String> {
         }
     }
     if &*slot.source != crate::pipeline::CC_SOURCE {
-        return Err("dsh 的会话，跳不过去".to_owned());
+        let cli = match &*slot.source {
+            crate::pipeline::CODEX_SOURCE => "Codex",
+            crate::pipeline::CURSOR_SOURCE => "Cursor",
+            other => other,
+        };
+        return Err(format!("{cli} 的会话，跳不过去"));
     }
     let dir = crate::tasks::projects_root()
         .and_then(|root| registry_dir(&root))

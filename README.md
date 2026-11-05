@@ -1,13 +1,14 @@
 # agent-office
 
-An always-on-top pixel office on Victoria Harbour for your Claude Code sessions: every session is a little worker, with a one-line AI summary of its current task over its head and in the side panel. It flags sessions waiting for your approval or likely stuck, and a double-click jumps back to that session in the Claude desktop app. macOS, Claude Code only; the UI is in Chinese.
+An always-on-top pixel office on Victoria Harbour for your Claude Code sessions: every session is a little worker, with a one-line AI summary of its current task over its head and in the side panel. It flags sessions waiting for your approval or likely stuck, and a double-click jumps back to that session in the Claude desktop app. macOS; Claude Code, plus DeepSeek Harness, Codex and Cursor (`cursor-agent`) sessions; the UI is in Chinese.
 
 ![agent-office](docs/screenshot.png)
 
 一个置顶的像素办公室窗口，开在维港边：每个 Claude Code 会话是一个小人，头顶和右侧任务栏写着它**正在做的任务（AI 一句话总结）**。双击小人就能跳回它所在的会话。
 
 - 任务摘要：读每个会话的最新指令、进行中的 todo 和最近的动作，用你配置的 OpenAI 兼容接口总结成不超过 20 字的一句话；子 agent 直接用父 agent 派活时写的 description。
-- 阶段与卡点：按最近的工具调用标出调研 / 写码 / 测试 / 执行 / 派活；连续失败 3 次，或者在工作中却 5 分钟没有新动静（构建、子 agent 这类长调用放宽到 20 分钟），会标红为「可能卡住」。
+- 做完的结果：一轮结束后，再用同一个接口把它最后的回复总结成一句写在卡片上（做成了什么、卡在哪，或者「问：」它在等你回答什么），不用点开就知道先看哪个；展开卡片能看到最后回复的末尾。没配接口时显示回复开头。
+- 阶段与卡点：按最近的工具调用标出调研 / 写码 / 测试 / 执行 / 派活；连续失败 3 次，或者在工作中却 5 分钟没有新动静（构建、子 agent 这类长调用放宽到 20 分钟），会标红为「可能卡住」。干活的卡片写着本轮跑了多久（从你最后一次发指令算起，满 1 分钟才显示）。
 - 调度：双击小人或卡片（或选中后按 `o`）在 Claude 桌面 app 里打开那个会话（打开过的已完成会话算已看过：从茶水间去天台，侧栏移到「闲着」）；点任务栏标题（或按 `w`）打开「等你的会话」列表。
 - 维港窗景：海面和倒影、对岸楼群和 ICC、狮子山山脊、天星小轮、鸭灵号红帆船、喷射飞航、盘旋的麻鹰，白天偶尔有直升机，夜里有闪灯的航班；每晚 8 点幻彩咏香江激光。天色按香港时间走，与本机时区无关。
 - 中环写字楼：四人一排的屏风长桌、恒指报价屏、关公神台、你的办公室（真皮沙发、酸枝茶几、书柜、恒指屏）、电梯大堂的龙鱼缸、茶餐厅一角（面包柜、奶茶桶、马赛克柜台）、发财树 / 富贵竹 / 年桔 / 会招手的招财猫，还有一只到处巡的店猫。
@@ -31,7 +32,23 @@ DeepSeek Harness（dsh）的会话也能进办公室：
 agent-office connect dsh   # 往 $DSH_HOME（默认 ~/.dsh）写插件，并挂进 cordis.patch.yml；新开的 dsh 进程生效
 ```
 
-插件把会话事件发给 `agent-office hook --source dsh`，另外在 `$DSH_HOME/agent-office/transcripts/` 为每个会话记一份任务日志（你的指令、todo、每次工具调用的路径/命令，不含文件内容和工具输出），摘要和卡点检测就读这份日志。`agent-office disconnect dsh` 卸掉插件，日志保留。dsh 会话双击跳不过去。可以和 pixtuoid 的 dsh 插件同时挂。
+插件把会话事件发给 `agent-office hook --source dsh`，另外在 `$DSH_HOME/agent-office/transcripts/` 为每个会话记一份任务日志（你的指令、它的回复、todo、每次工具调用的路径/命令，不含文件内容和工具输出），摘要和卡点检测就读这份日志。`agent-office disconnect dsh` 卸掉插件，日志保留。dsh 会话双击跳不过去。可以和 pixtuoid 的 dsh 插件同时挂。
+
+Codex 的会话不用接入也会进办公室：摘要和卡点读 `$CODEX_HOME/sessions`（默认 `~/.codex/sessions`）里的会话记录。要看到「等你确认」再接 hooks：
+
+```bash
+agent-office connect codex   # 在 ~/.config/agent-office/codex-plugin 放一个插件，用 codex plugin 命令装上；新开的 Codex 会话生效
+```
+
+`agent-office disconnect codex` 卸掉插件。需要 `codex` 在 PATH 上。
+
+Cursor 的 `cursor-agent` 只能靠 hooks：
+
+```bash
+agent-office connect cursor  # 往 Cursor 配置目录（默认 ~/.cursor）的 hooks.json 加 hooks（先备份）；新开的 cursor-agent 生效
+```
+
+Cursor 自己的会话记录里没有工具调用，所以 hook 另外在 `~/.config/agent-office/cursor/transcripts/` 为每个会话记一份任务日志（内容同 dsh），摘要和卡点检测读它。`agent-office disconnect cursor` 移除 hooks，日志保留。Codex 和 Cursor 的会话双击都跳不过去。
 
 `agent-office disconnect` 移除 hooks。hooks 指向 `connect` 时这个程序所在的位置，移动或重装到别处后要重新 `connect`。
 
@@ -53,13 +70,13 @@ agent-office --shot out.png    # 跑 20 秒后把画面存成 PNG 并退出
 | `AGENT_OFFICE_THEME` | 换主题：默认 `harbour`，另有 `paper` 和 pixtuoid 自带的几套 |
 | `AGENT_OFFICE_UTC_OFFSET` | 窗外天色用的时区，秒（默认 `28800`，香港） |
 
-开启摘要时，会话的指令文本、todo 和最近动作（dsh 会话同样）会发到你配置的接口。没配就不发任何内容。挑一个回得快、不带长推理的模型。
+开启摘要时，会话的指令文本、todo、最近动作和一轮结束时的最后回复（dsh、Codex、Cursor 会话同样）会发到你配置的接口。没配就不发任何内容。挑一个回得快、不带长推理的模型。
 
 ## 限制
 
 - 只在 macOS 上用过。
-- 跳转只支持 Claude 桌面 app 里的会话；终端里跑的会话和 dsh 会话会在页脚提示跳不过去。
-- 只显示 Claude Code 和 dsh 会话。
+- 跳转只支持 Claude 桌面 app 里的会话；终端里跑的会话和 dsh、Codex、Cursor 会话会在页脚提示跳不过去。
+- 只显示 Claude Code、dsh、Codex 和 Cursor（`cursor-agent`）会话。
 - 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
 
 ## 美术与改动

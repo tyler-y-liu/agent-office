@@ -50,6 +50,24 @@ pub fn run() -> Result<()> {
         println!("[ ] dsh       未接入；用 DeepSeek Harness 的话：agent-office connect dsh");
     }
 
+    if crate::codex::installed() {
+        println!(
+            "[✓] codex     插件已装上：Codex 会话能显示「等你确认」（新开的 Codex 会话才生效）"
+        );
+    } else {
+        println!(
+            "[ ] codex     未接入 hooks；Codex 会话照样进办公室，但看不到「等你确认」：agent-office connect codex"
+        );
+    }
+
+    if crate::cursor::installed() {
+        println!("[✓] cursor    hooks 已接入：cursor-agent 会话也会进办公室（新开的才生效）");
+    } else {
+        println!(
+            "[ ] cursor    未接入；用 Cursor 的 cursor-agent 的话：agent-office connect cursor"
+        );
+    }
+
     let socket = crate::hook::socket_path();
     match socket_in_use(&socket) {
         Some(w) => println!("[!] socket    {w}"),
