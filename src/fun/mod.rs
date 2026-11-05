@@ -279,6 +279,9 @@ pub enum Occasion {
     Ordinary,
     Lunch,
     Typhoon,
+    /// The speaker sits in a meeting room: the meeting is what it talks
+    /// about, lunch hour or not.
+    Meeting,
 }
 
 const OFFICE_TALK: &[&str] = &[
@@ -309,6 +312,19 @@ const LUNCH_ORDERS: &[&str] = &[
     "西多士一份",
 ];
 
+const MEETING_TALK: &[&str] = &[
+    "睇下个 plan",
+    "边个跟进？",
+    "下一步点做？",
+    "有冇问题？",
+    "deadline 几时？",
+    "我嚟写",
+    "分工先",
+    "就咁定",
+    "等我记低",
+    "下次再 sync",
+];
+
 const TYPHOON_TALK: &[&str] = &[
     "八号风球喇！",
     "收工返屋企",
@@ -330,7 +346,8 @@ fn shop_talk(phase: Phase) -> &'static [&'static str] {
 
 /// What `speaker` says in turn `turn` of a chitchat: lunch orders at lunch,
 /// the typhoon in a typhoon, else its own work half the time and office talk
-/// the rest. A cheer still playing is what it talks about.
+/// (meeting talk in a meeting) the rest. A cheer still playing is what it
+/// talks about.
 pub fn chitchat(
     speaker: AgentId,
     view: Option<&TaskView>,
@@ -343,7 +360,7 @@ pub fn chitchat(
     match occasion {
         Occasion::Typhoon => return pick(TYPHOON_TALK),
         Occasion::Lunch => return pick(LUNCH_ORDERS),
-        Occasion::Ordinary => {}
+        Occasion::Ordinary | Occasion::Meeting => {}
     }
     if let Some((cheer, _)) = live_cheer(view, now) {
         return match cheer {
@@ -352,9 +369,14 @@ pub fn chitchat(
             Cheer::Recovered => "终于搞掂！",
         };
     }
+    let small_talk = if occasion == Occasion::Meeting {
+        MEETING_TALK
+    } else {
+        OFFICE_TALK
+    };
     match view.and_then(|v| v.phase) {
         Some(p) if seed >> 32 & 1 == 0 => pick(shop_talk(p)),
-        _ => pick(OFFICE_TALK),
+        _ => pick(small_talk),
     }
 }
 
@@ -548,6 +570,20 @@ mod tests {
             .map(|t| chitchat(id, None, Occasion::Ordinary, t, now))
             .collect();
         assert!(said.len() > 5, "the talk varies turn to turn");
+        // In a meeting no one talks food or the evening: the meeting is on.
+        let coding = TaskView {
+            phase: Some(Phase::Code),
+            ..TaskView::default()
+        };
+        for turn in 0..40 {
+            for view in [None, Some(&coding)] {
+                let line = chitchat(id, view, Occasion::Meeting, turn, now);
+                assert!(
+                    MEETING_TALK.contains(&line) || shop_talk(Phase::Code).contains(&line),
+                    "off topic in a meeting: {line}"
+                );
+            }
+        }
     }
 
     /// Overtime is a working agent late at night, or one on a half-hour turn;
