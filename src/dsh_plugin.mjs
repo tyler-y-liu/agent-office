@@ -227,6 +227,10 @@ export function apply(ctx) {
               })
           }
           break
+        case "turn/start":
+          // Opens the turn: the figure keeps its desk between calls.
+          send({ type: "turn_start", ...base(header) })
+          break
         case "turn/end":
           send({ type: "turn_end", ...base(header) })
           break

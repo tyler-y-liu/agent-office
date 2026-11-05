@@ -333,6 +333,87 @@ mod tests {
         ));
     }
 
+    /// A cursor-agent figure sits at its desk for its whole turn too: the
+    /// model thinks between calls, so only `stop` lets it go idle. Without
+    /// the prompt opening a turn it left its desk after every call and
+    /// walked back at the next one, mid-conversation.
+    #[test]
+    fn a_cursor_turn_keeps_its_session_working_between_calls_until_it_stops() {
+        use pixtuoid_core::source::decoder::{SOURCE_STAMP, decode_hook_payload};
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "0b7d6a1e-cu-session";
+        let id = AgentId::from_parts(CURSOR_SOURCE, sid);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let mut now = SystemTime::UNIX_EPOCH;
+        let mut states = Vec::new();
+        for event in [
+            "sessionStart",
+            "beforeSubmitPrompt",
+            "preToolUse",
+            "postToolUse",
+            "preToolUse",
+            "postToolUseFailure",
+            "stop",
+        ] {
+            let v = json!({
+                "hook_event_name": event, "session_id": sid, "cwd": "",
+                "workspace_roots": ["/repo"], "prompt": "fix it",
+                "tool_name": "Shell", "tool_input": {"command": "cargo test"},
+                "status": "completed", SOURCE_STAMP: CURSOR_SOURCE,
+            });
+            for ev in decode_hook_payload(v).expect("decodes") {
+                r.apply(&mut scene, ev, now, Transport::Hook);
+            }
+            now += Duration::from_secs(1);
+            states.push(scene.agents[&id].state.clone());
+        }
+        let between_calls = ActivityState::Running { item: None };
+        assert_eq!(states[1], between_calls, "the prompt starts the work");
+        assert_eq!(states[3], between_calls, "a call's end is not the turn's");
+        assert_eq!(states[5], between_calls, "nor is a failed call's");
+        assert_eq!(states[6], ActivityState::Idle);
+    }
+
+    /// A dsh figure sits at its desk for its whole turn: the plugin's
+    /// `turn_start` opens it and `turn_end` closes it. Without the start the
+    /// figure left its desk after every call.
+    #[test]
+    fn a_dsh_turn_keeps_its_session_working_between_calls_until_it_ends() {
+        use pixtuoid_core::source::decoder::{SOURCE_STAMP, decode_hook_payload};
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "ds-session-1";
+        let id = AgentId::from_parts(crate::dsh::SOURCE, sid);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let mut now = SystemTime::UNIX_EPOCH;
+        let mut states = Vec::new();
+        for ty in ["session_start", "turn_start", "tool_call", "tool_result", "turn_end"] {
+            let v = json!({
+                "type": ty, "sessionId": sid, "cwd": "/repo",
+                "callId": "c1", "toolName": "bash", "_pid": 4242,
+                SOURCE_STAMP: crate::dsh::SOURCE,
+            });
+            for ev in decode_hook_payload(v).expect("decodes") {
+                r.apply(&mut scene, ev, now, Transport::Hook);
+            }
+            now += Duration::from_secs(1);
+            states.push(scene.agents[&id].state.clone());
+        }
+        let between_calls = ActivityState::Running { item: None };
+        assert_eq!(states[1], between_calls, "the turn starts the work");
+        assert_eq!(states[3], between_calls, "a call's end is not the turn's");
+        assert_eq!(states[4], ActivityState::Idle);
+    }
+
     use super::*;
 
     fn start(source: &str) -> AgentEvent {

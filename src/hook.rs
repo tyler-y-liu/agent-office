@@ -95,12 +95,11 @@ pub fn forward(source: Option<&str>) {
         && let Ok(v) = serde_json::from_str::<Value>(&raw)
     {
         crate::cursor::record(&v);
-        // Only the task log takes the prompt and the reply: pixtuoid's
-        // decoder refuses an event it does not know. Cursor reads the answer
-        // to the prompt's.
+        // Cursor reads the answer to the prompt's hook; the prompt also opens
+        // the session's turn. Only the task log takes the reply: pixtuoid's
+        // decoder refuses an event it does not know.
         if v["hook_event_name"] == crate::cursor::PROMPT_EVENT {
             println!("{}", json!({ "continue": true }));
-            return;
         }
         if v["hook_event_name"] == crate::cursor::REPLY_EVENT {
             return;

@@ -74,7 +74,11 @@ pub(crate) const DESCRIPTOR: SourceDescriptor = SourceDescriptor {
             delegations_are_hook_silent: true,
             child_end_inference: ChildEndInference::TaskDrain,
             child_hooks_unnamed: false,
-            brackets_turns: false,
+            // agent-office: `beforeSubmitPrompt` opens a turn and `stop` (which
+            // fires on completion, abort and error) closes it, so the figure
+            // stays at its desk while the model thinks between calls. A turn
+            // whose end is lost anyway closes at the next prompt or `sessionEnd`.
+            brackets_turns: true,
         },
         focus: FocusChannel::ShimStamp(Corroboration::Twice),
     },
@@ -140,6 +144,20 @@ pub(crate) fn decode_cursor_hook_payload(obj: &HookObject) -> Result<Vec<AgentEv
             cwd: cwd.into(),
             parent_id: None,
         }]),
+        // agent-office: a prompt opens the session's turn.
+        "beforeSubmitPrompt" => Ok(vec![
+            AgentEvent::SessionStart {
+                agent_id,
+                source: SOURCE_NAME.to_string(),
+                session_id: key.to_string(),
+                cwd: cwd.into(),
+                parent_id: None,
+            },
+            AgentEvent::TurnStart {
+                agent_id,
+                turn: fresh_turn(),
+            },
+        ]),
         "preToolUse" => {
             let tool = obj
                 .get("tool_name")
@@ -204,6 +222,15 @@ pub(crate) fn decode_cursor_hook_payload(obj: &HookObject) -> Result<Vec<AgentEv
         });
     }
     Ok(evs)
+}
+
+/// agent-office: Cursor's hooks name no turn we can rely on, so each prompt
+/// mints its own key; unique per run, so the ledger never takes a new turn
+/// for a closed one.
+fn fresh_turn() -> crate::state::TurnKey {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::state::TurnKey::Id(format!("cu-{n}").into())
 }
 
 fn cursor_tool_detail(tool: &str, args: Option<&Value>) -> ToolDetail {
