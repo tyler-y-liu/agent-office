@@ -3,6 +3,7 @@
 
 mod core;
 mod doctor;
+mod dsh;
 mod floating;
 mod hook;
 mod jump;
@@ -27,11 +28,24 @@ fn main() -> Result<()> {
         .collect();
     match args.first() {
         Some(&"hook") => {
-            hook::forward();
+            let source = match args.get(1..) {
+                Some(["--source", s, ..]) => Some(*s),
+                _ => None,
+            };
+            hook::forward(source);
             return Ok(());
         }
-        Some(&"connect") => return hook::connect(),
-        Some(&"disconnect") => return hook::disconnect(),
+        Some(&cmd @ ("connect" | "disconnect")) => {
+            return match (cmd, args.get(1)) {
+                ("connect", None) => hook::connect(),
+                ("disconnect", None) => hook::disconnect(),
+                ("connect", Some(&"dsh")) => dsh::connect(),
+                ("disconnect", Some(&"dsh")) => dsh::disconnect(),
+                // A typo must not touch Claude Code's hooks instead.
+                (_, Some(other)) => anyhow::bail!("不认识 {other}：只有 {cmd} 或 {cmd} dsh"),
+                _ => unreachable!(),
+            };
+        }
         Some(&"doctor") => return doctor::run(),
         _ => {}
     }

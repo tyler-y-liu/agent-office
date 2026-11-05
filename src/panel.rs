@@ -13,7 +13,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 
-use crate::pipeline::CC_SOURCE;
 use crate::tasks::{TaskView, TaskViews, ago};
 use crate::text::{one_line, truncate_cells};
 
@@ -111,7 +110,7 @@ pub fn order(
     let cc: Vec<&AgentSlot> = scene
         .agents
         .values()
-        .filter(|s| &*s.source == CC_SOURCE)
+        .filter(|s| crate::pipeline::is_shown_source(&s.source))
         .collect();
     let is_shown = |id: &AgentId| cc.iter().any(|s| s.agent_id == *id);
     let mut roots: Vec<&AgentSlot> = cc
@@ -546,6 +545,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::CC_SOURCE;
     use pixtuoid_core::Reducer;
     use pixtuoid_core::source::{AgentEvent, Transport};
     use std::path::PathBuf;

@@ -42,6 +42,14 @@ pub fn run() -> Result<()> {
         );
     }
 
+    if crate::dsh::installed() {
+        println!(
+            "[✓] dsh       插件已挂上：DeepSeek Harness 会话也会进办公室（新开的 dsh 进程才生效）"
+        );
+    } else {
+        println!("[ ] dsh       未接入；用 DeepSeek Harness 的话：agent-office connect dsh");
+    }
+
     let socket = crate::hook::socket_path();
     match socket_in_use(&socket) {
         Some(w) => println!("[!] socket    {w}"),

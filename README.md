@@ -23,7 +23,17 @@ agent-office connect      # 往 ~/.claude/settings.json 加 hooks（先备份）
 agent-office
 ```
 
-不接 hooks 也能用，只靠会话记录，但看不到「等你确认」。`agent-office disconnect` 移除 hooks。hooks 指向 `connect` 时这个程序所在的位置，移动或重装到别处后要重新 `connect`。
+不接 hooks 也能用，只靠会话记录，但看不到「等你确认」。
+
+DeepSeek Harness（dsh）的会话也能进办公室：
+
+```bash
+agent-office connect dsh   # 往 $DSH_HOME（默认 ~/.dsh）写插件，并挂进 cordis.patch.yml；新开的 dsh 进程生效
+```
+
+插件把会话事件发给 `agent-office hook --source dsh`，另外在 `$DSH_HOME/agent-office/transcripts/` 为每个会话记一份任务日志（你的指令、todo、每次工具调用的路径/命令，不含文件内容和工具输出），摘要和卡点检测就读这份日志。`agent-office disconnect dsh` 卸掉插件，日志保留。dsh 会话双击跳不过去。可以和 pixtuoid 的 dsh 插件同时挂。
+
+`agent-office disconnect` 移除 hooks。hooks 指向 `connect` 时这个程序所在的位置，移动或重装到别处后要重新 `connect`。
 
 按键：`↑↓` 选中 · `Enter` 展开（完整指令 + 最近 5 个动作）· `o` 打开会话 · `w` 等你的会话 · `r` 重新总结 · `b` 开关头顶标签 · `[ ]` 换楼层 · `t` 切换置顶 · `q` 退出。鼠标点卡片或小人选中，双击打开会话。
 
@@ -43,13 +53,13 @@ agent-office --shot out.png    # 跑 20 秒后把画面存成 PNG 并退出
 | `AGENT_OFFICE_THEME` | 换主题：默认 `harbour`，另有 `paper` 和 pixtuoid 自带的几套 |
 | `AGENT_OFFICE_UTC_OFFSET` | 窗外天色用的时区，秒（默认 `28800`，香港） |
 
-开启摘要时，会话的指令文本、todo 和最近动作会发到你配置的接口。没配就不发任何内容。挑一个回得快、不带长推理的模型。
+开启摘要时，会话的指令文本、todo 和最近动作（dsh 会话同样）会发到你配置的接口。没配就不发任何内容。挑一个回得快、不带长推理的模型。
 
 ## 限制
 
 - 只在 macOS 上用过。
-- 跳转只支持 Claude 桌面 app 里的会话；终端里跑的会话会在页脚提示跳不过去。
-- 只显示 Claude Code 会话。
+- 跳转只支持 Claude 桌面 app 里的会话；终端里跑的会话和 dsh 会话会在页脚提示跳不过去。
+- 只显示 Claude Code 和 dsh 会话。
 - 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
 
 ## 美术与改动
