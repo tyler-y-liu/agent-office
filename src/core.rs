@@ -162,6 +162,7 @@ impl Core {
         } else {
             self.ui.selected = Some(id);
         }
+        self.ui.reveal = true;
         self.follow(floors);
     }
 
@@ -185,9 +186,13 @@ impl Core {
                 let views = self.views_rx.borrow().clone();
                 let order = panel::order(&self.scene(), &views, SystemTime::now(), &self.ui.seen);
                 self.ui.selected = panel::step(&order, self.ui.selected, delta);
+                self.ui.reveal = true;
                 self.follow(floors);
             }
-            Action::Expand if self.ui.selected.is_some() => self.ui.expanded = !self.ui.expanded,
+            Action::Expand if self.ui.selected.is_some() => {
+                self.ui.expanded = !self.ui.expanded;
+                self.ui.reveal = true;
+            }
             Action::Expand => {}
             Action::Resummarize => {
                 if let Some(id) = self.ui.selected {

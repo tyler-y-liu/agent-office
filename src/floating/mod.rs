@@ -30,7 +30,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
@@ -49,6 +49,8 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(300);
 /// Two clicks on one agent this close together are a double click (macOS's
 /// default interval is about this).
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
+/// Panel rows one notch of a mouse wheel scrolls, as a terminal does.
+const WHEEL_ROWS: f64 = 3.0;
 /// Cells across the panel.
 const PANEL_COLS: u32 = 46;
 /// Logical units a badge's plate sits over its anchor (`LABEL_GAP` in
@@ -116,6 +118,8 @@ struct Win {
     office: Office,
     on_top: bool,
     cursor: PhysicalPosition<f64>,
+    /// A trackpad's scroll in pixels not yet a whole panel row.
+    wheel_px: f64,
     /// The last frame's layout, which a click is read against.
     last: Option<Layout>,
     /// The agent last clicked and when, so a second click on it soon after
@@ -302,6 +306,7 @@ impl ApplicationHandler for Floating<'_> {
                 button: MouseButton::Left,
                 ..
             } => win.click(),
+            WindowEvent::MouseWheel { delta, .. } => win.wheel(delta),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let action = match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => Action::Back,
@@ -400,6 +405,7 @@ impl Floating<'_> {
             },
             on_top: true,
             cursor: PhysicalPosition::default(),
+            wheel_px: 0.0,
             last: None,
             last_click: None,
             about: None,
@@ -513,7 +519,7 @@ impl Win {
             &frame.scene,
             &frame.views,
             &inks,
-            &self.core.ui,
+            &mut self.core.ui,
         );
         canvas.fill(i64::from(panel_x), 0, w.get() - panel_x, h.get(), PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &cells, (panel_x, 0), g);
@@ -614,6 +620,28 @@ impl Win {
             paint_world_text(art, text, d, u, &tags);
         }
         Some((tags, signs))
+    }
+
+    /// Scroll the panel's cards when the pointer is over the panel. Up the
+    /// wheel, or two fingers down a trackpad, shows the cards above.
+    fn wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(last) = &self.last else { return };
+        if self.cursor.x < f64::from(last.panel_x) {
+            return;
+        }
+        let rows = match delta {
+            MouseScrollDelta::LineDelta(_, y) => -f64::from(y) * WHEEL_ROWS,
+            MouseScrollDelta::PixelDelta(p) => {
+                self.wheel_px -= p.y;
+                let row_h = f64::from(last.grid.row_h.max(1));
+                let rows = (self.wheel_px / row_h).trunc();
+                self.wheel_px -= rows * row_h;
+                rows
+            }
+        };
+        if rows != 0.0 {
+            self.core.ui.scroll_by(rows as isize);
+        }
     }
 
     /// Select the card or the figure under the pointer; a double click opens
