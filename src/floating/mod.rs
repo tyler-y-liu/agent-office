@@ -2193,11 +2193,11 @@ fn paint_first_waiting(
     faces.draw(canvas, x + i64::from(pad), base, "!", PANEL_BG, px);
 }
 
-/// Set the placed badges and task labels in the readable faces.
 /// `tags` with each name in its agent's panel group colour: pixtuoid inks a
 /// name by the session's raw state, which has no stuck and no done, so a
 /// stuck one read as working and a done one as idle beside a card that said
-/// otherwise. The idle keep pixtuoid's quiet ink.
+/// otherwise. A subagent wears its root's, as its card sits in its root's
+/// group. The idle keep pixtuoid's quiet ink.
 fn in_group_inks(
     mut tags: Vec<Tag>,
     frame: &crate::core::Frame,
@@ -2205,11 +2205,22 @@ fn in_group_inks(
     now: SystemTime,
 ) -> Vec<Tag> {
     for t in &mut tags {
-        let Some(slot) = frame.scene.agents.get(&t.agent) else {
+        let Some(mut slot) = frame.scene.agents.get(&t.agent) else {
             continue;
         };
+        // Bounded: a parent cycle in corrupt state must not spin.
+        for _ in 0..8 {
+            match slot
+                .parent_id
+                .as_ref()
+                .and_then(|p| frame.scene.agents.get(p))
+            {
+                Some(parent) => slot = parent,
+                None => break,
+            }
+        }
         let read = crate::panel::read_since_idle(slot, seen);
-        let group = crate::panel::Group::of(slot, frame.views.get(&t.agent), now, read);
+        let group = crate::panel::Group::of(slot, frame.views.get(&slot.agent_id), now, read);
         if group != crate::panel::Group::Idle {
             t.ink = color_u32(group.color(), t.ink);
         }
@@ -2217,6 +2228,7 @@ fn in_group_inks(
     tags
 }
 
+/// Set the placed badges and task labels in the readable faces.
 fn paint_tags(
     canvas: &mut Canvas,
     faces: &mut Faces,

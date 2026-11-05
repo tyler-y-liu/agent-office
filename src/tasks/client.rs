@@ -202,7 +202,10 @@ fn unasked(line: String, reply: &str) -> String {
         let n = reply.chars().count();
         reply.chars().skip(n.saturating_sub(ASK_TAIL)).collect()
     };
-    let asks = reply.contains(['？', '?']) || ASKS_YOU.iter().any(|p| tail.contains(p));
+    // A full-width mark is prose; a plain `?` mid-reply is as often code
+    // (`foo()?`) or a URL, so only the ending's counts.
+    let asks =
+        reply.contains('？') || tail.contains('?') || ASKS_YOU.iter().any(|p| tail.contains(p));
     match line.strip_prefix("问：") {
         Some(rest) if !asks => rest.trim().to_owned(),
         _ => line,
@@ -213,9 +216,17 @@ fn unasked(line: String, reply: &str) -> String {
 /// the reply, and the same words earlier on recount what was decided.
 const ASK_TAIL: usize = 200;
 
-/// Words that hand the developer a decision or a reply.
-const ASKS_YOU: [&str; 10] = [
-    "要你定", "你来定", "你定一下", "你决定", "你选", "需要你", "等你", "拍板", "请确认", "告诉我",
+/// Words that hand the developer a decision. Not 「告诉我」 or 「需要你」:
+/// replies close with 「有问题告诉我」 and 「不需要你做什么」 asking nothing.
+const ASKS_YOU: [&str; 8] = [
+    "要你定",
+    "你来定",
+    "你定一下",
+    "你决定",
+    "你选",
+    "等你点头",
+    "拍板",
+    "请确认",
 ];
 
 /// The model's line as a label: one line, no quotes or closing stop, capped.
@@ -297,6 +308,12 @@ mod tests {
         // The same words long before the end recount a call already made.
         let recount = format!("按你决定的方案做完了。{}已推送。", "测试全过，".repeat(60));
         assert_eq!(unasked("问：要发版吗".into(), &recount), "要发版吗");
+        // A sign-off and a `?` in code ask nothing of a turn waiting on CI.
+        let waits = format!(
+            "改成 `let x = foo()?;`。{}还在等 CI，有问题告诉我。",
+            "已推送，".repeat(60)
+        );
+        assert_eq!(unasked("问：CI 结果".into(), &waits), "CI 结果");
     }
 
     #[test]

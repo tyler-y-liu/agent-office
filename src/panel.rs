@@ -952,6 +952,11 @@ fn on_wait(line: Line<'static>) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::CC_SOURCE;
+    use pixtuoid_core::Reducer;
+    use pixtuoid_core::source::{AgentEvent, Transport};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
 
     /// The header answers "is there anything for me" at a glance: what needs
     /// you is counted by name, in its group's colour, and with nothing
@@ -959,19 +964,23 @@ mod tests {
     #[test]
     fn the_header_counts_what_needs_you_first() {
         let text = |sp: &[Span]| sp.iter().map(|s| s.content.as_ref()).collect::<String>();
-        let roots = [Group::Done, Group::Working, Group::Stuck, Group::Done, Group::Idle];
+        let roots = [
+            Group::Done,
+            Group::Working,
+            Group::Stuck,
+            Group::Done,
+            Group::Idle,
+        ];
         let spans = header_spans(&roots, 1);
-        assert_eq!(text(&spans).trim(), "1 等你 · 1 卡住 · 2 待看 · 1 干活 · 1 闲着");
+        assert_eq!(
+            text(&spans).trim(),
+            "1 等你 · 1 卡住 · 2 待看 · 1 干活 · 1 闲着"
+        );
         let stuck = spans.iter().find(|s| s.content.contains("卡住")).unwrap();
         assert_eq!(stuck.style.fg, Some(STUCK));
         let calm = header_spans(&[Group::Working, Group::Working], 0);
         assert_eq!(text(&calm).trim(), "暂时不用你 · 2 干活");
     }
-    use crate::pipeline::CC_SOURCE;
-    use pixtuoid_core::Reducer;
-    use pixtuoid_core::source::{AgentEvent, Transport};
-    use std::path::PathBuf;
-    use std::time::{Duration, SystemTime};
 
     fn start(
         scene: &mut SceneState,
