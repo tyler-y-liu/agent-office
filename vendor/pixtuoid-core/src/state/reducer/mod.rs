@@ -795,8 +795,15 @@ impl Reducer {
             is_requires_action(scene, agent_id),
         );
         // grok's transcript reads `turn_completed` past its hooks' next call.
+        // agent-office: CC's transcript end (Esc's marker, an API error) is
+        // the turn's own end, so it never lags.
+        let cc = scene
+            .agents
+            .get(&agent_id)
+            .is_some_and(|s| &*s.source == crate::source::claude_code::SOURCE_NAME);
         let lags_the_hooks = from == Transport::Jsonl
             && turn.is_none()
+            && !cc
             && self.corr.item_started_on.get(&agent_id) == Some(&Transport::Hook);
         self.end_item(scene, agent_id, resolved, applies && !lags_the_hooks, now);
     }

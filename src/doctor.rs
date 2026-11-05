@@ -37,7 +37,7 @@ pub fn run() -> Result<()> {
         println!("[✓] hooks     已接入：实时状态和「等你确认」可用（新开的 Claude 会话才生效）");
     } else {
         println!(
-            "[!] hooks     未接入：只靠会话记录也能用，但看不到「等你确认」。\n              \
+            "[!] hooks     未接入或不全：只靠会话记录也能用，但看不到「等你确认」，小人在两次调用之间会离开工位。\n              \
              接入：agent-office connect（会改 ~/.claude/settings.json，先备份）"
         );
     }
