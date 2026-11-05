@@ -1665,6 +1665,8 @@ pub enum Piece {
     RooftopStool,
     LaundryPole,
     WaterTank,
+    /// agent-office: your office's bookshelf.
+    OfficeShelf,
 }
 
 /// What a [`Piece`] is.

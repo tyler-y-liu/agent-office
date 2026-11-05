@@ -224,6 +224,10 @@ impl FloorCtx {
                     buf_w, buf_h, None, floor_seed,
                 )?);
                 self.layout_memo = Some((key, Arc::clone(&l)));
+                // agent-office: a new layout drops the cached paths even when
+                // its corridor stands where the old one did (it runs across
+                // the middle now, so a height change can leave it put).
+                self.router.set_preferred_zone(None);
                 l
             }
         };

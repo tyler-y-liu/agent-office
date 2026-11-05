@@ -544,6 +544,14 @@ frame_ms = 1000
 frames   = ["laundry_pole@4x.sprite"]
 frame_ms = 1000
 
+[animations.office_shelf]
+frames   = ["office_shelf.sprite"]
+frame_ms = 600
+
+[animations."office_shelf@4x"]
+frames   = ["office_shelf@4x.sprite"]
+frame_ms = 600
+
 [animations.water_tank]
 frames   = ["water_tank.sprite"]
 frame_ms = 600

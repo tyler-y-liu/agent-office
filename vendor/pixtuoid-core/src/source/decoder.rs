@@ -176,7 +176,10 @@ pub(crate) fn is_subagent_path(path: &Path) -> bool {
 /// transcript/hook content and a slashless crafted value makes the WHOLE string the
 /// basename, so the cap lands here — one chokepoint for all three derivers.
 pub(crate) fn cwd_basename_label(prefix: &str, cwd: &Path) -> Option<String> {
-    let base = cwd.file_name().and_then(|n| n.to_str())?;
+    // agent-office: a worktree is named for its repository.
+    let base = crate::state::project_root(cwd)
+        .file_name()
+        .and_then(|n| n.to_str())?;
     Some(format!(
         "{prefix}·{}",
         ellipsize(base, MAX_DECODED_FIELD_CHARS)

@@ -105,19 +105,11 @@ const _: () = assert!(
 );
 pub(super) const MIN_LAYOUT_H: u16 = min_layout_h();
 
-/// The widest left column any variant takes — the band gets the rest, so this
-/// variant is the one that prices the width floor for every seed.
+/// agent-office: the share of the floor the old west room column took at its
+/// widest. The rooms moved to the south row, but the narrowest floor that lays
+/// out stays where that column put it, so a window keeps the floor it had.
 const fn widest_mid_x_pct() -> u16 {
-    let mut widest = 0;
-    let mut i = 0;
-    while i < FloorVariant::ALL.len() {
-        let pct = FloorVariant::ALL[i].mid_x_pct();
-        if pct > widest {
-            widest = pct;
-        }
-        i += 1;
-    }
-    widest
+    35
 }
 
 const fn min_layout_w() -> u16 {
@@ -196,164 +188,273 @@ struct FloorPlan {
     /// Indexed by room id; room 0 is the top room. agent-office: the
     /// rooftop, when there is one, is the last.
     meeting_rooms: Vec<MeetingRoom>,
-    /// agent-office: the window slots the rooftop opens, east of the door's.
+    /// agent-office: the window slots the rooftop opens at the west end.
+    #[allow(
+        dead_code,
+        reason = "agent-office: the door no longer moves for the rooftop"
+    )]
     rooftop_slots: u16,
 }
 
+/// agent-office: rows of floor kept south of the benches' south desks, for
+/// their sitters' chairs, before the corridor.
+const BENCH_SOUTH_CLEAR: u16 = 4;
+
+/// agent-office: floor kept between your office's furniture and its walls.
+const OFFICE_PROP_CLEAR: u16 = 3;
+
+/// agent-office: rows of floor a meeting room's trio spreads over past its
+/// fit height.
+const TRIO_SLACK: u16 = 20;
+
+/// agent-office: floor kept clear east of the rooftop's door, a step in.
+const ROOFTOP_DOOR_STEP: u16 = 8;
+
+/// agent-office: the narrowest rooftop that seats its benches and table.
+const ROOFTOP_FURNITURE_MIN_W: u16 = 30;
+
+/// agent-office: rows of open floor kept under a south room's north wall,
+/// from its door round its furniture.
+const ENTRY_LANE: u16 = 6;
+
+/// agent-office: the shortest south row that takes a walled room, its north
+/// wall and a lane under it; the shortest that takes the pantry's counter.
+const WALLED_ROOM_MIN_H: u16 = 16;
+const PANTRY_MIN_H: u16 = 26;
+
+/// agent-office: a pantry counter's routing clearance each side.
+const COUNTER_SIDE_CLEARANCE: u16 = 2;
+
+/// agent-office: the south row's widths. The waiting area seats a short line;
+/// your office its desk, guest chair and sofa; the pantry its counter.
+const WAITING_W: u16 = 30;
+const OFFICE_W: u16 = 44;
+const PANTRY_W: u16 = 44;
+/// The narrowest pantry, its compact counter and a lane each side.
+const PANTRY_MIN_W: u16 = 28;
+
+/// agent-office: the south row, west to east, each room's interior; the
+/// walls between them stand in the [`WALL_THICK_V`] columns east of each.
+#[derive(Debug, Default)]
+struct SouthRow {
+    meeting: Vec<Bounds>,
+    pantry: Option<Bounds>,
+    waiting: Option<Bounds>,
+    office: Option<Bounds>,
+}
+
+impl SouthRow {
+    /// The row `x0..x0 + w` wide, from `y` down `h` rows. A narrow row gives
+    /// up, in order: the second meeting room (merged into one), pantry width
+    /// down to its narrowest, the meeting room, the pantry, your office. The
+    /// waiting area always stays.
+    fn of(x0: u16, w: u16, y: u16, h: u16) -> Self {
+        let wall = WALL_THICK_V;
+        let room = |x: u16, width: u16| Bounds {
+            x,
+            y,
+            width,
+            height: h,
+        };
+        let mut out = Self::default();
+        let mut x = x0;
+        let mut left = w;
+        if h < WALLED_ROOM_MIN_H {
+            out.waiting = Some(room(x, left));
+            return out;
+        }
+        let office = left >= WAITING_W + wall + OFFICE_W;
+        let fixed = WAITING_W + if office { wall + OFFICE_W } else { 0 };
+        let rest = left.saturating_sub(fixed);
+        // What the pantry and meeting rooms share, each closed by a wall.
+        let meeting_min = MEETING_FURNITURE_MIN_W;
+        let (meetings, mut pantry_w) = if h < PANTRY_MIN_H {
+            (usize::from(rest >= meeting_min + wall) as u16, 0)
+        } else if rest >= 2 * (meeting_min + wall) + PANTRY_W + wall {
+            (2, PANTRY_W)
+        } else if rest >= meeting_min + wall + PANTRY_W + wall {
+            (1, PANTRY_W)
+        } else if rest >= meeting_min + wall + PANTRY_MIN_W + wall {
+            (1, rest - meeting_min - 2 * wall)
+        } else if rest >= PANTRY_MIN_W + wall {
+            (0, (rest - wall).min(PANTRY_W))
+        } else {
+            (0, 0)
+        };
+        let mut meeting_total = match (meetings, pantry_w) {
+            (0, _) => 0,
+            (_, 0) => rest,
+            _ => rest - pantry_w - wall,
+        };
+        // A wide row shares its slack: past a fifth of the row each, the
+        // meeting rooms give the rest to the pantry, the waiting area and your
+        // office, up to their own shares.
+        let mut office_w = OFFICE_W;
+        if meetings > 0 {
+            let keep = meetings * (pct(w, 20).max(meeting_min) + wall);
+            let mut spare = meeting_total.saturating_sub(keep);
+            let wants = [
+                if pantry_w > 0 {
+                    pct(w, 16).saturating_sub(pantry_w)
+                } else {
+                    0
+                },
+                pct(w, 12).saturating_sub(WAITING_W),
+                if office {
+                    pct(w, 16).saturating_sub(OFFICE_W)
+                } else {
+                    0
+                },
+            ];
+            let mut grow = [0u16; 3];
+            for (g, want) in grow.iter_mut().zip(wants) {
+                *g = want.min(spare);
+                spare -= *g;
+            }
+            meeting_total -= grow.iter().sum::<u16>();
+            pantry_w += grow[0];
+            office_w += grow[2];
+        }
+        for i in 0..meetings {
+            let share = meeting_total / meetings;
+            let width = if i + 1 == meetings {
+                meeting_total - share * i
+            } else {
+                share
+            } - wall;
+            out.meeting.push(room(x, width));
+            x += width + wall;
+            left -= width + wall;
+        }
+        if pantry_w > 0 {
+            out.pantry = Some(room(x, pantry_w));
+            x += pantry_w + wall;
+            left -= pantry_w + wall;
+        }
+        let waiting_w = if office {
+            left.saturating_sub(wall + office_w)
+        } else {
+            left
+        };
+        out.waiting = Some(room(x, waiting_w));
+        if office {
+            x += waiting_w + wall;
+            out.office = Some(room(x, office_w));
+        }
+        out
+    }
+}
+
 impl FloorPlan {
-    /// The zones a `buf_w`×`buf_h` floor of `floor_seed`'s variant divides into.
-    fn new(buf_w: u16, buf_h: u16, floor_seed: u64) -> Self {
+    /// agent-office: the zones a `buf_w`×`buf_h` floor divides into. The
+    /// rooftop at the west end, out a door in the office's west wall; one row
+    /// of benches under the north windows; the corridor across the middle;
+    /// and the south row west to east: meeting room A, meeting room B, the
+    /// pantry, the waiting area and your office. `floor_seed` only varies the
+    /// decor now; every floor has the same plan.
+    fn new(buf_w: u16, buf_h: u16, _floor_seed: u64) -> Self {
         let top_margin = top_margin(buf_h);
         let usable_h = buf_h - top_margin;
 
-        let variant = FloorVariant::from_seed(floor_seed);
-        let has_meeting = variant.has_meeting();
-        let has_dual_meeting = variant == FloorVariant::Dense && usable_h >= MIN_DUAL_MEETING_H;
-        let geom = FloorGeometry {
-            variant,
-            has_dual_meeting,
-        };
-        let has_pantry = geom.has_pantry();
-        let mid_x = pct(buf_w, geom.mid_x_pct());
-
-        const COUNTER_SIDE_CLEARANCE: u16 = 2;
-        // Large counter + a routing clearance each side, else the compact fallback.
-        // Width-only, so the size is known before the split prices the pantry against it.
-        let pantry_counter_size: Size =
-            if has_pantry && mid_x >= PANTRY_COUNTER_LARGE_W + 2 * COUNTER_SIDE_CLEARANCE {
-                super::LARGE_COUNTER
-            } else {
-                super::COMPACT_COUNTER
-            };
-
-        // CONTENT-FIT, donating the surplus below ALL-OR-NOTHING: a partial donation would
-        // cram the trio to its fit gate to buy rows the island still couldn't use.
-        let trio_fit_h = MeetingRoom::trio_fit_h();
-        let pantry_content_h = PantryRoom::content_fit_h(pantry_counter_size);
-        let half_split = usable_h / 2;
-        let donated = usable_h.saturating_sub(pantry_content_h);
-        let meeting_h = if (trio_fit_h..half_split).contains(&donated) {
-            donated
-        } else {
-            half_split
-        };
-        let mid_y_split = if has_meeting && !has_dual_meeting {
-            top_margin + meeting_h
-        } else {
-            top_margin + half_split
-        };
-
-        // The second room only ever joins a first, so room 0 is always the top one.
-        debug_assert!(!has_dual_meeting || has_meeting);
-        let meeting_room = if has_meeting {
-            debug_assert!(
-                has_pantry || has_dual_meeting,
-                "meeting implies pantry-or-dual per the variant table"
-            );
-            Some(Bounds {
-                x: 0,
-                y: top_margin,
-                width: mid_x,
-                height: mid_y_split - top_margin,
-            })
-        } else {
-            None
-        };
-        let meeting_room_2 = if has_dual_meeting {
-            Some(Bounds {
-                x: 0,
-                y: mid_y_split,
-                width: mid_x,
-                height: usable_h - usable_h / 2,
-            })
-        } else {
-            None
-        };
-        let pantry_room = if has_pantry {
-            Some(Bounds {
-                x: 0,
-                y: if has_meeting { mid_y_split } else { top_margin },
-                width: mid_x,
-                height: if has_meeting {
-                    usable_h - (mid_y_split - top_margin)
-                } else {
-                    usable_h
-                },
-            })
-        } else {
-            None
-        };
-
-        let right_x = mid_x + MID_DIVIDER_W;
-        let pod_w = POD_COLS * DESK_W + (POD_COLS - 1) * INTRA_POD_GAP_X;
-        // agent-office: the rooftop takes the east end, past the door, where
-        // a whole bench and its aisles still fit west of it; the desks keep
-        // the floor up to a column short of it.
-        let rooftop = super::rooftop_x(buf_w, super::rooftop_slots(buf_w))
-            .filter(|&x| x > right_x + pod_w + INTER_POD_AISLE_X + ROOFTOP_GAP)
-            .map(|x| Bounds {
-                x,
-                y: top_margin,
-                width: buf_w - x,
-                height: usable_h,
-            });
-        let rooftop_slots = rooftop.map_or(0, |_| super::rooftop_slots(buf_w));
-        let right_w = match rooftop {
-            Some(roof) => roof.x - ROOFTOP_GAP - right_x,
-            None => band_w(buf_w, geom.mid_x_pct()),
-        };
-        let lounge_west_clear = if has_meeting {
-            mid_x + super::WALL_THICK_V
-        } else {
-            right_x
-        };
-        let cubicle_aisle_h = cubicle_aisle_h(usable_h);
-        // NOT `usable_h - cubicle_aisle_h`, though the locals are right here — see
-        // `band_h` for what its saturation buys below the gate.
-        let cubicle_h = band_h(buf_h);
-        let cubicle_band = Bounds {
-            x: right_x,
+        let rooftop = super::rooftop_end(buf_w).map(|end| Bounds {
+            x: 0,
             y: top_margin,
-            width: right_w,
-            height: cubicle_h,
+            width: end,
+            height: usable_h,
+        });
+        let rooftop_slots = rooftop.map_or(0, |_| super::rooftop_slots(buf_w));
+        // The office's west wall stands in the rooftop's last columns' east.
+        let (office_x, lounge_west_clear) = match rooftop {
+            Some(r) => (r.width + MID_DIVIDER_W, r.width + super::WALL_THICK_V),
+            None => (0, 0),
         };
-        let cubicle_aisle = Bounds {
-            x: right_x,
-            y: top_margin + cubicle_h,
-            width: right_w,
-            height: cubicle_aisle_h,
-        };
+        let office_w = buf_w - office_x;
 
+        // One row of benches: two rows of desks facing across the screen.
+        let couch_to_desk_extra = couch_to_desk_extra(buf_h);
+        let pod_w = POD_COLS * DESK_W + (POD_COLS - 1) * INTRA_POD_GAP_X;
         let pod_h = POD_ROWS * DESK_H + (POD_ROWS - 1) * INTRA_POD_GAP_Y;
         let pod_stride_x = pod_w + INTER_POD_AISLE_X;
         let pod_stride_y = pod_h + INTER_POD_AISLE_Y;
-        let couch_to_desk_extra = couch_to_desk_extra(buf_h);
-        let pod_cols = ((right_w.saturating_sub(INTER_POD_AISLE_X / 2)) / pod_stride_x).max(1);
-        let pod_rows = ((cubicle_h.saturating_sub(couch_to_desk_extra) + INTER_POD_AISLE_Y)
-            / pod_stride_y)
-            .max(1);
+        let bench_h = (INTER_POD_AISLE_Y / 2
+            + couch_to_desk_extra
+            + (POD_ROWS - 1) * (DESK_H + INTRA_POD_GAP_Y)
+            + super::decor::DESK_GROUND_H
+            + BENCH_SOUTH_CLEAR)
+            .min(band_h(buf_h));
+        let cubicle_band = Bounds {
+            x: office_x,
+            y: top_margin,
+            width: office_w,
+            height: bench_h,
+        };
+        let cubicle_aisle = Bounds {
+            x: office_x,
+            y: top_margin + bench_h,
+            width: office_w,
+            height: cubicle_aisle_h(usable_h),
+        };
+        let pod_cols = ((office_w.saturating_sub(INTER_POD_AISLE_X / 2)) / pod_stride_x).max(1);
         let pod_grid = PodGrid {
             band: cubicle_band,
             cols: pod_cols,
-            rows: pod_rows,
+            rows: 1,
             stride_x: pod_stride_x,
             stride_y: pod_stride_y,
             couch_to_desk_extra,
         };
 
+        let south_y = cubicle_aisle.y + cubicle_aisle.height;
+        // East of the rooftop's wall, so no room's north wall crosses it.
+        let south = SouthRow::of(
+            lounge_west_clear,
+            buf_w - lounge_west_clear,
+            south_y,
+            buf_h.saturating_sub(south_y),
+        );
+
+        let pantry_counter_size = match south.pantry {
+            Some(p) if p.width >= PANTRY_COUNTER_LARGE_W + 2 * COUNTER_SIDE_CLEARANCE => {
+                super::LARGE_COUNTER
+            }
+            _ => super::COMPACT_COUNTER,
+        };
+
         // A room too small for its trio still occupies its slot with `trio: None`, so
         // bounds and furniture can't mis-join.
-        let mut meeting_rooms: Vec<MeetingRoom> = Vec::new();
-        for (room_idx, room) in [meeting_room, meeting_room_2].into_iter().enumerate() {
-            let Some(mr) = room else { continue };
-            let trio = room_fits_furniture(&mr).then(|| MeetingRoom::place_trio(mr, room_idx != 0));
-            meeting_rooms.push(MeetingRoom {
-                bounds: mr,
-                trio,
-                style: super::RoomStyle::Office,
-            });
-        }
-        // agent-office: the rooftop, last, so the office rooms keep their ids.
+        // agent-office: the waiting area and your office seat their sitters
+        // as a meeting room does, on a sofa pair and the chairs at a table's
+        // ends, so they follow the meeting rooms in the Vec.
+        let mut meeting_rooms: Vec<MeetingRoom> = south
+            .meeting
+            .iter()
+            .map(|&mr| (mr, super::RoomStyle::Office))
+            .chain(south.waiting.map(|w| (w, super::RoomStyle::Waiting)))
+            .chain(south.office.map(|o| (o, super::RoomStyle::Boss)))
+            .map(|(mr, style)| {
+                // South of the north wall's rows and a lane under them, so the
+                // door in that wall opens onto floor rather than the north sofa.
+                // And no taller than the trio and a little floor round it, so
+                // on a tall floor the sofas still face each other across the
+                // table rather than across the room.
+                let skip = super::WALL_THICK_H + ENTRY_LANE;
+                let inner = Bounds {
+                    y: mr.y + skip,
+                    height: mr
+                        .height
+                        .saturating_sub(skip)
+                        .min(MeetingRoom::trio_fit_h() + TRIO_SLACK),
+                    ..mr
+                };
+                MeetingRoom {
+                    bounds: mr,
+                    trio: room_fits_furniture(&inner)
+                        .then(|| MeetingRoom::place_trio(inner, false)),
+                    style,
+                }
+            })
+            .collect();
+        // The rooftop, last, so the office rooms keep their ids.
         if let Some(roof) = rooftop {
             meeting_rooms.push(MeetingRoom {
                 bounds: roof,
@@ -369,7 +470,7 @@ impl FloorPlan {
             lounge_west_clear,
             cubicle_aisle,
             pod_grid,
-            pantry: pantry_room,
+            pantry: south.pantry,
             pantry_counter_size,
             meeting_rooms,
             rooftop_slots,
@@ -379,41 +480,53 @@ impl FloorPlan {
     /// Room 0, the top meeting room. agent-office: an office room, never the
     /// rooftop.
     fn first_meeting_room(&self) -> Option<&MeetingRoom> {
+        // agent-office: the meeting rooms stand in the south row now, under
+        // no window to hang the screen or bookshelf on.
         self.meeting_rooms
             .first()
-            .filter(|r| r.style == super::RoomStyle::Office)
+            .filter(|r| r.style == super::RoomStyle::Office && r.bounds.y == self.top_margin)
     }
 }
 
-/// agent-office: the column of floor between the desks' band and the
-/// rooftop, so a bench's padded ground never meets the rooftop's.
-const ROOFTOP_GAP: u16 = 1;
-
-/// agent-office: the rooftop's stools and folding table, gathered at its
-/// middle rather than spread over its full height as a room's sofas are, and
-/// none on a rooftop too small for them.
+/// agent-office: the rooftop's furniture, north to south: a bistro table
+/// with a stool at each end clear of the railing's planters, the one bench
+/// south of it looking north over it to the sea, and a second bistro table
+/// further south where the rooftop runs that far. None on a rooftop too
+/// small for the first table and the bench.
 fn rooftop_trio(roof: Bounds) -> Option<super::MeetingTrio> {
-    /// Rows of floor kept round the trio, over its fit height.
-    const ROOFTOP_TRIO_SLACK: u16 = 14;
-    let h = (MeetingRoom::trio_fit_h() + ROOFTOP_TRIO_SLACK).min(roof.height);
-    let gather = Bounds {
-        y: roof.y + (roof.height - h) / 2,
-        height: h,
-        ..roof
+    /// Rows from the rooftop's north edge to the first table: the railing's
+    /// planters stand in between.
+    const FIRST_TABLE: u16 = 14;
+    /// Rows from a table to the bench south of it.
+    const TABLE_TO_BENCH: u16 = 11;
+    /// Rows from the bench to the second table.
+    const BENCH_TO_TABLE: u16 = 18;
+    /// Rows kept south of the second table: its stools' sitters and a lane.
+    const SOUTH_CLEAR: u16 = 12;
+    let x = roof.x + roof.width / 2;
+    let table = Point {
+        x,
+        y: roof.y + FIRST_TABLE,
     };
-    room_fits_furniture(&gather).then(|| MeetingRoom::place_trio(gather, false))
-}
-
-// Every variant stands a side room west of the divider, so the whiteboard, which
-// hangs by it, needs no gate of its own.
-const _: () = {
-    let mut i = 0;
-    while i < FloorVariant::ALL.len() {
-        let v = FloorVariant::ALL[i];
-        assert!(v.has_meeting() || v.has_pantry_base());
-        i += 1;
+    let bench = Point {
+        x,
+        y: table.y + TABLE_TO_BENCH,
+    };
+    let far = Point {
+        x,
+        y: bench.y + BENCH_TO_TABLE,
+    };
+    let floor_end = roof.y + roof.height;
+    if roof.width < ROOFTOP_FURNITURE_MIN_W || bench.y + SOUTH_CLEAR > floor_end {
+        return None;
     }
-};
+    Some(super::MeetingTrio {
+        sofas: [bench, bench],
+        table,
+        north_sofa: false,
+        far_table: (far.y + SOUTH_CLEAR <= floor_end).then_some(far),
+    })
+}
 
 pub(super) fn compute_with_seed(
     buf_w: u16,
@@ -434,18 +547,40 @@ pub(super) fn compute_with_seed(
         .chain(desk_chair_fixtures(&pod_desks))
         .map(|f| art_rect(f.visual))
         .collect();
-    let pod_decor = compute_pod_decor(plan.pod_grid, floor_seed, &desk_art);
+    let mut pod_decor = compute_pod_decor(plan.pod_grid, floor_seed, &desk_art);
+    // agent-office: your office's Hang Seng screen, south of its sofas.
+    let office = plan
+        .meeting_rooms
+        .iter()
+        .find(|r| r.style == super::RoomStyle::Boss);
+    if let Some((b, trio)) = office.and_then(|r| r.trio.map(|t| (r.bounds, t))) {
+        let tv = furniture_def(Furniture::Tv).visual;
+        let sofa_h = furniture_def(Furniture::MeetingSofaBody).visual.h;
+        let pos = Point {
+            x: trio.table.x,
+            y: trio.sofas[1].y + sofa_h / 2 + OBSTACLE_PAD_PX + tv.h / 2 + 1,
+        };
+        if pos.y + tv.h / 2 + OFFICE_PROP_CLEAR <= b.y + b.height {
+            pod_decor.push(PodDecorItem {
+                kind: PodDecor::Tv,
+                pos,
+            });
+        }
+    }
 
     // Dense's inter-meeting wall is deliberately solid (#557 door policy).
-    let (room_walls, doorways) =
-        super::rooms::walls::derive_room_walls(&plan.meeting_rooms, plan.pantry);
+    let (room_walls, doorways) = super::rooms::walls::derive_room_walls(
+        &plan.meeting_rooms,
+        plan.pantry,
+        plan.cubicle_aisle,
+    );
 
     // Elevator door — in the window wall's last slot; above the lounge gate so
     // that gate can check couch↔door clearance.
     let top_wall_h = super::wall_band_h(plan.top_margin);
     let door = Point {
         // agent-office: west of the rooftop's slots.
-        x: super::door_x_on(buf_w, plan.rooftop_slots),
+        x: super::door_x(buf_w),
         // Its bottom row is the band's trim row, so it stands on the floor
         // line instead of floating mid-wall.
         y: super::wall_trim_row(top_wall_h) + 1 - ELEVATOR_H,
@@ -583,7 +718,79 @@ pub(super) fn compute_with_seed(
         }
     }
 
+    // agent-office: the rooftop's greenery: a flower planter in each corner
+    // by the railing and a big pot in each south corner. They stand where
+    // they are put or not at all: sliding toward the benches' middle would
+    // carry them through the rooftop's wall.
+    let mut roof_plants: Vec<PlantItem> = Vec::new();
+    if let Some(roof) = plan
+        .meeting_rooms
+        .iter()
+        .find(|r| r.style == super::RoomStyle::Rooftop)
+        .map(|r| r.bounds)
+    {
+        const INSET: u16 = 5;
+        let (west, east) = (
+            roof.x + INSET,
+            (roof.x + roof.width).saturating_sub(INSET + 1),
+        );
+        let (north, south) = (
+            roof.y + INSET,
+            (roof.y + roof.height).saturating_sub(2 * INSET),
+        );
+        for (kind, x, y) in [
+            (PlantKind::Flower, west, north),
+            (PlantKind::Flower, east, north),
+            (PlantKind::Tall, west, south),
+            (PlantKind::Tall, east, south),
+        ] {
+            let v = furniture_def(kind.furniture()).visual;
+            let tl = anchored_top_left(Pivot::Center, Point { x, y }, v.w, v.h);
+            if tl.x > roof.x
+                && tl.x + v.w < roof.x + roof.width
+                && tl.y + v.h <= roof.y + roof.height
+            {
+                roof_plants.push(PlantItem {
+                    kind,
+                    pos: Point { x, y },
+                });
+            }
+        }
+    }
+
     let mut wall_decor = place_wall_decor(&plan, door, &desk_art, &pod_decor);
+    // agent-office: your office's bookshelf, against its north wall in the
+    // corner away from the door.
+    if let Some(b) = office.map(|r| r.bounds) {
+        let shelf = furniture_def(WallDecor::OfficeShelf.furniture()).visual;
+        let pos = Point {
+            x: (b.x + b.width).saturating_sub(shelf.w + OFFICE_PROP_CLEAR),
+            y: b.y + super::WALL_THICK_H + 1,
+        };
+        // Clear of the sofas and the chairs at the table's ends.
+        let clear = office.and_then(|r| r.trio).is_none_or(|t| {
+            let dx = super::rooms::meeting::MEETING_CHAIR_TABLE_DX;
+            t.sofa_seats()
+                .map(|(_, s)| (Furniture::MeetingSofaBody, s))
+                .chain(
+                    [t.table.x - dx, t.table.x + dx]
+                        .map(|x| (Furniture::MeetingChair, Point { x, y: t.table.y })),
+                )
+                .all(|(kind, at)| {
+                    let v = furniture_def(kind).visual;
+                    !super::placement::rects_overlap(
+                        (pos, shelf),
+                        (anchored_top_left(Pivot::Center, at, v.w, v.h), v),
+                    )
+                })
+        });
+        if clear && pos.x > b.x + b.width / 2 && pos.y + shelf.h < b.y + b.height {
+            wall_decor.push(WallDecorItem {
+                kind: WallDecor::OfficeShelf,
+                pos,
+            });
+        }
+    }
 
     // The island pushes its 4 slots BEFORE the shelf's — the push order the goldens pin.
     let kitchen_island = plan.pantry.and_then(|pr| {
@@ -593,17 +800,8 @@ pub(super) fn compute_with_seed(
         super::rooms::pantry::place_snack_shelf(pr, plan.pantry_counter_size, &mut waypoints);
     }
 
-    let corridor = Bounds {
-        x: 0,
-        y: plan.cubicle_aisle.y,
-        // agent-office: the runner stops at the rooftop.
-        width: plan
-            .meeting_rooms
-            .iter()
-            .find(|r| r.style == super::RoomStyle::Rooftop)
-            .map_or(buf_w, |r| r.bounds.x),
-        height: plan.cubicle_aisle.height,
-    };
+    // agent-office: the runner spans the office, east of the rooftop.
+    let corridor = plan.cubicle_aisle;
 
     // Settle only now — AFTER every waypoint exists; filtering at the candidate site
     // checked a subset of the final set.
@@ -614,11 +812,31 @@ pub(super) fn compute_with_seed(
         kitchen_island,
         &plan.meeting_rooms,
     );
+    // agent-office: the south rooms open off the corridor, so a corridor pot
+    // keeps clear of each door, its wall's rows and a step either side.
+    let door_rects: Vec<(Point, Size)> = doorways
+        .iter()
+        .filter(|d| d.start.y == d.end.y)
+        .map(|d| {
+            let cap = super::rooms::walls::WALL_H.cap;
+            (
+                Point {
+                    x: d.start.x,
+                    y: d.start.y.saturating_sub(2 * cap),
+                },
+                Size {
+                    w: d.end.x - d.start.x + 1,
+                    h: 3 * cap + super::WALL_THICK_H,
+                },
+            )
+        })
+        .collect();
     // Folded, not mapped: the corridor's two pots slide toward each other, so each must
     // also clear the ones already placed.
     let mut plants: Vec<PlantItem> = Vec::new();
     for p in plant_candidates {
         let mut obstacles = singleton_rects.clone();
+        obstacles.extend(door_rects.iter().copied());
         obstacles.extend(plants.iter().map(|q| {
             let v = furniture_def(q.kind.furniture()).visual;
             (anchored_top_left(Pivot::Center, q.pos, v.w, v.h), v)
@@ -632,6 +850,27 @@ pub(super) fn compute_with_seed(
             floor_seed,
         ) {
             plants.push(settled);
+        }
+    }
+    // The rooftop's stools carry no ground of their own, so a pot keeps off
+    // their art too.
+    let chairs: Vec<(Point, Size)> = waypoints
+        .iter()
+        .filter(|w| w.kind == WaypointKind::MeetingChair)
+        .map(|w| {
+            let v = furniture_def(Furniture::MeetingChair).visual;
+            (anchored_top_left(Pivot::Center, w.pos, v.w, v.h), v)
+        })
+        .collect();
+    for p in roof_plants {
+        let v = furniture_def(p.kind.furniture()).visual;
+        let pot = (anchored_top_left(Pivot::Center, p.pos, v.w, v.h), v);
+        if plant_spot_clear(p.kind, p.pos, &desk_art, &waypoints, &singleton_rects)
+            && chairs
+                .iter()
+                .all(|&c| !super::placement::rects_overlap(pot, c))
+        {
+            plants.push(p);
         }
     }
 
@@ -813,31 +1052,6 @@ fn place_wall_decor(
         kind: WallDecor::ExitSign,
         pos,
     }));
-    // agent-office: the rooftop's water tank, in its north-east corner, its
-    // legs a row off the railing and clear of the laundry by the east edge.
-    if let Some(roof) = plan
-        .meeting_rooms
-        .iter()
-        .find(|r| r.style == super::RoomStyle::Rooftop)
-    {
-        const TANK_EAST_GAP: u16 = 8;
-        const TANK_NORTH_GAP: u16 = 2;
-        let tank = furniture_def(WallDecor::WaterTank.furniture()).visual;
-        let b = roof.bounds;
-        let tops = roof.trio.map_or(u16::MAX, |t| t.sofas[0].y);
-        let pos = Point {
-            x: (b.x + b.width).saturating_sub(tank.w + TANK_EAST_GAP),
-            y: b.y + TANK_NORTH_GAP,
-        };
-        // Only where it stands clear of the stools gathered below it.
-        let sofa_h = furniture_def(Furniture::MeetingSofaBody).visual.h;
-        if b.width >= tank.w + 2 * TANK_EAST_GAP && pos.y + tank.h + sofa_h < tops {
-            wall_decor.push(WallDecorItem {
-                kind: WallDecor::WaterTank,
-                pos,
-            });
-        }
-    }
     const WHITEBOARD_HINT_DIVISOR: u16 = 3;
     // The hint is not a slot: unsnapped it drops the board on a desk row
     // or in the intra-pod gap, where the wheel strip plugs the pod's own west lane.
@@ -1093,13 +1307,10 @@ pub(super) fn plant_obstacle_rects(
     .filter_map(|(kind, pos)| pos.and_then(|p| boxed(kind, p)))
     .chain(meeting_rooms.iter().flat_map(|room| {
         room.trio.iter().flat_map(|trio| {
-            [
-                (Furniture::MeetingSofaBody, trio.sofas[0]),
-                (Furniture::MeetingSofaBody, trio.sofas[1]),
-                (Furniture::MeetingTable, trio.table),
-            ]
-            .into_iter()
-            .filter_map(|(kind, pos)| boxed(kind, pos))
+            trio.sofa_seats()
+                .map(|(_, sofa)| (Furniture::MeetingSofaBody, sofa))
+                .chain(trio.tables().map(|t| (Furniture::MeetingTable, t)))
+                .filter_map(|(kind, pos)| boxed(kind, pos))
         })
     }))
     .collect()
@@ -1332,111 +1543,6 @@ impl PodGrid {
             .filter(|&(start, end)| end - start >= h)
             .min_by_key(|&band| distance_to(band))?;
         Some(start + (end - start - h) / 2)
-    }
-}
-
-/// The hand-authored floor geometries. `floor_seed` selects one via
-/// [`Self::from_seed`]; floors past [`Self::COUNT`] repeat the same looks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FloorVariant {
-    /// Meeting + pantry, vertical wall between them and the cubicle area,
-    /// horizontal wall between meeting/pantry.
-    Standard,
-    /// Pantry only, no vertical wall (open kitchen corner, the counter is the
-    /// divider). No meeting room.
-    OpenPlan,
-    /// Two meeting rooms (top + bottom), no pantry — a horizontal wall separates
-    /// them, each gets a door. Degrades to Standard when too short for two rooms.
-    Dense,
-    /// Larger meeting + pantry (like Standard but a wider left column).
-    Senior,
-    /// Pantry only, no vertical wall (open break area).
-    Lounge,
-}
-
-impl FloorVariant {
-    /// THE roster: the floor derivations sweep it, `from_seed` indexes it, `COUNT` is
-    /// its length. A variant missing here is unreachable — rustc's `dead_code` reds on
-    /// the never-constructed arm, NOT `the_sweep_reaches_every_floor_variant`, which
-    /// catches the other direction. `has_meeting` / `has_pantry_base` are `matches!`
-    /// lists; the `const _` above `compute_with_seed` reds a variant in neither.
-    pub(super) const ALL: [Self; 5] = [
-        FloorVariant::Standard,
-        FloorVariant::OpenPlan,
-        FloorVariant::Dense,
-        FloorVariant::Senior,
-        FloorVariant::Lounge,
-    ];
-    const COUNT: u64 = Self::ALL.len() as u64;
-    /// Searched, not Fibonacci-derived: it maps floors `0..COUNT` to distinct
-    /// variants, which `floor_variant_hash_gives_unique_layouts_per_floor` pins.
-    const HASH_MULT: u64 = 0x4737_8190_96da_1dad;
-
-    fn from_seed(floor_seed: u64) -> Self {
-        Self::ALL[(floor_seed.wrapping_mul(Self::HASH_MULT) % Self::COUNT) as usize]
-    }
-
-    /// Whether this variant encloses a meeting room (== the vertical-wall presence).
-    const fn has_meeting(self) -> bool {
-        matches!(
-            self,
-            FloorVariant::Standard | FloorVariant::Dense | FloorVariant::Senior
-        )
-    }
-
-    /// Pantry presence BEFORE the Dense-degrade fixup (Dense has none until it
-    /// degrades on a short terminal).
-    const fn has_pantry_base(self) -> bool {
-        matches!(
-            self,
-            FloorVariant::Standard
-                | FloorVariant::OpenPlan
-                | FloorVariant::Senior
-                | FloorVariant::Lounge
-        )
-    }
-
-    /// Left-column split as a percent of buffer width, BEFORE the Dense-degrade.
-    const fn mid_x_pct(self) -> u16 {
-        match self {
-            FloorVariant::Standard => 28,
-            FloorVariant::OpenPlan => 18,
-            FloorVariant::Dense => 22,
-            FloorVariant::Senior => 35,
-            FloorVariant::Lounge => 22,
-        }
-    }
-}
-
-/// The resolved floor geometry: the `variant` plus the ONE size-dependent bit,
-/// `has_dual_meeting` (a Dense floor tall enough for two meeting rooms). The
-/// `has_pantry` / `mid_x_pct` accessors fold in the Dense-degrade (a too-short
-/// Dense floor gains a pantry and widens to the Standard column).
-#[derive(Clone, Copy)]
-pub(super) struct FloorGeometry {
-    variant: FloorVariant,
-    has_dual_meeting: bool,
-}
-
-impl FloorGeometry {
-    /// Resolved pantry presence AFTER the Dense-degrade: a Dense floor too short
-    /// for two rooms gains a pantry (Standard geometry).
-    fn has_pantry(self) -> bool {
-        if self.variant == FloorVariant::Dense && !self.has_dual_meeting {
-            true
-        } else {
-            self.variant.has_pantry_base()
-        }
-    }
-    /// Resolved mid-column percent AFTER the Dense-degrade — reads the Standard
-    /// row rather than repeating its percent, so retuning that row can't leave a
-    /// degraded Dense floor on the old column.
-    fn mid_x_pct(self) -> u16 {
-        if self.variant == FloorVariant::Dense && !self.has_dual_meeting {
-            FloorVariant::Standard.mid_x_pct()
-        } else {
-            self.variant.mid_x_pct()
-        }
     }
 }
 
@@ -1828,7 +1934,24 @@ fn compute_waypoints(
         }
     }
 
-    let vending = vending_spot(cubicle_aisle, right_x, pod_grid.stride_x, home_desks, buf_h);
+    // agent-office: off the rooftop's door, which opens onto the corridor's
+    // west end.
+    let rooftop = plan
+        .meeting_rooms
+        .iter()
+        .any(|r| r.style == super::RoomStyle::Rooftop);
+    let vending_west = if rooftop {
+        plan.lounge_west_clear + ROOFTOP_DOOR_STEP
+    } else {
+        right_x
+    };
+    let vending = vending_spot(
+        cubicle_aisle,
+        vending_west,
+        pod_grid.stride_x,
+        home_desks,
+        buf_h,
+    );
     if let Some(vending) = vending {
         waypoints.push(Waypoint {
             pos: vending,
@@ -1869,7 +1992,7 @@ fn compute_waypoints(
     for (room_id, room) in meeting_rooms.iter().enumerate() {
         let Some(trio) = room.trio else { continue };
         let table = trio.table;
-        for sofa in trio.sofas {
+        for (_, sofa) in trio.sofa_seats() {
             let facing = if sofa.y < table.y {
                 Facing::South
             } else {
@@ -1890,16 +2013,18 @@ fn compute_waypoints(
         // The offsets must MIRROR: the table blocks a span symmetric about t.x, and an asymmetric
         // pair puts one chair closer to the wood, swallowing the rug border its twin shows.
         let chair_dx = super::rooms::meeting::MEETING_CHAIR_TABLE_DX as i16;
-        for (dx, facing) in [(-chair_dx, Facing::East), (chair_dx, Facing::West)] {
-            waypoints.push(Waypoint {
-                pos: Point {
-                    x: table.x.saturating_add_signed(dx),
-                    y: table.y,
-                },
-                kind: WaypointKind::MeetingChair,
-                facing,
-                room_id: Some(room_id),
-            });
+        for table in trio.tables() {
+            for (dx, facing) in [(-chair_dx, Facing::East), (chair_dx, Facing::West)] {
+                waypoints.push(Waypoint {
+                    pos: Point {
+                        x: table.x.saturating_add_signed(dx),
+                        y: table.y,
+                    },
+                    kind: WaypointKind::MeetingChair,
+                    facing,
+                    room_id: Some(room_id),
+                });
+            }
         }
     }
 
@@ -1918,7 +2043,6 @@ fn compute_waypoints(
 
 #[cfg(test)]
 mod tests {
-    use super::{FloorGeometry, FloorVariant};
 
     /// The lounge is kept exactly while its padded ground ends at or west of the
     /// door threshold's column: the scan finds the width where the east edge meets
@@ -1927,10 +2051,13 @@ mod tests {
     fn the_lounge_is_kept_iff_its_east_ground_reaches_no_further_than_the_threshold() {
         use super::{FloorPlan, couch_pos, lounge_east_ground};
         use crate::layout::SceneLayout;
-        use crate::layout::placement_sweep::{NARROW_BAND, SWEEP_SEEDS};
+        use crate::layout::placement_sweep::SWEEP_SEEDS;
         let h = 160;
         for seed in SWEEP_SEEDS {
-            let scan: Vec<(u16, bool, Option<u16>, u16)> = NARROW_BAND
+            // agent-office: the band now spans the floor, west room column
+            // gone, so the lounge meets the door at a wider floor than the
+            // narrow band's.
+            let scan: Vec<(u16, bool, Option<u16>, u16)> = (super::MIN_LAYOUT_W..=160)
                 .map(|w| {
                     let l = SceneLayout::compute_with_seed(w, h, None, seed).expect("lays out");
                     let plan = FloorPlan::new(w, h, seed);
@@ -1950,6 +2077,12 @@ mod tests {
                     east.is_none_or(|e| e <= threshold),
                     "{w}x{h} seed {seed}: kept {kept}, east ground {east:?}, threshold {threshold}"
                 );
+            }
+            // agent-office: with the band spanning the floor, the lounge may
+            // clear the door at every width; the boundary is pinned where it
+            // exists.
+            if scan.iter().all(|&(_, kept, ..)| kept) {
+                continue;
             }
             let exact = scan
                 .iter()
@@ -2047,28 +2180,6 @@ mod tests {
         assert!(spot(aisle(VENDING_MIN_AISLE_H, wide)).is_some());
         assert_eq!(spot(aisle(VENDING_MIN_AISLE_H - 1, wide)), None);
         assert_eq!(spot(aisle(VENDING_MIN_AISLE_H, VENDING_MIN_AISLE_W)), None);
-    }
-
-    #[test]
-    fn a_degraded_dense_floor_reads_the_standard_column_percent() {
-        let degraded = FloorGeometry {
-            variant: FloorVariant::Dense,
-            has_dual_meeting: false,
-        };
-        assert_eq!(
-            degraded.mid_x_pct(),
-            FloorVariant::Standard.mid_x_pct(),
-            "a too-short Dense floor degrades to the Standard geometry"
-        );
-        let dual = FloorGeometry {
-            variant: FloorVariant::Dense,
-            has_dual_meeting: true,
-        };
-        assert_eq!(
-            dual.mid_x_pct(),
-            FloorVariant::Dense.mid_x_pct(),
-            "a Dense floor that KEEPS both meeting rooms keeps its own column"
-        );
     }
 
     /// Neither floor carries a SAFETY MARGIN — one-directional on purpose. It catches a

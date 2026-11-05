@@ -199,6 +199,12 @@ fn paint_backdrop(
     buf: &mut RgbBuffer,
 ) {
     paint_carpet(backdrop, carpet, pen, buf);
+    paint_coverings(backdrop, pen, buf);
+    paint_wall(backdrop, scale, pen, buf);
+}
+
+/// The floor coverings over the carpet, in the backdrop's order.
+fn paint_coverings(backdrop: &Backdrop, pen: Pen, buf: &mut RgbBuffer) {
     for &(at, covering) in &backdrop.coverings {
         match covering {
             Covering::Rug {
@@ -211,9 +217,9 @@ fn paint_backdrop(
             }
             Covering::Mosaic => paint_mosaic(at, pen, buf),
             Covering::RooftopPaint => paint_rooftop(at, pen, buf),
+            Covering::Floor(floor) => paint_floor(at, floor, pen, buf),
         }
     }
-    paint_wall(backdrop, scale, pen, buf);
 }
 
 /// Paint `list` over the backdrop `buf` holds: every piece's shadow
@@ -726,6 +732,12 @@ pub(crate) fn assert_variant_desk_foot(
         Pen::for_pack(scale, base_pack),
         &mut ground,
     );
+    // agent-office: the benches' carpet is laid over it.
+    paint_coverings(
+        &Backdrop::of(layout, theme),
+        Pen::for_pack(scale, base_pack),
+        &mut ground,
+    );
     let buf_w = usize::from(scale.to_buffer(layout.buf_w));
     let face = desk_front_h();
     // Each desk's columns and the first row below its art, in logical units.
@@ -986,6 +998,129 @@ fn paint_mosaic(at: crate::layout::Bounds, pen: Pen, buf: &mut RgbBuffer) {
                 MOSAIC_MINT
             } else {
                 continue;
+            };
+            pen.fill(buf, rect(x, y, 1, 1), colour);
+        }
+    }
+}
+
+/// agent-office: an RGB constant.
+const fn rgb(r: u8, g: u8, b: u8) -> pixtuoid_core::sprite::Rgb {
+    pixtuoid_core::sprite::Rgb { r, g, b }
+}
+
+/// agent-office: a few cheap bits of a pixel's position, the same every
+/// frame, for the floors' speckle.
+fn floor_hash(x: u16, y: u16) -> u32 {
+    let h = (u32::from(x).wrapping_mul(0x9e37_79b1)) ^ (u32::from(y).wrapping_mul(0x85eb_ca77));
+    h ^ (h >> 15)
+}
+
+/// agent-office: `floor` laid over `at` on the art grid. At 1x only its
+/// ground colour; denser, its pattern: carpet tiles laid in alternating
+/// pile, terrazzo's chips, marble's slabs and veins, herringbone's planks.
+fn paint_floor(
+    at: crate::layout::Bounds,
+    floor: crate::display::Floor,
+    pen: Pen,
+    buf: &mut RgbBuffer,
+) {
+    use crate::display::Floor;
+    let d = pen.density().get();
+    let (x0, y0, w, h) = (
+        pen.art(at.x).0,
+        pen.art(at.y).0,
+        pen.art(at.width).0,
+        pen.art(at.height).0,
+    );
+    let rect = |x: u16, y: u16, w: u16, h: u16| ArtRect {
+        x: ArtPx(x),
+        y: ArtPx(y),
+        w: ArtPx(w),
+        h: ArtPx(h),
+    };
+    let ground = match floor {
+        Floor::Carpet => rgb(0x56, 0x5e, 0x6b),
+        Floor::Terrazzo => rgb(0xc4, 0xbc, 0xae),
+        Floor::Marble => rgb(0xe6, 0xe1, 0xd6),
+        Floor::Herringbone => rgb(0x6e, 0x3c, 0x2b),
+    };
+    pen.fill(buf, rect(x0, y0, w, h), ground);
+    if d == 1 {
+        return;
+    }
+    let (art_xs, art_ys) = pen.writable_art(buf);
+    for y in y0.max(art_ys.start)..(y0 + h).min(art_ys.end) {
+        for x in x0.max(art_xs.start)..(x0 + w).min(art_xs.end) {
+            let (dx, dy) = (x - x0, y - y0);
+            let colour = match floor {
+                Floor::Carpet => {
+                    // Tiles eight cells square, their pile laid across their
+                    // neighbours', so the floor reads as a checker of shades.
+                    let tile = 8 * d;
+                    let speck = floor_hash(dx, dy) % 19 == 0;
+                    if speck {
+                        rgb(0x63, 0x6c, 0x7a)
+                    } else if (dx / tile + dy / tile) % 2 == 1 {
+                        rgb(0x50, 0x58, 0x65)
+                    } else {
+                        continue;
+                    }
+                }
+                Floor::Terrazzo => {
+                    let chip = (d / 2).max(1);
+                    match floor_hash(dx / chip, dy / chip) % 53 {
+                        0 => rgb(0x8a, 0x84, 0x7b),
+                        1 => rgb(0xb0, 0x8a, 0x76),
+                        2 | 3 => rgb(0xe4, 0xdf, 0xd4),
+                        4 => rgb(0x93, 0xa3, 0x96),
+                        5..=8 => rgb(0xb8, 0xb0, 0xa2),
+                        _ => continue,
+                    }
+                }
+                Floor::Marble => {
+                    // Slabs sixteen cells square, each veined on its own
+                    // slant, with a fine seam between.
+                    let slab = 16 * d;
+                    let (sx, sy) = (dx / slab, dy / slab);
+                    let tilt = floor_hash(sx, sy);
+                    if dx % slab == 0 || dy % slab == 0 {
+                        rgb(0xcb, 0xc4, 0xb7)
+                    } else if (u32::from(dx) * (1 + tilt % 3)
+                        + u32::from(dy) * (2 + tilt % 2)
+                        + tilt)
+                        % (11 * u32::from(d))
+                        == 0
+                    {
+                        rgb(0xbd, 0xb6, 0xab)
+                    } else if (sx + sy) % 2 == 1 {
+                        rgb(0xec, 0xe8, 0xdf)
+                    } else {
+                        continue;
+                    }
+                }
+                Floor::Herringbone => {
+                    // Columns of planks, each column's slanting the other way,
+                    // so the seams zigzag down the floor.
+                    let width = (d / 2).max(1);
+                    let column = 3 * width;
+                    let c = dx / column;
+                    let s = if c % 2 == 0 {
+                        u32::from(dx) + u32::from(dy)
+                    } else {
+                        u32::from(dy) + 4096 - u32::from(dx)
+                    };
+                    let plank = s / u32::from(2 * width);
+                    if s % u32::from(2 * width) == 0 || dx % column == 0 {
+                        rgb(0x4d, 0x29, 0x1d)
+                    } else {
+                        match (plank * 7 + u32::from(c) * 13) % 3 {
+                            0 => continue,
+                            1 => rgb(0x7a, 0x44, 0x30),
+                            _ => rgb(0x63, 0x35, 0x27),
+                        }
+                    }
+                }
             };
             pen.fill(buf, rect(x, y, 1, 1), colour);
         }
@@ -2651,8 +2786,10 @@ mod tests {
         let theme = crate::theme::theme_by_name("normal").expect("theme");
         let pack = test_office();
         let now = crate::localclock::at_hour(12);
-        let layouts = [0, 1]
-            .map(|seed| SceneLayout::compute_with_seed(160, 96, None, seed).expect("lays out"));
+        // agent-office: every floor shares one plan now, so two widths give
+        // the two backdrops.
+        let layouts =
+            [160, 168].map(|w| SceneLayout::compute_with_seed(w, 96, None, 0).expect("lays out"));
         assert_ne!(
             Backdrop::of(&layouts[0], theme),
             Backdrop::of(&layouts[1], theme),
@@ -3209,6 +3346,9 @@ mod tests {
             pen,
             &mut ground,
         );
+        // agent-office: what lies on the floor by the wall: the benches'
+        // carpet, the rooftop's paint.
+        paint_coverings(&Backdrop::of(&layout, theme), pen, &mut ground);
         paint_backdrop(
             &Backdrop::of(&layout, theme),
             Carpet::plain(theme),
@@ -3283,7 +3423,8 @@ mod tests {
     fn the_tables_span_ends_where_it_paints() {
         let pack = test_office();
         let theme = crate::theme::theme_by_name("normal").expect("theme");
-        let layout = SceneLayout::compute_with_seed(160, 96, None, 0).expect("lays out");
+        // agent-office: a size whose south row seats a meeting trio.
+        let layout = SceneLayout::compute_with_seed(240, 160, None, 0).expect("lays out");
         for s in [1, pack.max_density_variant().get()] {
             let scale = RenderScale::new(s).expect("nonzero");
             let order = queued(&layout, &pack, scale, &[], |k| {
@@ -3688,9 +3829,13 @@ mod tests {
                 }
             }
         }
+        // agent-office: no notice board: the meeting rooms are under no window.
         assert_eq!(
             met,
-            crate::layout::roster::tests::every_kind_key(),
+            crate::layout::roster::tests::every_kind_key()
+                .into_iter()
+                .filter(|k| *k != "NoticeBoard")
+                .collect(),
             "a fixture kind was never met"
         );
     }
@@ -4597,7 +4742,9 @@ mod tests {
         // agent-office: 196x144 for the vending machine, whose aisle the
         // rooftop takes at 240; 240x144 for the rooftop's own pieces.
         let pack = test_office();
-        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60)] {
+        // agent-office: 148x120 for the compact counter of a pantry the south
+        // row squeezed.
+        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60), (148, 120)] {
             let stepped = FloorSession::new(std::sync::Arc::new(pack.clone()))
                 .step(
                     crate::floor::FloorInputs {
@@ -4650,9 +4797,9 @@ mod tests {
             PackPiece::WaterCooler,
             PackPiece::VendingMachine,
             PackPiece::Printer,
-            PackPiece::RooftopBench,
+            // agent-office: no rooftop bench: its one bench faces the sea, so
+            // only its back view is drawn, in bands as a sofa's back is.
             PackPiece::RooftopStool,
-            PackPiece::LaundryPole,
         ]) {
             assert!(
                 props.contains(&sprite),

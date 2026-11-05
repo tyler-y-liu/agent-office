@@ -392,8 +392,26 @@ impl Win {
                 TEXT,
                 g.px,
             );
-        } else if let Some(tags) = self.render_office(&frame.scene, fit, theme, &frame.labels, sf) {
+        } else if let Some((tags, signs)) =
+            self.render_office(&frame.office, fit, theme, &frame.labels, sf)
+        {
             canvas.blit_scaled(&self.art, 0, 0, u32::from(fit.upscale()));
+            paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
+            let stuck: Vec<AgentId> = frame
+                .scene
+                .agents
+                .values()
+                .filter(|s| crate::tasks::stuck_at_work(s, frame.views.get(&s.agent_id)).is_some())
+                .map(|s| s.agent_id)
+                .collect();
+            paint_stuck(
+                &mut canvas,
+                &mut self.faces,
+                &tags,
+                &stuck,
+                sf,
+                fit.upscale(),
+            );
             paint_tags(
                 &mut canvas,
                 &mut self.faces,
@@ -478,7 +496,7 @@ impl Win {
         theme: &'static Theme,
         labels: &HashMap<AgentId, String>,
         scale_factor: f64,
-    ) -> Option<Vec<Tag>> {
+    ) -> Option<(Vec<Tag>, Vec<DoorSign>)> {
         let _feed = self.office.session.render(
             fit.look(WorldText::Host),
             RenderInputs {
@@ -510,15 +528,18 @@ impl Win {
             *dst = to_u32(*src);
         }
         let mut tags = Vec::new();
+        let mut signs = Vec::new();
         if let Picture::Floor(floor) = picture
             && let Some(text) = floor.text
         {
             let d = u32::from(fit.density().get());
             let u = u32::from(fit.upscale());
-            tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor);
+            signs = door_signs(&mut self.faces, text, d, u, scale_factor);
+            let avoid: Vec<Area> = signs.iter().map(|s| s.area).collect();
+            tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor, &avoid);
             paint_world_text(art, text, d, u, &tags);
         }
-        Some(tags)
+        Some((tags, signs))
     }
 
     /// Select the card or the figure under the pointer; a double click opens
@@ -621,14 +642,26 @@ fn paint_cells(
     g: Grid,
 ) {
     let baseline = i64::from((g.row_h - g.px) / 2) + i64::from(faces.ascent(g.px));
+    // Every background first: a wide character's glyph spans the next cell,
+    // whose fill would otherwise cut it in half.
+    // A wide character's background covers both its cells: ratatui leaves
+    // the second unstyled.
+    for y in 0..cells.area.height {
+        for x in 0..cells.area.width {
+            let cell = &cells[(x, y)];
+            if let Color::Rgb(r, gr, b) = cell.bg {
+                let px = i64::from(origin.0 + u32::from(x) * g.cell_w);
+                let py = i64::from(origin.1 + u32::from(y) * g.row_h);
+                let span = Faces::cells(cell.symbol()).max(1);
+                canvas.fill(px, py, g.cell_w * span, g.row_h, rgb(r, gr, b));
+            }
+        }
+    }
     for y in 0..cells.area.height {
         for x in 0..cells.area.width {
             let cell = &cells[(x, y)];
             let px = i64::from(origin.0 + u32::from(x) * g.cell_w);
             let py = i64::from(origin.1 + u32::from(y) * g.row_h);
-            if let Color::Rgb(r, gr, b) = cell.bg {
-                canvas.fill(px, py, g.cell_w, g.row_h, rgb(r, gr, b));
-            }
             let sym = cell.symbol();
             if sym.trim().is_empty() {
                 continue;
@@ -747,6 +780,9 @@ fn badge_run(b: &Badge) -> TextRun {
 pub(crate) struct Tag {
     agent: AgentId,
     badge: Area,
+    /// The window row its figure's top stands at, whichever tier its badge
+    /// stepped up to.
+    figure_top: i64,
     label: Option<Area>,
     plate: u32,
     marker: u32,
@@ -759,6 +795,8 @@ pub(crate) struct Tag {
 
 /// Rows over its badge a task label may climb to find room.
 const LABEL_TIERS: i64 = 2;
+/// Tiers a badge may step up off a neighbour's.
+const BADGE_TIERS: usize = 3;
 
 /// Points a badge's name and a task label are set in.
 const NAME_PT: f64 = 10.0;
@@ -785,6 +823,7 @@ fn place_tags(
     u: u32,
     labels: &HashMap<AgentId, String>,
     scale_factor: f64,
+    avoid: &[Area],
 ) -> Vec<Tag> {
     let (name_px, task_px) = (pt_px(NAME_PT, scale_factor), pt_px(TASK_PT, scale_factor));
     let pad = tag_pad(scale_factor);
@@ -800,12 +839,14 @@ fn place_tags(
             let foot = (at.y + i64::from(at.h)) * i64::from(u);
             Tag {
                 agent: b.agent,
+                // Not off the window's west edge, by the rooftop.
                 badge: Area {
-                    x: cx - i64::from(w / 2),
+                    x: (cx - i64::from(w / 2)).max(0),
                     y: foot - i64::from(h),
                     w,
                     h,
                 },
+                figure_top: foot + i64::from(LABEL_GAP) * i64::from(u),
                 label: None,
                 plate: to_u32(b.plate),
                 marker: to_u32(b.marker),
@@ -816,7 +857,21 @@ fn place_tags(
             }
         })
         .collect();
-    let mut taken: Vec<Area> = tags.iter().map(|t| t.badge).collect();
+    // A badge that would cover a neighbour's (sitters side by side on a
+    // sofa) steps up a tier over its own figure, so every name reads.
+    let mut taken: Vec<Area> = Vec::with_capacity(tags.len());
+    for t in &mut tags {
+        let step = i64::from(t.badge.h + pad);
+        for _ in 0..BADGE_TIERS {
+            if !taken.iter().any(|o| o.meets(&t.badge)) || t.badge.y - step < 0 {
+                break;
+            }
+            t.badge.y -= step;
+        }
+        taken.push(t.badge);
+    }
+    // A task label keeps off the door signs too.
+    taken.extend(avoid.iter().copied());
     for t in &mut tags {
         let Some(task) = &t.task else { continue };
         let w = Faces::cells(task) * faces.cell_w(task_px) + 2 * pad;
@@ -825,7 +880,7 @@ fn place_tags(
         let b = t.badge;
         t.label = (1..=LABEL_TIERS)
             .map(|tier| Area {
-                x: b.x + i64::from(b.w / 2) - i64::from(w / 2),
+                x: (b.x + i64::from(b.w / 2) - i64::from(w / 2)).max(0),
                 y: b.y - step * tier,
                 w,
                 h,
@@ -865,7 +920,9 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
         }
     }
     let mut signs: Vec<Area> = Vec::new();
-    for run in text.signs {
+    // Door signs are set in the readable faces over the upscaled office
+    // ([`door_signs`]): the art font has no Chinese.
+    for run in text.signs.iter().filter(|r| !set_readable(r.role)) {
         let rect = run_rect(run, d);
         if signs.iter().any(|s| s.meets(&rect)) {
             continue;
@@ -873,6 +930,144 @@ fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: 
         signs.push(rect);
         paint_run(art, run, rect);
     }
+}
+
+/// Whether the window sets a sign of `role` in the readable faces rather
+/// than the art font: the zones' door signs, in Chinese, and the benches'
+/// repository plates, whose names may be.
+fn set_readable(role: TextRole) -> bool {
+    matches!(role, TextRole::DoorSign | TextRole::BenchPlate)
+}
+
+/// A door sign or a bench's plate as the window sets it, on its colour,
+/// centred where pixtuoid hangs it.
+pub(crate) struct DoorSign {
+    /// Its plate, in window pixels.
+    area: Area,
+    text: String,
+    plate: u32,
+    ink: u32,
+}
+
+/// The Chinese for a zone pixtuoid signs in ASCII, the art font having no
+/// Chinese.
+fn door_sign_zh(text: &str) -> Option<&'static str> {
+    Some(match text {
+        "MTG A" => "会议室 A",
+        "MTG B" => "会议室 B",
+        "PANTRY" => "茶水间",
+        "WAIT" => "等候区",
+        "OFFICE" => "你的办公室",
+        "ROOF" => "天台",
+        _ => return None,
+    })
+}
+
+/// The door signs among `text`'s, at `d` art pixels a layout unit and `u`
+/// window pixels an art pixel.
+fn door_signs(
+    faces: &mut Faces,
+    text: HostText<'_>,
+    d: u32,
+    u: u32,
+    scale_factor: f64,
+) -> Vec<DoorSign> {
+    let cell = i64::from(u32::from(pixtuoid_scene::layout::CELL_ROWS) * d);
+    let px = pt_px(SIGN_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    text.signs
+        .iter()
+        .filter(|r| set_readable(r.role))
+        .filter_map(|r| {
+            let text: String = r.spans.iter().map(|s| s.text().to_owned()).collect();
+            let zh = match r.role {
+                TextRole::DoorSign => door_sign_zh(&text)?.to_owned(),
+                _ => truncate_cells(&text, PLATE_CELLS),
+            };
+            let cx = i64::from(u32::from(r.at.x) * d) * i64::from(u);
+            let cy = (i64::from(u32::from(r.at.y) * d) + cell / 2) * i64::from(u);
+            let w = Faces::cells(&zh) * faces.cell_w(px) + 2 * pad;
+            let h = px + 2 * pad;
+            Some(DoorSign {
+                area: Area {
+                    x: cx - i64::from(w / 2),
+                    y: cy - i64::from(h / 2),
+                    w,
+                    h,
+                },
+                text: zh,
+                plate: r.plate.map_or(PANEL_BG, to_u32),
+                ink: r.spans.first().map_or(TEXT, |s| to_u32(s.ink)),
+            })
+        })
+        .collect()
+}
+
+/// Set each door sign on its plate in the readable faces.
+fn paint_door_signs(canvas: &mut Canvas, faces: &mut Faces, signs: &[DoorSign], scale_factor: f64) {
+    let px = pt_px(SIGN_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    for s in signs {
+        let Area { x, y, w, h } = s.area;
+        canvas.fill(x, y, w, h, s.plate);
+        let base = y + i64::from(pad) + i64::from(faces.ascent(px));
+        faces.draw(canvas, x + i64::from(pad), base, &s.text, s.ink, px);
+    }
+}
+
+/// Points a door sign is set in.
+const SIGN_PT: f64 = 9.0;
+/// Cells a bench's plate may take.
+const PLATE_CELLS: u16 = 16;
+
+/// Red for a stuck agent, the panel's stuck colour.
+const STUCK_RED: u32 = 0x00f7_768e;
+
+/// Mark each stuck agent in `stuck` where it sits: a red ring round its
+/// figure and a red "?" by its badge, so it stands out from the agents
+/// working normally around it. `u` is window pixels an art pixel.
+fn paint_stuck(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    tags: &[Tag],
+    stuck: &[AgentId],
+    scale_factor: f64,
+    u: u16,
+) {
+    let u = i64::from(u.max(1));
+    let name_px = pt_px(NAME_PT, scale_factor);
+    let pad = tag_pad(scale_factor);
+    for t in tags.iter().filter(|t| stuck.contains(&t.agent)) {
+        let b = t.badge;
+        let cx = b.x + i64::from(b.w / 2);
+        let top = t.figure_top;
+        let half_h = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * u / 2;
+        let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * u * 3 / 4;
+        let dot = (u / 2).max(1) as u32;
+        for (x, y) in ring(cx, top + half_h, half_w, half_h + u) {
+            canvas.fill(x, y, dot, dot, STUCK_RED);
+        }
+        let w = faces.cell_w(name_px) + 2 * pad;
+        let (x, y) = (b.x + i64::from(b.w + pad), b.y);
+        canvas.fill(x, y, w, b.h, STUCK_RED);
+        let base = y + i64::from(pad) + i64::from(faces.ascent(name_px));
+        faces.draw(canvas, x + i64::from(pad), base, "?", TEXT, name_px);
+    }
+}
+
+/// The outline of an ellipse centred on (`cx`, `cy`) with radii `rx`, `ry`,
+/// one point per window pixel of its rim.
+fn ring(cx: i64, cy: i64, rx: i64, ry: i64) -> Vec<(i64, i64)> {
+    let steps = (4 * (rx + ry)).max(8);
+    (0..steps)
+        .map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / steps as f64;
+            (
+                cx + (rx as f64 * a.cos()).round() as i64,
+                cy + (ry as f64 * a.sin()).round() as i64,
+            )
+        })
+        .collect()
 }
 
 /// Set the placed badges and task labels in the readable faces.
@@ -911,5 +1106,27 @@ fn paint_tags(
         canvas.fill(r.x, r.y, r.w, r.h, t.plate);
         let base = r.y + i64::from(pad) + i64::from(faces.ascent(task_px));
         faces.draw(canvas, r.x + i64::from(pad), base, task, TASK, task_px);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every zone pixtuoid signs reads in Chinese in the window: a sign the
+    /// map missed would vanish, not fall back to ASCII.
+    #[test]
+    fn every_door_sign_has_its_chinese() {
+        for (ascii, zh) in [
+            ("MTG A", "会议室 A"),
+            ("MTG B", "会议室 B"),
+            ("PANTRY", "茶水间"),
+            ("WAIT", "等候区"),
+            ("OFFICE", "你的办公室"),
+            ("ROOF", "天台"),
+        ] {
+            assert_eq!(door_sign_zh(ascii), Some(zh));
+        }
+        assert_eq!(door_sign_zh("LOBBY"), None);
     }
 }

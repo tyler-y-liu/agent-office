@@ -95,6 +95,10 @@ pub mod sky;
 pub(crate) mod skyline;
 #[doc(hidden)]
 pub mod tally;
+/// agent-office: sub-agent teams in the meeting rooms.
+pub(crate) mod team;
+/// agent-office: the line agents waiting on you stand in.
+pub(crate) mod waiting;
 /// The color-theme MODEL: the `Theme` role palette and the bundled themes.
 pub mod theme;
 pub mod token_meter;

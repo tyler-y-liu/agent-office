@@ -41,6 +41,40 @@ pub(crate) const IDLE_LEAVE_DESK_MS: u64 = 3_000;
 /// it back to the same seat instead of across the floor to a new one.
 pub(crate) const LOUNGE_CYCLE: u64 = 0;
 
+/// agent-office: how long an idle agent hangs around the pantry before it gives
+/// up waiting for a next turn and heads out to the rooftop. A just-finished
+/// session in the pantry reads as "done, have a look"; one on the rooftop as
+/// "nothing doing here".
+pub const IDLE_ROOFTOP_MS: u64 = 15 * 60 * 1000;
+
+/// agent-office: which part of an idle stretch an agent is in, picking the
+/// kind of lounge it heads for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum IdleStage {
+    /// Recently done: the pantry counter and island.
+    #[default]
+    Pantry,
+    /// Idle for a while: the rooftop and the other sofas.
+    Rooftop,
+}
+
+impl IdleStage {
+    /// The stage of a stretch that has been idle for `idle_ms`.
+    pub(crate) fn at(idle_ms: u64) -> Self {
+        if idle_ms < IDLE_ROOFTOP_MS {
+            Self::Pantry
+        } else {
+            Self::Rooftop
+        }
+    }
+
+    /// Whether `kind` is a spot an agent in this stage sits out at.
+    pub(crate) fn hosts(self, kind: WaypointKind) -> bool {
+        let pantry = matches!(kind, WaypointKind::Pantry | WaypointKind::Island);
+        lounges(kind) && (pantry == (self == Self::Pantry))
+    }
+}
+
 /// agent-office: a spot an idle agent can sit out a long stretch at. Standing
 /// desks and printers read as work, vending and phone booths as a quick errand.
 fn lounges(kind: WaypointKind) -> bool {
@@ -448,6 +482,7 @@ pub(crate) fn resolve_wander_target(
     layout: &SceneLayout,
     origin: HomeDesk,
     claimed: &SpotClaims,
+    stage: IdleStage,
 ) -> WanderTarget {
     let amble = || WanderTarget {
         dest: pick_aimless_dest(layout, aimless_wander_seed(id, cycle_n), origin),
@@ -460,14 +495,22 @@ pub(crate) fn resolve_wander_target(
     // lands on a neighbouring seat of the SAME venue first — "that chair's
     // taken, I'll take the next one" — and only walks off once the venue is
     // full. agent-office: lounges only, and no aimless cycles — the agent stays
-    // where it lands, and standing mid-aisle for minutes reads as lost.
-    // A floor laid out without a lounge falls back to any free spot.
-    let free = |lounge_only: bool| {
-        (0..n)
-            .map(|step| (first + step) % n)
-            .find(|i| !claimed.holds(*i) && (!lounge_only || lounges(layout.waypoints[*i].kind)))
+    // where it lands, and standing mid-aisle for minutes reads as lost. The
+    // stage's own lounges first; a floor without them (a narrow window drops
+    // the rooftop) falls back to any lounge, then any free spot. The meeting
+    // rooms are kept for teams (`crate::team`), the waiting area and your
+    // office for those waiting on you, until nothing else is left.
+    let free = |fits: &dyn Fn(WaypointKind) -> bool, rooms: bool| {
+        (0..n).map(|step| (first + step) % n).find(|i| {
+            !claimed.holds(*i)
+                && fits(layout.waypoints[*i].kind)
+                && (rooms || !crate::team::is_reserved_seat(layout, *i))
+        })
     };
-    let Some(wp_idx) = free(true).or_else(|| free(false)) else {
+    let Some(wp_idx) = free(&|k| stage.hosts(k), false)
+        .or_else(|| free(&lounges, false))
+        .or_else(|| free(&|_| true, true))
+    else {
         return amble();
     };
     let wp = layout.waypoints[wp_idx];
@@ -490,8 +533,9 @@ pub(crate) fn resolve_wander_target(
     }
 }
 
-/// agent-office: desk → lounge once, then the lounge until the stretch ends —
-/// no trip back, so only a working agent sits at a desk.
+/// agent-office: desk → pantry, then after [`IDLE_ROOFTOP_MS`] pantry →
+/// rooftop, and there until the stretch ends — no trip back, so only a
+/// working agent sits at a desk.
 fn idle_pose(slot: &AgentSlot, desk: HomeDesk, layout: &SceneLayout, elapsed_ms: u64) -> Pose {
     if layout.waypoints.is_empty() || elapsed_ms < IDLE_LEAVE_DESK_MS {
         return Pose::SeatedIdle;
@@ -500,25 +544,38 @@ fn idle_pose(slot: &AgentSlot, desk: HomeDesk, layout: &SceneLayout, elapsed_ms:
     // Seat claims are EMPTY here: this half has no occupancy knowledge (see
     // `resolve_wander_target`), and its job is a cache-stable overlay estimate,
     // not the authoritative placement.
-    let target = resolve_wander_target(
-        slot.agent_id,
-        LOUNGE_CYCLE,
-        layout,
-        desk,
-        &SpotClaims::default(),
-    );
-    let walking = elapsed_ms - IDLE_LEAVE_DESK_MS;
-    if walking < WANDER_WALK_EST_MS {
-        LegPose {
-            from: desk.at,
-            to: target.dest,
-            progress: LegProgress::of(walking, WANDER_WALK_EST_MS),
-            carrying_coffee: false,
+    let target = |stage| {
+        resolve_wander_target(
+            slot.agent_id,
+            LOUNGE_CYCLE,
+            layout,
+            desk,
+            &SpotClaims::default(),
+            stage,
+        )
+    };
+    let leg = |from: Point, to: WanderTarget, walking: u64| {
+        if walking < WANDER_WALK_EST_MS {
+            LegPose {
+                from,
+                to: to.dest,
+                progress: LegProgress::of(walking, WANDER_WALK_EST_MS),
+                carrying_coffee: false,
+            }
+            .straight()
+        } else {
+            to.kind.at_pose(to.dest)
         }
-        .straight()
-    } else {
-        target.kind.at_pose(target.dest)
+    };
+    let pantry = target(IdleStage::Pantry);
+    if IdleStage::at(elapsed_ms) == IdleStage::Pantry {
+        return leg(desk.at, pantry, elapsed_ms - IDLE_LEAVE_DESK_MS);
     }
+    let rooftop = target(IdleStage::Rooftop);
+    if rooftop == pantry {
+        return pantry.kind.at_pose(pantry.dest);
+    }
+    leg(pantry.dest, rooftop, elapsed_ms - IDLE_ROOFTOP_MS)
 }
 
 #[cfg(test)]

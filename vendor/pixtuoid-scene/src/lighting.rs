@@ -88,6 +88,22 @@ const NEON_DAYLIGHT_MIN: f32 = 0.5;
 pub(crate) const SPILL_DEPTH: u16 = 12;
 /// The spill's strength at the sill, as a share of the sunlight.
 const SPILL_SILL: f32 = 0.32;
+/// agent-office: how much further the spill reaches across the floor at the
+/// golden hour's height, in rows: a low sun throws long shafts.
+pub(crate) const SUNSET_SPILL_EXTRA: u16 = 26;
+/// agent-office: how much stronger it is then, as a share of its own strength.
+const SUNSET_SPILL_BOOST: f32 = 1.0;
+/// agent-office: the sunlight a shaft carries at the golden hour's height,
+/// whatever the sun's height leaves the room.
+const SUNSET_SHAFT_LIGHT: f32 = 0.85;
+/// agent-office: the golden hour's blaze at its height over the office: the
+/// sky's own measure tops out about here, so the shafts are full length by it.
+const GOLDEN_FULL: f32 = 0.24;
+
+/// agent-office: how far into its golden hour the sky is, 0..=1.
+pub(crate) fn golden_share(golden: f32) -> f32 {
+    (golden / GOLDEN_FULL).clamp(0.0, 1.0)
+}
 /// The most the spill widens past the window on either side.
 const SPILL_MAX_WIDEN: u16 = 3;
 
@@ -130,6 +146,9 @@ pub(crate) enum Light {
         w: u16,
         top: u16,
         slant: f32,
+        /// agent-office: rows it reaches below `top`, longer at golden hour
+        /// ([`sunset_depth`]).
+        depth: u16,
     },
     /// A [`MONITOR_HALO_W`]-wide, [`MONITOR_HALO_H`]-tall patch whose bottom
     /// row holds `centre`, falling off by Manhattan distance from it; the
@@ -163,14 +182,20 @@ impl Emitter {
                 (at.x.saturating_sub(reach), at.y.saturating_sub(reach)),
                 (at.x + w + reach, at.y + h + reach),
             ),
-            Light::Spill { x, w, top, slant } => {
+            Light::Spill {
+                x,
+                w,
+                top,
+                slant,
+                depth,
+            } => {
                 let (mut min_x, mut max_x) = (i32::MAX, i32::MIN);
-                for row in spill_rows(x, w, slant) {
+                for row in spill_rows(x, w, slant, depth) {
                     min_x = min_x.min(row.start);
                     max_x = max_x.max(row.end);
                 }
                 let clip = |x: i32| x.clamp(0, i32::from(u16::MAX)) as u16;
-                ((clip(min_x), top), (clip(max_x), top + SPILL_DEPTH))
+                ((clip(min_x), top), (clip(max_x), top + depth))
             }
             Light::Patch { centre } => {
                 let x0 = centre.x.saturating_sub(MONITOR_HALO_W / 2);
@@ -238,12 +263,13 @@ impl Emitter {
                 w,
                 top,
                 slant,
+                depth,
             } => {
                 let below = unit_holding(y) - i32::from(top);
-                let dy = u16::try_from(below).ok().filter(|&dy| dy < SPILL_DEPTH)?;
-                let row = spill_rows(wx, w, slant).nth(usize::from(dy))?;
+                let dy = u16::try_from(below).ok().filter(|&dy| dy < depth)?;
+                let row = spill_rows(wx, w, slant, depth).nth(usize::from(dy))?;
                 row.contains(&unit_holding(x))
-                    .then(|| strength * (1.0 - f32::from(dy) / f32::from(SPILL_DEPTH)))
+                    .then(|| strength * (1.0 - f32::from(dy) / f32::from(depth)))
             }
             Light::Patch { centre } => {
                 let ((x0, y0), (x1, y1)) = self.bounds();
@@ -272,13 +298,24 @@ fn unit_holding(v: f32) -> i32 {
 /// The columns each row of a spill spans, top row first, unclipped: the
 /// window's own columns leaning `slant` per row and widening by one every two
 /// rows up to [`SPILL_MAX_WIDEN`].
-fn spill_rows(x: u16, w: u16, slant: f32) -> impl Iterator<Item = std::ops::Range<i32>> {
-    (0..SPILL_DEPTH).map(move |dy| {
+fn spill_rows(
+    x: u16,
+    w: u16,
+    slant: f32,
+    depth: u16,
+) -> impl Iterator<Item = std::ops::Range<i32>> {
+    (0..depth).map(move |dy| {
         let widen = i32::from((dy / 2).min(SPILL_MAX_WIDEN));
         let shift = (slant * f32::from(dy)).round() as i32;
         let base_x = i32::from(x) + shift;
         base_x - widen..base_x + i32::from(w) + widen
     })
+}
+
+/// agent-office: how far a spill reaches `golden` of the way into its golden
+/// hour, 0..=1.
+pub(crate) fn sunset_depth(golden: f32) -> u16 {
+    SPILL_DEPTH + (f32::from(SUNSET_SPILL_EXTRA) * golden.clamp(0.0, 1.0)).round() as u16
 }
 
 /// One home desk's lights.
@@ -369,8 +406,17 @@ impl Lights {
                             w: bay.w,
                             top,
                             slant: look.spill_slant,
+                            depth: sunset_depth(golden_share(look.golden_hour)),
                         },
-                        strength: SPILL_SILL * look.sunlight,
+                        // agent-office: a low sun is dim overall but its
+                        // shafts burn bright where they land.
+                        strength: {
+                            let g = golden_share(look.golden_hour);
+                            (SPILL_SILL
+                                * look.sunlight.max(SUNSET_SHAFT_LIGHT * g)
+                                * (1.0 + SUNSET_SPILL_BOOST * g))
+                                .min(1.0)
+                        },
                     })
                     .collect()
             } else {

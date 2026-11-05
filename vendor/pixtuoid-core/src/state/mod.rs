@@ -690,6 +690,20 @@ impl Default for SceneState {
     }
 }
 
+/// agent-office: how many desks make one bench — a scene pod's row, which the
+/// scene deals as consecutive desk indices.
+pub const BENCH_SEATS: usize = 4;
+
+/// agent-office: the repository `cwd` belongs to. A Claude Code worktree,
+/// `<repo>/.claude/worktrees/<name>`, belongs to `<repo>`, so its sessions sit
+/// and are named with the repository's.
+pub fn project_root(cwd: &Path) -> &Path {
+    cwd.ancestors()
+        .find(|a| a.ends_with(".claude/worktrees"))
+        .and_then(|w| w.parent()?.parent())
+        .unwrap_or(cwd)
+}
+
 impl SceneState {
     /// An empty scene with the given per-floor desk capacities.
     pub fn new(floor_capacities: [usize; MAX_FLOORS]) -> Self {
@@ -758,6 +772,41 @@ impl SceneState {
         let lo = offsets[idx];
         let hi = lo + self.floor_capacities[idx];
         lo..hi
+    }
+
+    /// agent-office: a free desk for a session in `cwd`, so one repository's
+    /// sessions sit together: a free seat on a bench where that repository
+    /// already sits, else the first seat of an empty bench on the floor the
+    /// lowest free desk is on, else that desk. A new repository never opens a
+    /// floor while this one has a seat, since only one floor shows at a time.
+    /// A bench is [`BENCH_SEATS`] floor-local desks in a row, the way the scene
+    /// deals a pod's desks.
+    pub fn next_free_desk_for(&self, cwd: &Path) -> Option<GlobalDeskIndex> {
+        let offsets = self.cumulative_offsets();
+        let bench = |i: usize| {
+            let floor = self.floor_of_with_offsets(GlobalDeskIndex(i), &offsets);
+            (floor, (i - offsets[floor]) / BENCH_SEATS)
+        };
+        let root = project_root(cwd);
+        let mut taken = std::collections::BTreeSet::new();
+        let mut busy = std::collections::BTreeSet::new();
+        let mut ours = std::collections::BTreeSet::new();
+        for a in self.agents.values() {
+            let i = a.desk_index.0;
+            taken.insert(i);
+            busy.insert(bench(i));
+            if !a.unknown_cwd && project_root(&a.cwd) == root {
+                ours.insert(bench(i));
+            }
+        }
+        let free = || (0..self.total_capacity()).filter(|i| !taken.contains(i));
+        let lowest = free().next()?;
+        let floor = bench(lowest).0;
+        free()
+            .find(|&i| ours.contains(&bench(i)))
+            .or_else(|| free().find(|&i| bench(i).0 == floor && !busy.contains(&bench(i))))
+            .or(Some(lowest))
+            .map(GlobalDeskIndex)
     }
 
     /// Lowest free desk index, or `None` if all desks are occupied.

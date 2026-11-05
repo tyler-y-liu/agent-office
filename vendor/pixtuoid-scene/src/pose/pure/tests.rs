@@ -881,8 +881,44 @@ fn idle_pose_leaves_the_desk_once_and_stays_out() {
     let (s, now) = slot(ActivityState::Idle, IDLE_LEAVE_DESK_MS + WANDER_WALK_EST_MS);
     let lounge = derive(&s, now, &l).expect("pose");
     assert!(matches!(lounge, Pose::AtWaypoint { .. }), "{lounge:?}");
+    let (s, later) = slot(ActivityState::Idle, IDLE_ROOFTOP_MS - 1);
+    assert_eq!(
+        derive(&s, later, &l),
+        Some(lounge),
+        "under 15 min, same seat"
+    );
+    let Pose::AtWaypoint { kind, .. } = lounge else {
+        unreachable!()
+    };
+    assert!(
+        IdleStage::Pantry.hosts(kind),
+        "fresh idle sits in the pantry: {kind:?}"
+    );
+}
+
+/// agent-office: past 15 minutes the stateless half also walks the agent from
+/// the pantry to the rooftop and keeps it there, so a long-idle session is not
+/// mistaken for a fresh result waiting to be read.
+#[test]
+fn idle_pose_moves_a_long_idle_agent_to_the_rooftop() {
+    let l = layout();
+    let (s, now) = slot(
+        ActivityState::Idle,
+        IDLE_ROOFTOP_MS + WANDER_WALK_EST_MS / 2,
+    );
+    let walking = derive(&s, now, &l);
+    assert!(matches!(walking, Some(Pose::Walking { .. })), "{walking:?}");
+    let (s, now) = slot(ActivityState::Idle, IDLE_ROOFTOP_MS + WANDER_WALK_EST_MS);
+    let rooftop = derive(&s, now, &l).expect("pose");
+    let Pose::AtWaypoint { kind, .. } = rooftop else {
+        panic!("{rooftop:?}");
+    };
+    assert!(
+        IdleStage::Rooftop.hosts(kind),
+        "long idle sits out of the pantry: {kind:?}"
+    );
     let (s, later) = slot(ActivityState::Idle, 3 * 60 * 60 * 1000);
-    assert_eq!(derive(&s, later, &l), Some(lounge), "hours on, same seat");
+    assert_eq!(derive(&s, later, &l), Some(rooftop), "hours on, same seat");
 }
 
 /// agent-office: a spot an idle agent sits out a stretch at is a lounge; a
@@ -896,11 +932,15 @@ fn idle_agents_only_head_for_lounges() {
         .expect("desk");
     for i in 0..200u64 {
         let id = AgentId::from_transcript_path(&format!("/p/lounge_{i}.jsonl"));
-        let target = resolve_wander_target(id, i, &l, desk, &SpotClaims::default());
+        let stage = [IdleStage::Pantry, IdleStage::Rooftop][(i % 2) as usize];
+        let target = resolve_wander_target(id, i, &l, desk, &SpotClaims::default(), stage);
         let WanderKind::Named { kind, .. } = target.kind else {
             panic!("agent {i} ambled instead of lounging: {target:?}");
         };
-        assert!(lounges(kind), "agent {i} headed for {kind:?}");
+        assert!(
+            stage.hosts(kind),
+            "agent {i} headed for {kind:?} in {stage:?}"
+        );
     }
 }
 

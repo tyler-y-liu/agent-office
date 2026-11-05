@@ -942,6 +942,9 @@ pub enum WallDecor {
     MeetingScreen,
     /// agent-office: the rooftop's water tank.
     WaterTank,
+    /// agent-office: your office's bookshelf, standing against its north
+    /// wall: the bookshelf's slot draws Guan Gong's shrine.
+    OfficeShelf,
 }
 
 impl WallDecor {
@@ -954,6 +957,7 @@ impl WallDecor {
         WallDecor::ExitSign,
         WallDecor::MeetingScreen,
         WallDecor::WaterTank,
+        WallDecor::OfficeShelf,
     ];
 
     /// Geometry kind in the unified [`Furniture`] table.
@@ -965,6 +969,7 @@ impl WallDecor {
             WallDecor::ExitSign => Furniture::ExitSign,
             WallDecor::MeetingScreen => Furniture::MeetingScreen,
             WallDecor::WaterTank => Furniture::WaterTank,
+            WallDecor::OfficeShelf => Furniture::Bookshelf,
         }
     }
 
@@ -984,6 +989,7 @@ impl WallDecor {
             WallDecor::ExitSign => Piece::ExitSign,
             WallDecor::MeetingScreen => Piece::MeetingScreen,
             WallDecor::WaterTank => Piece::WaterTank,
+            WallDecor::OfficeShelf => Piece::OfficeShelf,
         }
     }
 }

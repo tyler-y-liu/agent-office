@@ -309,7 +309,11 @@ pub(crate) fn sit_down_as(
     let home = layout
         .home_desks
         .iter()
-        .position(|d| d.facing == facing)
+        // agent-office: clear of the floor's west edge, as the first desk was
+        // before the benches spanned the floor: at the westmost desk the
+        // sitter sorts rows below where its figure ends, so a pet a test
+        // stands on its sort row lies where the figure does not reach.
+        .position(|d| d.facing == facing && d.at.x > 40)
         .expect("the office has a desk facing that way");
     let now0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut scene = pixtuoid_core::SceneState::uniform(16);
@@ -629,7 +633,8 @@ fn no_run_overprints_another_on_its_line() {
             office,
             &TextRun::signs(
                 quiet_board(),
-                layout.door,
+                &layout,
+                &[],
                 crate::floor::FloorMeta::ground(),
                 &crate::theme::NORMAL,
             ),
@@ -998,7 +1003,8 @@ fn a_back_view_sofa_seats_its_sitter_between_its_seat_and_its_backrest() {
 fn the_table_sorts_behind_the_back_view_sofas_seat_in_the_tightest_room() {
     let pack = test_office();
     let mut checked = 0;
-    for (w, h) in [(110, 66), (130, 90)] {
+    // agent-office: the narrowest south-row meeting rooms that seat a trio.
+    for (w, h) in [(160, 120), (170, 110)] {
         for seed in 0..4 {
             let Some(layout) = SceneLayout::compute_with_seed(w, h, None, seed) else {
                 continue;

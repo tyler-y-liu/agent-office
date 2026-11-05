@@ -3858,7 +3858,11 @@ fn pantry_doorway_gets_a_centered_entry_mat() {
     let dw = l
         .doorways
         .iter()
-        .find(|d| d.start.y == d.end.y && d.start.y == p.bounds.y)
+        .find(|d| {
+            d.start.y == d.end.y
+                && d.start.y == p.bounds.y
+                && (p.bounds.x..p.bounds.x + p.bounds.width).contains(&d.start.x)
+        })
         .expect("the pantry north door");
     let theme = crate::theme::theme_by_name("normal").expect("theme");
     let floor = Rgb {
@@ -4481,7 +4485,9 @@ fn a_running_agent_releases_the_seat_it_snapped_back_from() {
     let id = pixtuoid_core::AgentId::from_transcript_path("/p/claim-release.jsonl");
     let mut slot = make_slot(id, ActivityState::Idle);
     slot.created_at = now0;
-    slot.state_started_at = now0;
+    // agent-office: long idle, so it heads for a sofa rather than standing at
+    // the pantry counter.
+    slot.state_started_at = now0 - Duration::from_millis(crate::pose::IDLE_ROOFTOP_MS);
     slot.last_event_at = now0;
     let mut scene = SceneState::uniform(16);
     scene.agents.insert(id, slot);
@@ -4600,10 +4606,14 @@ fn one_meeting_sofa_still_seats_three_agents_at_once() {
 
     let now0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut scene = SceneState::uniform(64);
+    // agent-office: the meeting rooms seat teams, so one session and its
+    // long-running sub-agents fill the room.
+    let lead = pixtuoid_core::AgentId::from_transcript_path("/p/sofa0.jsonl");
     for i in 0..TEST_DEFAULT_DESKS {
         let id = pixtuoid_core::AgentId::from_transcript_path(&format!("/p/sofa{i}.jsonl"));
         let mut slot = make_slot(id, ActivityState::Idle);
-        let started = now0 - Duration::from_secs(5 + (i as u64 * 11) % 80);
+        slot.parent_id = (i > 0).then_some(lead);
+        let started = now0 - Duration::from_secs(20 + (i as u64 * 11) % 80);
         slot.created_at = started;
         slot.state_started_at = started;
         slot.last_event_at = started;
@@ -4662,10 +4672,14 @@ fn a_meeting_chair_sitter_is_drawn_on_the_seat_not_5px_high() {
         SceneLayout::compute_with_seed(192, 160, Some(TEST_DEFAULT_DESKS), 0).expect("fits");
     let now0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut scene = SceneState::uniform(64);
+    // agent-office: the meeting rooms seat teams, so one session and its
+    // long-running sub-agents fill the room.
+    let lead = pixtuoid_core::AgentId::from_transcript_path("/p/mc0.jsonl");
     for i in 0..TEST_DEFAULT_DESKS {
         let id = pixtuoid_core::AgentId::from_transcript_path(&format!("/p/mc{i}.jsonl"));
         let mut slot = make_slot(id, ActivityState::Idle);
-        let started = now0 - Duration::from_secs(5 + (i as u64 * 11) % 80);
+        slot.parent_id = (i > 0).then_some(lead);
+        let started = now0 - Duration::from_secs(20 + (i as u64 * 11) % 80);
         slot.created_at = started;
         slot.state_started_at = started;
         slot.last_event_at = started;
@@ -5933,7 +5947,8 @@ fn the_outside_reaches_only_the_glass() {
         },
         covered,
     );
-    for kind in ["neon sign", "notice board"] {
+    // agent-office: no notice board: the meeting rooms are under no window.
+    for kind in ["neon sign"] {
         let over_glass = layout.fixtures().any(|f| {
             let named = match f.kind {
                 FixtureKind::NeonSign => "neon sign",

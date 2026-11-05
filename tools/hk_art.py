@@ -5,9 +5,9 @@ rooftop's own pieces.
 Each piece is drawn at @4x with flat fills, outlined in the pack's `κ` round
 its silhouette as the upstream art is, then shrunk to its 1x base. A redrawn
 slot keeps the slot's size (the layout and the hover boxes key off it), so
-only the look changes. A new piece (rooftop_*, laundry_pole, water_tank) also
-needs its `Piece` in pixtuoid-core and its `[animations]` entries in pack.toml,
-written by hand. Writes into vendor/pixtuoid-scene/sprites/default; the palette
+only the look changes. A new piece (rooftop_*, laundry_pole, water_tank,
+office_shelf) also needs its `Piece` in pixtuoid-core and its `[animations]`
+entries in pack.toml, written by hand. Writes into vendor/pixtuoid-scene/sprites/default; the palette
 keys it uses beyond pixtuoid's are under "agent-office: Hong Kong" in
 pack.toml.
 
@@ -462,41 +462,71 @@ def stool(a, x, top, w, base):
 
 
 def rooftop_bench(name, comment):
-    """Three plastic stools in a row, where a meeting room has its sofa: the
-    same from either side."""
+    """A backless park bench in the meeting room's sofa slot: teak slats on
+    two cast-iron legs, the same from either side, so it faces the sea."""
     a = Art(80, 28)
-    for x in (2, 29, 56):
-        stool(a, x, 11, 22, 27)
+    # The seat: three slats with the gaps between, lit along their tops.
+    for i, y in enumerate((10, 14, 18)):
+        a.rect(2, y, 76, 3, WOOD)
+        a.hline(2, y, 76, WOOD_LIT)
+        a.hline(2, y + 2, 76, WOOD_DARK)
+    # Cast-iron ends, scrolled at the foot.
+    for x in (6, 68):
+        a.rect(x, 9, 6, 13, STEEL_DARK)
+        a.rect(x + 1, 22, 4, 4, STEEL_DARK)
+        a.rect(x - 2, 25, 10, 2, STEEL_DARK)
+        a.vline(x + 1, 10, 11, STEEL)
     write(name, a, comment)
 
 
 def rooftop_table():
-    """A folding table: a pale top on crossed legs, iced lemon teas and a
-    bottle of beer."""
+    """A round bistro table: a white marble top on an iron pedestal, iced
+    lemon teas and a slice of egg tart."""
     a = Art(44, 20)
-    a.rect(1, 3, 42, 7, FORMICA)
-    a.hline(1, 3, 42, WHITE)
-    a.rect(1, 10, 42, 2, STEEL)
-    for i in range(7):
-        a.put(6 + i * 2, 12 + i, STEEL_LIT)
-        a.put(18 - i * 2, 12 + i, STEEL_LIT)
-        a.put(26 + i * 2, 12 + i, STEEL_LIT)
-        a.put(38 - i * 2, 12 + i, STEEL_LIT)
-    for gx in (5, 30):
-        a.rect(gx, 1, 4, 6, LEMON_TEA)
+    # The top, an ellipse seen from above and in front.
+    for y in range(0, 10):
+        half = int(21 * (1 - ((y - 4.5) / 5) ** 2) ** 0.5)
+        a.hline(22 - half, y, 2 * half, TILE)
+    for y in (7, 8, 9):
+        half = int(21 * (1 - ((y - 4.5) / 5) ** 2) ** 0.5)
+        a.hline(22 - half, y, 2 * half, GROUT)
+    a.put(12, 3, GROUT)
+    a.put(13, 4, GROUT)
+    a.put(29, 5, GROUT)
+    # The pedestal and its foot.
+    a.rect(20, 10, 4, 7, STEEL_DARK)
+    a.rect(14, 17, 16, 2, STEEL_DARK)
+    a.hline(15, 17, 14, STEEL)
+    # Two iced lemon teas and a tart.
+    for gx in (9, 30):
+        a.rect(gx, 1, 4, 5, LEMON_TEA)
         a.hline(gx, 1, 4, WHITE)
-        a.rect(gx + 1, 3, 2, 1, TART)
-        a.vline(gx + 3, 0, 3, WHITE)
-    a.rect(19, 2, 3, 6, BEER)
-    a.rect(20, 0, 1, 2, BEER)
-    a.rect(13, 5, 4, 2, BUN)
-    write("rooftop_table", a, "A folding table on the rooftop: lemon teas and a beer.")
+        a.vline(gx + 3, 0, 2, WHITE)
+    a.rect(19, 3, 5, 2, TART)
+    a.hline(19, 5, 5, BUN_TOP)
+    write("rooftop_table", a, "A bistro table on the rooftop: marble, lemon teas and a tart.")
 
 
 def rooftop_stool():
+    """A bistro chair at the table's end: a round seat on a wire frame, its
+    hooped back on the far side."""
     a = Art(28, 28)
-    stool(a, 4, 12, 20, 27)
-    write("rooftop_stool", a, "A red plastic stool at the end of the folding table.")
+    # The hooped back.
+    a.rect(4, 4, 2, 13, STEEL_DARK)
+    a.rect(4, 4, 10, 2, STEEL_DARK)
+    a.vline(9, 5, 11, STEEL)
+    # The round seat, teak.
+    a.rect(4, 15, 20, 4, WOOD)
+    a.hline(4, 15, 20, WOOD_LIT)
+    a.hline(4, 18, 20, WOOD_DARK)
+    # Splayed wire legs.
+    for i in range(8):
+        y = 19 + i
+        a.put(6 - i // 3, y, STEEL_DARK)
+        a.put(21 + i // 3, y, STEEL_DARK)
+        a.put(11 - i // 4, y, STEEL)
+        a.put(16 + i // 4, y, STEEL)
+    write("rooftop_stool", a, "A bistro chair at the end of the rooftop's table.")
 
 
 def laundry_pole():
@@ -835,6 +865,38 @@ def desks():
     remap("filing_cabinet", lambda k, *_: CABINET_KEYS.get(k, k))
 
 
+def office_shelf():
+    """Your office's bookshelf: rosewood, four shelves of books in their
+    spines' colours, a gold lucky cat and a porcelain vase among them."""
+    a = Art(32, 48)
+    a.rect(0, 0, 32, 48, ROSEWOOD)
+    a.hline(0, 0, 32, ROSEWOOD_LIT)
+    a.rect(0, 45, 32, 3, ROSEWOOD_DARK)
+    spines = [LUCKY_RED, PORCELAIN_BLUE, DINER_GREEN, GOLD_DARK, BOARD, CLAY, LEATHER]
+    for shelf, top in enumerate((3, 14, 25, 36)):
+        a.rect(2, top, 28, 9, ROSEWOOD_DARK)
+        x, i = 3, shelf * 3
+        while x < 29:
+            w = 2 + (i * 5 + shelf) % 2
+            h = 6 + (i * 7 + shelf) % 3
+            if (i + shelf) % 6 == 5:
+                # A gap with an ornament in it.
+                if shelf == 1:
+                    a.rect(x, top + 4, 4, 5, GOLD)
+                    a.rect(x + 1, top + 3, 2, 1, GOLD_LIT)
+                else:
+                    a.rect(x, top + 3, 3, 6, PORCELAIN_BLUE)
+                    a.vline(x + 1, top + 4, 4, WHITE)
+                x += 5
+            else:
+                a.rect(x, top + 9 - h, w, h, spines[i % len(spines)])
+                a.put(x, top + 9 - h + 1, GOLD_LIT)
+                x += w
+            i += 1
+        a.hline(1, top + 9, 30, ROSEWOOD_LIT)
+    write("office_shelf", a, "Your office's rosewood bookshelf.")
+
+
 def palette_block():
     lines = ["# --- agent-office: Hong Kong (tools/hk_art.py)"]
     lines += [f'"{k}" = "{v}"   # {c}' for k, (v, c) in PALETTE.items()]
@@ -867,8 +929,8 @@ def main():
         fu,
         couplets,
         desks,
-        lambda: rooftop_bench("rooftop_bench", "Plastic stools in a row on the rooftop."),
-        lambda: rooftop_bench("rooftop_bench_north", "Plastic stools in a row, from behind."),
+        lambda: rooftop_bench("rooftop_bench", "A backless teak bench on the rooftop, facing the sea."),
+        lambda: rooftop_bench("rooftop_bench_north", "A backless teak bench on the rooftop, from behind."),
         rooftop_table,
         rooftop_stool,
         laundry_pole,
@@ -879,6 +941,7 @@ def main():
         quote_screen,
         shrine,
         water_tank,
+        office_shelf,
     ):
         draw()
     print("drew the Hong Kong pieces")

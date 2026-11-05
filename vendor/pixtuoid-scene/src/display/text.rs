@@ -205,7 +205,8 @@ impl Badge {
         Self {
             agent: agent.agent_id,
             at: anchor,
-            marker: ink.marker,
+            // agent-office: its repository's colour.
+            marker: crate::badge::repo_hue(agent, &namesakes.2).unwrap_or(ink.marker),
             name: TextSpan::new(text, ink.name),
             plate: crate::badge::badge_plate_colour(theme),
         }
@@ -293,6 +294,10 @@ pub enum TextRole {
     Indicator,
     /// An agent's chitchat bubble.
     Bubble(AgentId),
+    /// agent-office: a zone's sign by its door.
+    DoorSign,
+    /// agent-office: a bench's plate naming the repository sat at it.
+    BenchPlate,
 }
 
 impl TextRun {
@@ -342,17 +347,186 @@ impl TextRun {
         }
     }
 
-    /// The room's signs: `board`'s lines, then the floor indicator naming
-    /// `floor` over the elevator at `door`.
+    /// The room's signs: `board`'s lines, the floor indicator naming
+    /// `floor` over the elevator, then agent-office's door signs and the
+    /// benches' plates for `agents` on this floor.
     pub(crate) fn signs(
         board: &crate::neon_sign::BoardModel,
-        door: Point,
+        layout: &crate::layout::SceneLayout,
+        agents: &[pixtuoid_core::AgentSlot],
         floor: crate::floor::FloorMeta,
         theme: &Theme,
     ) -> Vec<Self> {
         let mut runs = board.runs(theme);
-        runs.push(Self::indicator(door, floor, theme));
+        runs.push(Self::indicator(layout.door, floor, theme));
+        runs.extend(Self::door_signs(layout));
+        let here: Vec<_> = agents
+            .iter()
+            .filter(|a| a.floor_idx == floor.floor_idx)
+            .cloned()
+            .collect();
+        runs.extend(Self::bench_plates(layout, &here));
         runs
+    }
+
+    /// agent-office: a plate over each bench naming the repository its
+    /// sitters work in, on that repository's colour ([`crate::badge::repo_hues`]),
+    /// so the benches read as projects; a bench shared by several names its
+    /// first sitter's, and an empty bench has none. `agents` are the floor's.
+    pub(crate) fn bench_plates(
+        layout: &crate::layout::SceneLayout,
+        agents: &[pixtuoid_core::AgentSlot],
+    ) -> Vec<Self> {
+        let hues = crate::badge::repo_hues(agents);
+        // A bench is a row of desks a desk's stride apart, facing one way;
+        // an aisle parts two in a row, and a pod's two rows face each other.
+        let stride = crate::layout::DESK_W + crate::layout::INTRA_POD_GAP_X;
+        let mut desks: Vec<crate::layout::HomeDesk> = layout.home_desks.clone();
+        desks.sort_by_key(|d| (d.at.y, d.at.x));
+        let mut benches: Vec<(u16, u16, crate::layout::HomeDesk)> = Vec::new();
+        for d in desks {
+            match benches.last_mut() {
+                Some((_, last, first)) if first.at.y == d.at.y && d.at.x - *last <= stride => {
+                    *last = d.at.x;
+                }
+                _ => benches.push((d.at.x, d.at.x, d)),
+            }
+        }
+        benches
+            .into_iter()
+            .filter_map(|(x0, x1, first)| {
+                let sitter = agents
+                    .iter()
+                    .filter(|a| {
+                        layout
+                            .home_desk(a.desk_index.single_floor_local())
+                            .is_some_and(|d| d.at.y == first.at.y && (x0..=x1).contains(&d.at.x))
+                    })
+                    .min_by_key(|a| (a.created_at, a.agent_id))?;
+                // The repository's own name, as its directory has it (a
+                // worktree is its repository's).
+                let repo = pixtuoid_core::state::project_root(&sitter.cwd)
+                    .file_name()?
+                    .to_string_lossy()
+                    .into_owned();
+                let plate = crate::badge::repo_hue(sitter, &hues)?;
+                Some(Self {
+                    // On the sitters' side of the screens: over a row facing
+                    // the viewer, under one facing the windows.
+                    at: Point {
+                        x: (x0 + x1 + crate::layout::DESK_W) / 2,
+                        y: match first.facing {
+                            crate::layout::Facing::North => {
+                                first.at.y + crate::layout::DESK_H + BENCH_PLATE_DROP
+                            }
+                            _ => first.at.y.saturating_sub(BENCH_PLATE_LIFT),
+                        },
+                    },
+                    align: Align::Centre,
+                    spans: vec![TextSpan::new(
+                        repo,
+                        Rgb {
+                            r: 0x16,
+                            g: 0x18,
+                            b: 0x1d,
+                        },
+                    )],
+                    plate: Some(plate),
+                    strip: None,
+                    role: TextRole::BenchPlate,
+                })
+            })
+            .collect()
+    }
+
+    /// agent-office: a sign on each zone's north wall over its door, in the
+    /// zone's colour, so the plan reads at a glance: the meeting rooms, the
+    /// pantry, the waiting area, your office, and the rooftop's door out.
+    pub(crate) fn door_signs(layout: &crate::layout::SceneLayout) -> Vec<Self> {
+        use crate::layout::RoomStyle;
+        const INK: Rgb = Rgb {
+            r: 0xf6,
+            g: 0xf2,
+            b: 0xe8,
+        };
+        let sign = |x: u16, y: u16, text: String, plate: Rgb| Self {
+            at: Point { x, y },
+            align: Align::Centre,
+            spans: vec![TextSpan::new(text, INK)],
+            plate: Some(plate),
+            strip: None,
+            role: TextRole::DoorSign,
+        };
+        let door_x = |b: crate::layout::Bounds, pct: u16| b.x + crate::layout::pct(b.width, pct);
+        let mut meeting = 0u8;
+        let mut out: Vec<Self> = layout
+            .meeting_rooms
+            .iter()
+            .filter_map(|r| {
+                let b = r.bounds;
+                let (x, text, plate) = match r.style {
+                    RoomStyle::Office => {
+                        meeting += 1;
+                        (
+                            door_x(b, 50),
+                            format!("MTG {}", char::from(b'@' + meeting)),
+                            Rgb {
+                                r: 0x2f,
+                                g: 0x5f,
+                                b: 0xa8,
+                            },
+                        )
+                    }
+                    RoomStyle::Waiting => (
+                        door_x(b, 50),
+                        "WAIT".to_owned(),
+                        Rgb {
+                            r: 0xb3,
+                            g: 0x78,
+                            b: 0x1e,
+                        },
+                    ),
+                    RoomStyle::Boss => (
+                        door_x(b, crate::layout::OFFICE_DOOR_PCT),
+                        "OFFICE".to_owned(),
+                        Rgb {
+                            r: 0x86,
+                            g: 0x2c,
+                            b: 0x22,
+                        },
+                    ),
+                    RoomStyle::Rooftop => return None,
+                };
+                Some(sign(x, b.y.saturating_sub(SIGN_LIFT), text, plate))
+            })
+            .collect();
+        if let Some(p) = layout.pantry {
+            let b = p.bounds;
+            out.push(sign(
+                door_x(b, 50),
+                b.y.saturating_sub(SIGN_LIFT),
+                "PANTRY".to_owned(),
+                Rgb {
+                    r: 0x24,
+                    g: 0x75,
+                    b: 0x52,
+                },
+            ));
+        }
+        if let Some(roof) = layout.rooftop() {
+            let b = roof.bounds;
+            out.push(sign(
+                b.x + b.width / 2,
+                layout.corridor.y.saturating_sub(SIGN_LIFT),
+                "ROOF".to_owned(),
+                Rgb {
+                    r: 0x1f,
+                    g: 0x7f,
+                    b: 0x77,
+                },
+            ));
+        }
+        out
     }
 
     /// `bubble` over its speaker's badge, which hangs over `badge_at`, in
@@ -388,6 +562,15 @@ impl TextRun {
     }
 }
 
+/// agent-office: rows a bench's plate stands over a row facing the viewer,
+/// and under a row facing the windows, past its sitters' chairs.
+const BENCH_PLATE_LIFT: u16 = 7;
+const BENCH_PLATE_DROP: u16 = 3;
+
+/// agent-office: rows a door sign stands above its wall's line, on the
+/// corridor side.
+const SIGN_LIFT: u16 = 3;
+
 /// The cells of `map` a line `w` cells wide takes, placed by `at` as `align`
 /// says: the row `at`'s cell lies in, `LABEL_GAP` rows up for
 /// [`Align::Over`].
@@ -410,6 +593,68 @@ fn line_at(at: Point, align: Align, w: u16, map: CellMap) -> CellRect {
 
 #[cfg(test)]
 mod tests {
+
+    /// agent-office: each bench row with a sitter names the repository it
+    /// works in, on that repository's colour, so the benches read as
+    /// projects; an empty row has no plate.
+    #[test]
+    fn each_occupied_bench_names_its_repository() {
+        use crate::character::test_support::make_slot;
+        let l = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+        let mut a = make_slot(
+            pixtuoid_core::AgentId::from_transcript_path("/p/a.jsonl"),
+            pixtuoid_core::state::ActivityState::Idle,
+        );
+        a.label = "cc·agent-office".into();
+        a.cwd = std::sync::Arc::from(std::path::Path::new("/w/agent-office"));
+        a.desk_index = pixtuoid_core::state::GlobalDeskIndex(0);
+        let agents = [a];
+        let plates = super::TextRun::bench_plates(&l, &agents);
+        assert_eq!(plates.len(), 1, "one occupied row, one plate");
+        let plate = &plates[0];
+        assert_eq!(plate.text(), "agent-office");
+        let hues = crate::badge::repo_hues(&agents);
+        assert_eq!(plate.plate, crate::badge::repo_hue(&agents[0], &hues));
+        let desk = l.home_desks[0];
+        assert!(
+            plate.at.x.abs_diff(desk.at.x) < 4 * (crate::layout::DESK_W + 4),
+            "over its own bench"
+        );
+    }
+
+    /// agent-office: every zone is named by a sign over its door, in a colour
+    /// of its own, so the plan reads at a glance; a zone the window has no
+    /// room for has no sign.
+    #[test]
+    fn each_zone_is_signed_once_in_its_own_colour() {
+        let wide = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+        let signs = super::TextRun::door_signs(&wide);
+        let names: Vec<String> = signs.iter().map(super::TextRun::text).collect();
+        for name in ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"] {
+            assert_eq!(
+                names.iter().filter(|n| *n == name).count(),
+                1,
+                "{name} in {names:?}"
+            );
+        }
+        let mut plates: Vec<_> = signs
+            .iter()
+            .filter(|s| s.text() != "MTG B")
+            .map(|s| s.plate)
+            .collect();
+        plates.dedup();
+        assert_eq!(plates.len(), 5, "a colour per kind of zone");
+        let narrow =
+            crate::layout::SceneLayout::compute_with_seed(160, 120, None, 0).expect("fits");
+        let names: Vec<String> = super::TextRun::door_signs(&narrow)
+            .iter()
+            .map(super::TextRun::text)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "ROOF" || n == "MTG B"),
+            "no sign for a zone that is not there: {names:?}"
+        );
+    }
     use super::*;
 
     /// The indicator's arrow is hollow and dim where no floor is its way:

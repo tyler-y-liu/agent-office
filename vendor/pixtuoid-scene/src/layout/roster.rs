@@ -198,6 +198,8 @@ pub enum FixtureKind {
     MeetingTable {
         /// Its room.
         room: usize,
+        /// agent-office: which of its tables ([`MeetingTrio::tables`]).
+        table: usize,
     },
     /// A head-of-table meeting chair.
     MeetingChair {
@@ -284,6 +286,7 @@ impl FixtureKind {
                 WallDecor::ExitSign => "Exit Sign",
                 WallDecor::MeetingScreen => "Meeting Screen",
                 WallDecor::WaterTank => "Water Tank",
+                WallDecor::OfficeShelf => "Bookshelf",
             },
             FixtureKind::MeetingRug { .. } | FixtureKind::LoungeRug => "Rug",
             FixtureKind::MeetingSofa { .. } => "Meeting Sofa",
@@ -488,7 +491,7 @@ impl SceneLayout {
                 style: _,
             } = r;
             let trio = trio.map(|t| {
-                let MeetingTrio { sofas, table } = t;
+                let MeetingTrio { sofas, table, .. } = t;
                 (t, sofas, table)
             });
             (room, r, trio)
@@ -552,12 +555,20 @@ impl SceneLayout {
             .chain(desk_fixtures(home_desks.iter().map(|d| d.at), *buf_h))
             .chain(rooms.clone().filter_map(move |(room, r, trio)| {
                 // agent-office: the rooftop's stools stand on its painted
-                // concrete, not a rug.
-                if r.style == super::RoomStyle::Rooftop {
+                // concrete, the waiting area's seats on its marble and your
+                // office's on its herringbone, not a rug.
+                if r.style != super::RoomStyle::Office {
                     return None;
                 }
                 // Off the corridor runner a south room's floor runs into.
-                let rug = trio?.0.rug(corridor.y);
+                // agent-office: a room south of the corridor runs to the
+                // floor's south edge.
+                let end = if r.bounds.y >= corridor.y {
+                    *buf_h
+                } else {
+                    corridor.y
+                };
+                let rug = trio?.0.rug(end);
                 Some(Fixture {
                     kind: FixtureKind::MeetingRug { room },
                     at: top_left(rug),
@@ -566,8 +577,9 @@ impl SceneLayout {
                 })
             }))
             .chain(rooms.clone().flat_map(|(room, _, trio)| {
-                trio.into_iter().flat_map(move |(_, sofas, table)| {
-                    sofas.into_iter().enumerate().map(move |(seat, sofa)| {
+                // agent-office: the sofas that stand.
+                trio.into_iter().flat_map(move |(t, _, table)| {
+                    t.sofa_seats().map(move |(seat, sofa)| {
                         let faces_away = sofa.y >= table.y;
                         Fixture {
                             kind: FixtureKind::MeetingSofa {
@@ -589,13 +601,16 @@ impl SceneLayout {
                     })
                 })
             }))
-            .chain(rooms.clone().filter_map(|(room, _, trio)| {
-                let (_, _, table) = trio?;
-                Some(centred_row(
-                    FixtureKind::MeetingTable { room },
-                    table,
-                    Furniture::MeetingTable,
-                ))
+            .chain(rooms.clone().flat_map(|(room, _, trio)| {
+                trio.into_iter().flat_map(move |(t, _, _)| {
+                    t.tables().enumerate().map(move |(table, at)| {
+                        centred_row(
+                            FixtureKind::MeetingTable { room, table },
+                            at,
+                            Furniture::MeetingTable,
+                        )
+                    })
+                })
             }))
             .chain(
                 island.map(|at| {
@@ -828,7 +843,13 @@ impl SceneLayout {
         let dw = self
             .doorways
             .iter()
-            .find(|d| d.start.y == d.end.y && d.start.y == p.bounds.y)?;
+            // agent-office: the south row's doors share a row, so the pantry's
+            // is the one in its own columns.
+            .find(|d| {
+                d.start.y == d.end.y
+                    && d.start.y == p.bounds.y
+                    && (p.bounds.x..p.bounds.x + p.bounds.width).contains(&d.start.x)
+            })?;
         let mut mat = centred(
             Point {
                 x: u16::midpoint(dw.start.x, dw.end.x),

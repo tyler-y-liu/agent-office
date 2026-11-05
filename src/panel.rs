@@ -1,7 +1,9 @@
 //! The always-on task list beside the office: one card per agent, its
-//! subagents under it, whoever is waiting on you first.
+//! subagents under it, grouped by what each needs from you — waiting on you
+//! first — and each group named after where its agents are in the office.
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use pixtuoid_core::sprite::Rgb;
 use pixtuoid_core::{ActivityState, AgentId, AgentSlot, SceneState, ToolUse};
@@ -22,16 +24,90 @@ const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
 const WORK: Color = Color::Rgb(0x7d, 0xcf, 0xff);
 const STUCK: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);
+/// Text on a coloured chip or avatar.
+const CHIP_INK: Color = Color::Rgb(0x16, 0x18, 0x1d);
 
 #[derive(Debug, Default)]
 pub struct PanelState {
     pub selected: Option<AgentId>,
     pub expanded: bool,
+    /// When you last opened each session from here: what it had done by
+    /// then is read.
+    pub seen: HashMap<AgentId, SystemTime>,
 }
 
-/// The agents in display order: roots waiting on you first, then working,
-/// then idle (oldest first within each), each followed by its subagents.
-pub fn order(scene: &SceneState) -> Vec<(AgentId, u8)> {
+/// Whether `slot` is idle and was opened since it went idle: its result is
+/// read, so it no longer waits in the pantry to be looked at.
+pub fn read_since_idle(slot: &AgentSlot, seen: &HashMap<AgentId, SystemTime>) -> bool {
+    matches!(slot.state, ActivityState::Idle)
+        && seen
+            .get(&slot.agent_id)
+            .is_some_and(|&at| at >= slot.state_started_at)
+}
+
+/// What a session needs from you, which is also where it is in the office.
+/// Declared in the order the panel lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// Waiting on a prompt or question: answer it.
+    Waiting,
+    /// Working but stuck: have a look.
+    Stuck,
+    /// Done a while ago at most, in the pantry: read what it did.
+    Done,
+    /// Working.
+    Working,
+    /// Idle long enough to have gone up to the rooftop.
+    Idle,
+}
+
+impl Group {
+    /// `read` says it was opened since it went idle ([`read_since_idle`]).
+    pub fn of(slot: &AgentSlot, view: Option<&TaskView>, now: SystemTime, read: bool) -> Self {
+        if crate::tasks::stuck_at_work(slot, view).is_some() {
+            return Self::Stuck;
+        }
+        if read {
+            return Self::Idle;
+        }
+        match slot.state {
+            ActivityState::RequiresAction { .. } => Self::Waiting,
+            ActivityState::Running { .. } => Self::Working,
+            // The office's own threshold, so the card and the figure agree.
+            ActivityState::Idle
+                if now
+                    .duration_since(slot.state_started_at)
+                    .unwrap_or_default()
+                    .as_millis()
+                    < u128::from(pixtuoid_scene::pose::IDLE_ROOFTOP_MS) =>
+            {
+                Self::Done
+            }
+            ActivityState::Idle => Self::Idle,
+        }
+    }
+
+    /// The group's header: what it needs from you, then where they are.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Waiting => "等你批 · 等候区",
+            Self::Stuck => "卡住 · 工位",
+            Self::Done => "做完待看 · 茶水间",
+            Self::Working => "干活 · 工位",
+            Self::Idle => "闲着 · 天台",
+        }
+    }
+}
+
+/// The agents in display order: roots grouped by [`Group`], those waiting on
+/// you in the order they started waiting (the office's waiting line), the
+/// rest oldest first; each followed by its subagents.
+pub fn order(
+    scene: &SceneState,
+    views: &TaskViews,
+    now: SystemTime,
+    seen: &HashMap<AgentId, SystemTime>,
+) -> Vec<(AgentId, u8)> {
     let cc: Vec<&AgentSlot> = scene
         .agents
         .values()
@@ -43,12 +119,15 @@ pub fn order(scene: &SceneState) -> Vec<(AgentId, u8)> {
         .copied()
         .filter(|s| !s.parent_id.as_ref().is_some_and(is_shown))
         .collect();
-    let rank = |s: &AgentSlot| match s.state {
-        ActivityState::RequiresAction { .. } => 0,
-        ActivityState::Running { .. } => 1,
-        ActivityState::Idle => 2,
-    };
-    roots.sort_by_key(|s| (rank(s), s.created_at));
+    roots.sort_by_key(|s| {
+        let g = Group::of(s, views.get(&s.agent_id), now, read_since_idle(s, seen));
+        let since = if g == Group::Waiting {
+            s.state_started_at
+        } else {
+            s.created_at
+        };
+        (g, since)
+    });
     let mut out = Vec::new();
     for r in roots {
         push_tree(&cc, r, 0, &mut out);
@@ -87,6 +166,25 @@ pub fn step(order: &[(AgentId, u8)], cur: Option<AgentId>, delta: isize) -> Opti
     Some(order[i].0)
 }
 
+fn group_color(g: Group) -> Color {
+    match g {
+        Group::Waiting => WAIT,
+        Group::Stuck => STUCK,
+        Group::Done => TASK,
+        Group::Working => WORK,
+        Group::Idle => DIM,
+    }
+}
+
+/// The first letter of the repository a label names (`cc·repo`), as an
+/// avatar shows it.
+fn avatar_initial(label: &str) -> char {
+    let repo = label.split_once('·').map_or(label, |(_, r)| r);
+    repo.chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or('?', |c| c.to_uppercase().next().unwrap_or(c))
+}
+
 fn rgb(c: Rgb) -> Color {
     Color::Rgb(c.r, c.g, c.b)
 }
@@ -96,9 +194,7 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>) -> (String, Color) {
         return ("离开中".into(), DIM);
     }
     // Waiting on the user says what to do; a stuck verdict is for one working.
-    if let Some(s) = view.and_then(|v| v.stuck)
-        && matches!(slot.state, ActivityState::Running { .. })
-    {
+    if let Some(s) = crate::tasks::stuck_at_work(slot, view) {
         return (format!("⚠ {}", s.describe()), STUCK);
     }
     match &slot.state {
@@ -195,22 +291,37 @@ fn card(
     };
     let pad = pad.as_str();
     let body_w = w.saturating_sub(pad.len() as u16);
-    let marker = ink.map_or(TEXT, rgb);
+    let marker = ink.map_or(DIM, rgb);
     let (st, st_color) = status(slot, view);
     let name = match view.and_then(|v| v.agent_type.as_deref()) {
         Some(t) if depth > 0 && !slot.label.contains(t) => format!("{t} {}", &*slot.label),
         _ => slot.label.to_string(),
     };
-    let name_w = w.saturating_sub(indent.chars().count() as u16 + 2 + crate::text::cells(&st) + 1);
+    let chip = format!(" {st} ");
+    let avatar = format!(" {} ", avatar_initial(&slot.label));
+    let name_w = w.saturating_sub(
+        indent.chars().count() as u16
+            + crate::text::cells(&avatar)
+            + 1
+            + crate::text::cells(&chip)
+            + 1,
+    );
     let mut lines = vec![Line::from(vec![
         Span::raw(indent.clone()),
-        Span::styled("● ", Style::default().fg(marker)),
+        Span::styled(
+            avatar,
+            Style::default()
+                .bg(marker)
+                .fg(CHIP_INK)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
         Span::styled(
             truncate_cells(&name, name_w),
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(st, Style::default().fg(st_color)),
+        Span::styled(chip, Style::default().bg(st_color).fg(CHIP_INK)),
     ])];
     let task = view.and_then(|v| v.line.clone());
     let summarized = view.is_some_and(|v| v.summarized);
@@ -293,7 +404,17 @@ pub fn render(
     inks: &HashMap<AgentId, Rgb>,
     state: &PanelState,
 ) -> Vec<(u16, AgentId)> {
-    let order = order(scene);
+    let now = SystemTime::now();
+    let order = order(scene, views, now, &state.seen);
+    let group_of = |s: &AgentSlot| {
+        Group::of(
+            s,
+            views.get(&s.agent_id),
+            now,
+            read_since_idle(s, &state.seen),
+        )
+    };
+    let hues = pixtuoid_scene::badge::repo_hues(scene.agents.values());
     let waiting = order
         .iter()
         .filter(|(id, _)| {
@@ -340,17 +461,46 @@ pub fn render(
         .filter_map(|(id, depth)| {
             let slot = scene.agents.get(id)?;
             let sel = state.selected == Some(*id);
+            // The repository's colour, as its sitters' badges wear it in
+            // the office.
             let mut lines = card(
                 slot,
                 *depth,
                 views.get(id),
-                inks.get(id).copied(),
+                pixtuoid_scene::badge::repo_hue(slot, &hues).or_else(|| inks.get(id).copied()),
                 sel && state.expanded,
                 inner.width,
             );
-            // A blank line before each root group but the first.
-            if *depth == 0 && !std::ptr::eq(id, &order[0].0) {
-                lines.insert(0, Line::raw(""));
+            // A header over each group's first card, a blank line before
+            // every other root.
+            if *depth == 0 {
+                let group = group_of(slot);
+                let first = order
+                    .iter()
+                    .take_while(|(o, _)| o != id)
+                    .filter(|(_, d)| *d == 0)
+                    .filter_map(|(o, _)| scene.agents.get(o))
+                    .all(|s| group_of(s) != group);
+                if first {
+                    let n = order
+                        .iter()
+                        .filter(|(_, d)| *d == 0)
+                        .filter_map(|(o, _)| scene.agents.get(o))
+                        .filter(|s| group_of(s) == group)
+                        .count();
+                    lines.insert(
+                        0,
+                        Line::from(Span::styled(
+                            format!("{} ({n})", group.title()),
+                            Style::default()
+                                .fg(group_color(group))
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                    );
+                }
+                if !std::ptr::eq(id, &order[0].0) {
+                    lines.insert(0, Line::raw(""));
+                }
             }
             Some(Card { id: *id, lines })
         })
@@ -424,6 +574,30 @@ mod tests {
         id
     }
 
+    /// The office marks a stuck agent at its desk, and the card says so, only
+    /// while it works: one waiting on you is waiting, not stuck, and saying
+    /// "stuck" there would hide that it needs an answer.
+    #[test]
+    fn only_a_working_agent_is_marked_stuck() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let view = TaskView {
+            stuck: Some(crate::tasks::Stuck::Failing(3)),
+            ..TaskView::default()
+        };
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Running { item: None };
+        assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_some());
+        assert_eq!(status(slot, Some(&view)).1, STUCK);
+        slot.state = ActivityState::RequiresAction { reason: None };
+        assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
+        assert_eq!(status(slot, Some(&view)).1, WAIT);
+        slot.state = ActivityState::Idle;
+        assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
+    }
+
     #[test]
     fn subagents_sit_under_their_parent_and_selection_stays_in_bounds() {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
@@ -438,7 +612,12 @@ mod tests {
             Some(a),
             t0 + Duration::from_secs(2),
         );
-        let o = order(&scene);
+        let o = order(
+            &scene,
+            &TaskViews::default(),
+            t0 + Duration::from_secs(10),
+            &HashMap::new(),
+        );
         let ids: Vec<AgentId> = o.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, vec![a, a1, b]);
         assert_eq!(o[1].1, 1);
@@ -453,7 +632,12 @@ mod tests {
             Some(a1),
             t0 + Duration::from_secs(3),
         );
-        let o = order(&scene);
+        let o = order(
+            &scene,
+            &TaskViews::default(),
+            t0 + Duration::from_secs(10),
+            &HashMap::new(),
+        );
         assert_eq!(
             o.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![a, a1, a11, b]
@@ -461,6 +645,143 @@ mod tests {
         assert_eq!(
             o[2].1, 2,
             "a subagent's own subagent is listed, one level deeper"
+        );
+    }
+
+    /// The panel lists sessions by what they need from you, most urgent
+    /// first, so the top of the panel is always the next thing to do; those
+    /// waiting on you keep the order they started waiting, the order they
+    /// stand in the office's waiting line.
+    #[test]
+    fn roots_group_by_what_they_need_from_you() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["idle", "work", "done", "stuck", "wait2", "wait1"]
+            .iter()
+            .enumerate()
+            .map(|(i, sid)| {
+                start(
+                    &mut scene,
+                    &mut r,
+                    sid,
+                    None,
+                    t0 + Duration::from_secs(i as u64),
+                )
+            })
+            .collect();
+        let [idle, work, done, stuck, wait2, wait1] = ids[..] else {
+            unreachable!()
+        };
+        let set = |scene: &mut SceneState, id, state, since: Duration| {
+            let s = scene.agents.get_mut(&id).unwrap();
+            s.state = state;
+            s.state_started_at = now - since;
+        };
+        let run = || ActivityState::Running { item: None };
+        let ask = || ActivityState::RequiresAction { reason: None };
+        set(
+            &mut scene,
+            idle,
+            ActivityState::Idle,
+            Duration::from_secs(20 * 60),
+        );
+        set(
+            &mut scene,
+            done,
+            ActivityState::Idle,
+            Duration::from_secs(5 * 60),
+        );
+        set(&mut scene, work, run(), Duration::from_secs(60));
+        set(&mut scene, stuck, run(), Duration::from_secs(60));
+        set(&mut scene, wait2, ask(), Duration::from_secs(30));
+        set(&mut scene, wait1, ask(), Duration::from_secs(90));
+        let views: TaskViews = std::sync::Arc::new(
+            [(
+                stuck,
+                TaskView {
+                    stuck: Some(crate::tasks::Stuck::Failing(3)),
+                    ..TaskView::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let o: Vec<AgentId> = order(&scene, &views, now, &HashMap::new())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(o, vec![wait1, wait2, stuck, done, work, idle]);
+        let group = |id| Group::of(&scene.agents[&id], views.get(&id), now, false);
+        assert_eq!(
+            group(done),
+            Group::Done,
+            "idle under 15 min sits in the pantry"
+        );
+        assert_eq!(
+            group(idle),
+            Group::Idle,
+            "idle 15 min+ is up on the rooftop"
+        );
+    }
+
+    /// A card leads with its repository's initial on the repository's colour
+    /// (the colour its sitters' badges wear) and ends on its status as a chip
+    /// in the status's colour, so a glance down the panel reads project and
+    /// state without reading words.
+    #[test]
+    fn a_card_wears_its_repo_and_its_status() {
+        assert_eq!(avatar_initial("cc·agent-office"), 'A');
+        assert_eq!(avatar_initial("cc·_dotfiles"), 'D');
+        assert_eq!(avatar_initial(""), '?');
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::RequiresAction { reason: None };
+        let ink = Rgb { r: 1, g: 2, b: 3 };
+        let lines = card(slot, 0, None, Some(ink), false, 40);
+        let first = &lines[0].spans;
+        let avatar = first
+            .iter()
+            .find(|s| s.style.bg == Some(rgb(ink)))
+            .expect("an avatar");
+        assert_eq!(
+            avatar.content.trim(),
+            avatar_initial(&slot.label).to_string()
+        );
+        let chip = first.last().expect("a chip");
+        assert_eq!(chip.style.bg, Some(WAIT), "the status on its colour");
+        assert!(chip.content.contains("等你确认"));
+    }
+
+    /// A finished session waits in the pantry, under 做完待看, until you open
+    /// it; opened, its result is read and it is simply idle. Opened while it
+    /// still worked, what it went on to finish is unread.
+    #[test]
+    fn opening_a_finished_session_reads_it() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Idle;
+        slot.state_started_at = now - Duration::from_secs(60);
+        let slot = scene.agents[&a].clone();
+        let group = |seen: &HashMap<AgentId, SystemTime>| {
+            Group::of(&slot, None, now, read_since_idle(&slot, seen))
+        };
+        assert_eq!(group(&HashMap::new()), Group::Done);
+        let opened = HashMap::from([(a, now - Duration::from_secs(10))]);
+        assert_eq!(group(&opened), Group::Idle, "read");
+        let while_working = HashMap::from([(a, now - Duration::from_secs(120))]);
+        assert_eq!(
+            group(&while_working),
+            Group::Done,
+            "finished after it was opened"
         );
     }
 

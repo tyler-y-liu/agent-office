@@ -1,7 +1,7 @@
 //! The meeting room aggregate: bounds + the sofa/table trio.
 
 use super::walls::WALL_H;
-use crate::layout::{Bounds, Furniture, Pivot, Point, anchored_top_left, furniture_def, pct};
+use crate::layout::{Bounds, Furniture, Pivot, Point, Size, anchored_top_left, furniture_def, pct};
 
 /// One meeting room's furniture trio. The fixed-size array encodes the
 /// invariant that a fitted room produces exactly 2 sofas + 1 table.
@@ -11,6 +11,12 @@ pub struct MeetingTrio {
     pub(crate) sofas: [Point; 2],
     /// The table centre, midway between the two sofas (pixel-space).
     pub table: Point,
+    /// agent-office: whether `sofas[0]` stands: the rooftop has the one
+    /// bench, facing the sea over its table.
+    pub(crate) north_sofa: bool,
+    /// agent-office: a second table, its chairs at its ends: the rooftop's
+    /// second bistro table.
+    pub(crate) far_table: Option<Point>,
 }
 
 /// A meeting rug's width.
@@ -19,6 +25,20 @@ const MEETING_RUG_W: u16 = 18;
 const MEETING_RUG_OVERHANG: u16 = 8;
 
 impl MeetingTrio {
+    /// agent-office: the sofas that stand, each with its index in `sofas`.
+    pub(crate) fn sofa_seats(&self) -> impl Iterator<Item = (usize, Point)> + use<> {
+        let north = self.north_sofa;
+        self.sofas
+            .into_iter()
+            .enumerate()
+            .filter(move |&(i, _)| i == 1 || north)
+    }
+
+    /// agent-office: its tables, the one between the sofas first.
+    pub(crate) fn tables(&self) -> impl Iterator<Item = Point> + use<> {
+        std::iter::once(self.table).chain(self.far_table)
+    }
+
     /// The rug under this trio's table, reaching from sofa to sofa but no
     /// further than the table's distance to `ground_end`, the row the ground ends
     /// at (plus the same overhang).
@@ -65,11 +85,17 @@ pub struct MeetingRoom {
 /// idle agents sit out at, under the open sky, with no glass round it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RoomStyle {
-    /// A glass-walled room west of the divider.
+    /// A glass-walled meeting room in the south row.
     #[default]
     Office,
-    /// The open-air rooftop at the east end, past the elevator.
+    /// The open-air rooftop at the west end, out the office's west wall.
     Rooftop,
+    /// agent-office: the waiting area by your office, open to the corridor:
+    /// those waiting on you sit out the wait on its seats.
+    Waiting,
+    /// agent-office: your office: the first one waiting on you sits in the
+    /// guest chair at its desk.
+    Boss,
 }
 
 /// Horizontal offset of each head-of-table chair from the table centre —
@@ -104,6 +130,15 @@ impl MeetingRoom {
     pub(crate) fn coat_rack_pos(&self) -> Option<Point> {
         /// Rows from the room-centre row down to the rack's base.
         const BASE_BELOW_MID: u16 = 3;
+        // agent-office: the rooftop keeps to its benches and table; no laundry
+        // pole. The waiting area has no door to hang coats by, and your
+        // office's east wall has its bookshelf.
+        if matches!(
+            self.style,
+            RoomStyle::Rooftop | RoomStyle::Waiting | RoomStyle::Boss
+        ) {
+            return None;
+        }
         let b = self.bounds;
         if b.width <= 20 {
             return None;
@@ -172,6 +207,8 @@ impl MeetingRoom {
                 x: cx,
                 y: u16::midpoint(north_y, south_y),
             },
+            north_sofa: true,
+            far_table: None,
         }
     }
 
@@ -179,17 +216,24 @@ impl MeetingRoom {
     /// clear column east of the room's east wall) — `None` on a room too narrow.
     /// The roster's mat also gives way to what stands over it.
     pub(crate) fn doormat_rect(&self) -> Option<Bounds> {
-        // agent-office: the rooftop has no door to lay one by.
-        if self.style == RoomStyle::Rooftop {
+        // agent-office: the rooftop and the waiting area have no door to lay
+        // one by.
+        if matches!(self.style, RoomStyle::Rooftop | RoomStyle::Waiting) {
             return None;
         }
         let b = self.bounds;
-        // Lazy `.then`: `b.height / 2 - 2` must not run for a sub-gate room.
+        // agent-office: just inside the door in the room's north wall, one
+        // floor row south of the wall's face, as the pantry's entry mat lies.
+        const MAT: Size = Size { w: 8, h: 4 };
+        let door_x = match self.style {
+            RoomStyle::Boss => b.x + pct(b.width, super::walls::OFFICE_DOOR_PCT),
+            _ => b.x + b.width / 2,
+        };
         (b.width > 10).then(|| Bounds {
-            x: b.x + b.width + 1,
-            y: b.y + b.height / 2 - 2,
-            width: 4,
-            height: 5,
+            x: door_x.saturating_sub(MAT.w / 2).max(b.x),
+            y: b.y + WALL_H.thickness + 1,
+            width: MAT.w,
+            height: MAT.h,
         })
     }
 
@@ -228,13 +272,19 @@ mod tests {
                 else {
                     continue;
                 };
-                let ground_end = layout.corridor.y;
                 for f in layout.fixtures() {
                     let crate::layout::FixtureKind::MeetingRug { room } = f.kind else {
                         continue;
                     };
                     let room = layout.meeting_rooms[room].bounds;
-                    south_rooms += usize::from(room.y + room.height > ground_end);
+                    // agent-office: a room south of the corridor runs to the
+                    // floor's edge.
+                    let ground_end = if room.y >= layout.corridor.y {
+                        layout.buf_h
+                    } else {
+                        layout.corridor.y
+                    };
+                    south_rooms += usize::from(room.y + room.height >= ground_end);
                     let rug = f.visual;
                     assert!(
                         rug.y + rug.height <= ground_end,
@@ -252,6 +302,8 @@ mod tests {
         let trio = MeetingTrio {
             sofas: [Point { x, y: 50 }, Point { x, y: 90 }],
             table: Point { x, y: 70 },
+            north_sofa: true,
+            far_table: None,
         };
         let ground_end = 96;
         assert_eq!(

@@ -124,60 +124,6 @@ fn kitchen_island_places_on_roomy_pantries_and_refuses_small() {
 }
 
 #[test]
-fn meeting_room_donates_surplus_height_to_the_pantry() {
-    // The drift guard pinning `pantry_content_h`'s inverse-clamp math to the island
-    // block's real clamps: if either side changes alone, the island vanishes here.
-    let l = SceneLayout::compute_with_seed(215, 98, None, 0).expect("fits");
-    assert!(
-        l.pantry.and_then(|p| p.kitchen_island).is_some(),
-        "island must place on the short floor after the height transfer"
-    );
-    assert!(
-        l.waypoints
-            .iter()
-            .any(|w| matches!(w.kind, WaypointKind::SnackShelf)),
-        "snack shelf must place too (its y-bound == the island's)"
-    );
-    let mr = l.meeting_room_bounds(0).expect("meeting room");
-    let pr = l.pantry.map(|p| p.bounds).expect("pantry");
-    assert!(
-        mr.height < pr.height,
-        "the surplus flowed south: meeting {} !< pantry {}",
-        mr.height,
-        pr.height
-    );
-    let tall = SceneLayout::compute_with_seed(240, 160, None, 0).expect("fits");
-    let (tmr, tpr) = (
-        tall.meeting_room_bounds(0).expect("meeting room"),
-        tall.pantry.map(|p| p.bounds).expect("pantry"),
-    );
-    let usable = tmr.height + tpr.height;
-    assert_eq!(
-        tmr.height,
-        usable / 2,
-        "tall floors keep the old half-split exactly"
-    );
-    // Deliberately asymmetric: if the island's clamps RELAX while pantry_content_h
-    // stays, the split merely over-donates a benign row or two — only the
-    // starve/rescue boundary is load-bearing.
-    let short = SceneLayout::compute_with_seed(215, 87, None, 0).expect("fits");
-    assert_eq!(
-        short.pantry.and_then(|p| p.kitchen_island),
-        None,
-        "below the donation floor the pantry stays starved (no forced cram)"
-    );
-    let (smr, spr) = (
-        short.meeting_room_bounds(0).expect("meeting room"),
-        short.pantry.map(|p| p.bounds).expect("pantry"),
-    );
-    assert_eq!(
-        smr.height,
-        u16::midpoint(smr.height, spr.height),
-        "below the floor the half-split stands"
-    );
-}
-
-#[test]
 fn island_bartenders_approach_from_behind_never_through_the_front() {
     // 240×160 = the roomy tall floor; 215×98 = the donated content-fit floor where
     // the island sits at its single valid y (the tightest lane).
@@ -245,68 +191,52 @@ fn snack_shelf_hugs_the_west_wall_and_refuses_narrow_rooms() {
     );
 }
 
+/// agent-office: the two meeting rooms stand side by side in the south row,
+/// a solid wall between them, each entered from the corridor by its own door
+/// in its north wall, so neither is a passage into the other.
 #[test]
-fn dense_inter_meeting_wall_is_solid_with_a_corridor_door_each() {
-    // #557 door policy (owner call): two stacked meeting rooms do NOT interconnect
-    // — their shared wall renders as ONE solid segment — while each room keeps its
-    // own centered corridor door in the east wall.
-    let mut saw_dual = false;
-    for seed in 0..10u64 {
-        let l = SceneLayout::compute_with_seed(192, 160, Some(8), seed).expect("fits");
-        if l.meeting_rooms.len() < 2 {
-            continue;
-        }
-        saw_dual = true;
-        let split_y = l.meeting_rooms[1].bounds.y;
-        let h: Vec<_> = l
-            .room_walls
-            .iter()
-            .filter_map(|w| match *w {
-                WallSegment::Horizontal { y, x0, x1 } if y == split_y => Some((x0, x1)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(h.len(), 1, "seed {seed}: ONE solid shared wall, got {h:?}");
-        assert_eq!(
-            h[0],
-            (0, l.meeting_rooms[1].bounds.width),
-            "seed {seed}: no inter-meeting door gap"
-        );
-        for (id, room) in l.meeting_rooms.iter().enumerate() {
-            let b = room.bounds;
-            let vx = b.x + b.width;
-            let mut v: Vec<_> = l
-                .room_walls
-                .iter()
-                .filter_map(|w| match *w {
-                    WallSegment::Vertical { x, y0, y1 }
-                        if x == vx && y0 >= b.y && y1 <= b.y + b.height =>
-                    {
-                        Some((y0, y1))
-                    }
-                    _ => None,
-                })
-                .collect();
-            v.sort_unstable();
-            assert_eq!(
-                v.len(),
-                2,
-                "seed {seed} room {id}: east wall split by its door"
-            );
-            assert!(
-                v[0].1 < v[1].0,
-                "seed {seed} room {id}: the corridor door gap must be real"
-            );
-        }
+fn the_meeting_rooms_stand_side_by_side_each_with_its_own_corridor_door() {
+    let l = SceneLayout::compute_with_seed(240, 160, Some(8), 0).expect("fits");
+    let rooms: Vec<Bounds> = l
+        .meeting_rooms
+        .iter()
+        .filter(|r| r.style == RoomStyle::Office)
+        .map(|r| r.bounds)
+        .collect();
+    let [a, b] = rooms[..] else {
+        panic!("two meeting rooms at 240x160: {rooms:?}")
+    };
+    assert!(
+        a.y > l.corridor.y && a.y == b.y,
+        "south of the corridor: {a:?} {b:?}"
+    );
+    assert!(a.x + a.width < b.x, "A west of B");
+    for r in [a, b] {
+        let door = l.doorways.iter().find(|d| {
+            d.start.y == r.y && d.end.y == r.y && d.start.x >= r.x && d.end.x <= r.x + r.width
+        });
+        assert!(door.is_some(), "{r:?} has no north door: {:?}", l.doorways);
     }
-    assert!(saw_dual, "192x160 seeds 0..10 must reach a dual floor");
+    let between = a.x + a.width;
+    assert!(
+        l.room_walls.iter().any(|w| matches!(*w,
+            WallSegment::Vertical { x, .. } if x == between)),
+        "a wall between them"
+    );
+    assert!(
+        !l.doorways
+            .iter()
+            .any(|d| d.start.x == between && d.end.x == between),
+        "no door between them"
+    );
 }
 
 #[test]
 fn meeting_rooms_vec_indexes_are_the_waypoint_room_ids() {
     let mut saw_dual = false;
     for seed in 0..10u64 {
-        let l = SceneLayout::compute_with_seed(192, 160, Some(8), seed).expect("fits");
+        // agent-office: two meeting rooms from 240 wide.
+        let l = SceneLayout::compute_with_seed(240, 160, Some(8), seed).expect("fits");
         assert_eq!(
             l.meeting_room_bounds(l.meeting_rooms.len()),
             None,
@@ -335,7 +265,12 @@ fn meeting_rooms_vec_indexes_are_the_waypoint_room_ids() {
                 wp.pos
             );
         }
-        if l.meeting_rooms.len() == 2 {
+        if l.meeting_rooms
+            .iter()
+            .filter(|r| r.style == RoomStyle::Office)
+            .count()
+            == 2
+        {
             saw_dual = true;
             let r2 = l.meeting_rooms[1].bounds;
             if let Some(mf) = l.meeting_rooms[1].trio {
@@ -353,7 +288,7 @@ fn meeting_rooms_vec_indexes_are_the_waypoint_room_ids() {
     }
     assert!(
         saw_dual,
-        "192x160 x seeds 0..10 must reach a dual-meeting Dense floor"
+        "240x160 x seeds 0..10 must reach two meeting rooms"
     );
 }
 
@@ -372,56 +307,6 @@ fn desk_is_walk_behind_the_monitor() {
         assert!(
             !l.walkable.is_walkable(cx, south.saturating_sub(foot_h / 2)),
             "desk {d:?}: front-contact ground must be blocked"
-        );
-    }
-}
-
-#[test]
-fn partial_bottom_row_caps_mid_fill_when_agents_run_out() {
-    // Sizes chosen empirically: each has a `seats`-desk partial bottom row whose
-    // last desk appears at num_agents = cap, so cap-1 breaks the `'partial_y`
-    // loop MID-ROW. A smaller num_agents caps in the earlier full-pod phase
-    // instead and never reaches it. agent-office: re-picked for four-seat
-    // benches, the row's seat count now per size.
-    for (w, h, cap, seats) in [
-        (88u16, 100u16, 9usize, 3usize),
-        (100, 90, 12, 4),
-        (88, 150, 15, 3),
-    ] {
-        let full = SceneLayout::compute_with_seed(w, h, Some(TEST_DEFAULT_DESKS), 0).expect("fits");
-        assert_eq!(
-            full.home_desks.len(),
-            cap,
-            "{w}x{h}: expected total desk capacity {cap}"
-        );
-        let max_y = full.home_desks.iter().map(|d| d.at.y).max().unwrap();
-        let band_at = |n: usize| {
-            SceneLayout::compute_with_seed(w, h, Some(n), 0)
-                .expect("fits")
-                .home_desks
-                .iter()
-                .filter(|d| d.at.y == max_y)
-                .count()
-        };
-        for n in 1..=cap {
-            assert_eq!(
-                SceneLayout::compute_with_seed(w, h, Some(n), 0)
-                    .expect("fits")
-                    .home_desks
-                    .len(),
-                n,
-                "{w}x{h}: num_agents {n} must truncate to exactly {n} desks"
-            );
-        }
-        assert_eq!(
-            band_at(cap),
-            seats,
-            "{w}x{h}: partial bottom row seats {seats} at cap"
-        );
-        assert_eq!(
-            band_at(cap - 1),
-            seats - 1,
-            "{w}x{h}: cap-1 leaves the partial row half-filled (break mid-row)"
         );
     }
 }
@@ -672,9 +557,8 @@ fn every_home_desk_has_a_reachable_approach_on_its_own_far_side() {
 
 #[test]
 fn sofas_seat_three_people() {
-    // 120 wide so the meeting room clears MEETING_FURNITURE_MIN_W: a 96-wide room
-    // is too narrow to route to the sofa seats and is intentionally left bare.
-    let l = SceneLayout::compute(120, 80, Some(4)).expect("fits");
+    // agent-office: wide enough for the south row's meeting rooms.
+    let l = SceneLayout::compute(240, 160, Some(4)).expect("fits");
 
     let couch: Vec<_> = l
         .waypoints
@@ -705,7 +589,7 @@ fn sofas_seat_three_people() {
         .meeting_rooms
         .iter()
         .filter_map(|r| r.trio.as_ref())
-        .map(|t| t.sofas.len())
+        .map(|t| t.sofa_seats().count())
         .sum();
     assert_eq!(sofa_seats, 3 * total_sofas, "each meeting sofa seats 3");
 }
@@ -715,8 +599,14 @@ fn meeting_slots_track_meeting_trios() {
     let mut saw_room = false;
     let mut saw_no_room = false;
     let mut saw_dual = false;
-    for seed in 0..40u64 {
-        let l = SceneLayout::compute_with_seed(160, 120, Some(8), seed).expect("fits");
+    // agent-office: every floor has the same plan, so the sizes give the
+    // spread: no meeting room, one, and two.
+    for (seed, (w, h)) in (0..12u64).zip(
+        [(120u16, 96u16), (192, 160), (240, 160)]
+            .into_iter()
+            .cycle(),
+    ) {
+        let l = SceneLayout::compute_with_seed(w, h, Some(8), seed).expect("fits");
         let sofa_slots: Vec<_> = l
             .waypoints
             .iter()
@@ -727,7 +617,12 @@ fn meeting_slots_track_meeting_trios() {
                 )
             })
             .collect();
-        if !l.meeting_rooms.is_empty() {
+        let offices = l
+            .meeting_rooms
+            .iter()
+            .filter(|r| r.style == RoomStyle::Office)
+            .count();
+        if offices > 0 {
             saw_room = true;
             assert!(
                 sofa_slots
@@ -749,7 +644,7 @@ fn meeting_slots_track_meeting_trios() {
                     "seed {seed}: room_id {rid} out of range {rooms}"
                 );
             }
-            if rooms == 2 {
+            if offices == 2 {
                 saw_dual = true;
                 assert!(
                     sofa_slots.iter().any(|w| w.room_id == Some(1)),
@@ -759,7 +654,9 @@ fn meeting_slots_track_meeting_trios() {
         } else {
             saw_no_room = true;
             assert!(
-                sofa_slots.is_empty(),
+                sofa_slots.iter().all(|w| w
+                    .room_id
+                    .is_some_and(|r| l.meeting_rooms[r].style == RoomStyle::Rooftop)),
                 "seed {seed}: no meeting room but {} meeting slots",
                 sofa_slots.len()
             );
@@ -868,36 +765,12 @@ fn meeting_chair_cells_stay_walkable() {
 
 #[test]
 fn compute_places_bookshelf_on_wall_and_whiteboard_in_walkway() {
+    // agent-office: one row of benches leaves the free-standing whiteboard no
+    // aisle between pod rows to stand in, so only the bookshelf is pinned.
     let l = SceneLayout::compute(120, 96, Some(1)).expect("fits");
     let bookshelf = l.wall_decor.iter().find(|i| i.kind == WallDecor::Bookshelf);
-    let whiteboard = l
-        .wall_decor
-        .iter()
-        .find(|i| i.kind == WallDecor::Whiteboard);
     assert!(bookshelf.is_some());
-    assert!(whiteboard.is_some());
     assert!(bookshelf.unwrap().pos.y < l.cubicle_band.y);
-    assert!(whiteboard.unwrap().pos.y > l.cubicle_band.y);
-}
-
-#[test]
-fn whiteboard_blocks_only_its_wheel_base_not_the_elevated_panel() {
-    let l = SceneLayout::compute(120, 96, Some(1)).expect("fits");
-    let pos = l
-        .wall_decor
-        .iter()
-        .find(|i| i.kind == WallDecor::Whiteboard)
-        .expect("a free-standing whiteboard")
-        .pos;
-    // TopLeft-anchored: the 14×11 sprite's wheels sit at rows 8-10.
-    assert!(
-        l.is_walkable(pos.x + 5, pos.y + 2),
-        "the elevated whiteboard panel must NOT block the floor (invariant #6)"
-    );
-    assert!(
-        !l.is_walkable(pos.x + 5, pos.y + 9),
-        "the whiteboard wheel base must block the floor"
-    );
 }
 
 #[test]
@@ -934,10 +807,11 @@ fn fish_tank_sits_east_of_the_lounge_lamp_clear_of_the_elevator() {
 fn meeting_table_ends_are_chair_seats_not_stands() {
     let l = SceneLayout::compute(192, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
     let trio = l.meeting_rooms[0].trio.as_ref().expect("trio");
+    // agent-office: room 0's; the waiting area and your office have theirs.
     let chairs: Vec<_> = l
         .waypoints
         .iter()
-        .filter(|w| w.kind == WaypointKind::MeetingChair)
+        .filter(|w| w.kind == WaypointKind::MeetingChair && w.room_id == Some(0))
         .collect();
     assert_eq!(chairs.len(), 2, "one chair per table end");
     let (west, east) = (
@@ -964,15 +838,15 @@ fn meeting_table_ends_are_chair_seats_not_stands() {
 fn coat_rack_yields_to_the_east_chair_in_narrow_fitted_rooms() {
     // On fitted rooms ≲40 wide the rack's coats would overprint the east chair body
     // and its sitter; bare rooms and roomy floors keep it.
-    let narrow = SceneLayout::compute(120, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
+    let narrow = SceneLayout::compute(160, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
     let r = &narrow.meeting_rooms[0];
-    assert!(r.trio.is_some(), "120x160 hosts a fitted room");
+    assert!(r.trio.is_some(), "160x160 hosts a fitted room");
     assert_eq!(
         r.coat_rack_pos(),
         None,
         "narrow fitted room drops the rack instead of interpenetrating the chair"
     );
-    let roomy = SceneLayout::compute(192, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
+    let roomy = SceneLayout::compute(400, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
     assert!(
         roomy.meeting_rooms[0].coat_rack_pos().is_some(),
         "roomy fitted room keeps the rack"
@@ -1146,13 +1020,14 @@ fn pantry_and_meeting_procedural_rects_match_the_painted_geometry() {
         trio: None,
         style: crate::layout::RoomStyle::Office,
     };
+    // agent-office: inside the door in the room's north wall.
     assert_eq!(
         meeting.doormat_rect(),
         Some(Bounds {
-            x: 100 + 44 + 1,
-            y: 30 + 40 / 2 - 2,
-            width: 4,
-            height: 5,
+            x: 100 + 44 / 2 - 4,
+            y: 30 + crate::layout::WALL_THICK_H + 1,
+            width: 8,
+            height: 4,
         }),
     );
 
@@ -1312,26 +1187,34 @@ fn waypoint_depth_baseline_is_its_grounds_south_row() {
     }
 }
 
-/// agent-office: the rooftop takes the east end only where the office is
-/// wide enough to give it up: a narrow window keeps every desk it had, and a
-/// wide one still seats a whole bench west of the open air.
+/// agent-office: the rooftop takes the west end, about an eighth of the
+/// floor, only where the office is wide enough to give it up; the office
+/// east of it starts past its wall, so no desk, room or runner is laid on it.
 #[test]
 fn the_rooftop_opens_only_on_a_wide_office() {
     for seed in 0..5 {
         let narrow = SceneLayout::compute_with_seed(180, 160, None, seed).expect("fits");
         assert!(narrow.rooftop().is_none(), "seed {seed}: a rooftop at 180");
-        let wide = SceneLayout::compute_with_seed(256, 180, None, seed).expect("fits");
-        let roof = wide.rooftop().expect("a rooftop at 256").bounds;
-        assert_eq!(roof.x + roof.width, wide.buf_w, "seed {seed}: at the east end");
-        let band = wide.cubicle_band;
-        assert!(band.x + band.width < roof.x, "seed {seed}: desks on the roof");
+        let wide = SceneLayout::compute_with_seed(320, 180, None, seed).expect("fits");
+        let roof = wide.rooftop().expect("a rooftop at 320").bounds;
+        assert_eq!(roof.x, 0, "seed {seed}: at the west end");
+        assert_eq!(roof.width, 320 / 8, "seed {seed}: an eighth of the floor");
+        let east = roof.x + roof.width;
+        assert!(wide.cubicle_band.x > east, "seed {seed}: desks on the roof");
         assert!(
-            wide.home_desks.iter().all(|d| d.at.x < roof.x),
-            "seed {seed}: a desk past the rooftop's edge"
+            wide.home_desks.iter().all(|d| d.at.x > east),
+            "seed {seed}: a desk on the rooftop"
         );
         assert!(
-            wide.corridor.x + wide.corridor.width <= roof.x,
+            wide.corridor.x > east,
             "seed {seed}: the runner laid out on the roof"
+        );
+        assert!(
+            wide.meeting_rooms
+                .iter()
+                .filter(|r| r.style == RoomStyle::Office)
+                .all(|r| r.bounds.x > east),
+            "seed {seed}: a room on the roof"
         );
     }
 }
@@ -1375,7 +1258,7 @@ fn the_rooftop_is_open_to_the_sky() {
     let l = SceneLayout::compute_with_seed(256, 180, None, 0).expect("fits");
     let roof = l.rooftop().expect("a rooftop").bounds;
     assert!(
-        l.window_posts().all(|p| p.start <= roof.x),
+        l.window_posts().all(|p| p.start >= roof.x + roof.width),
         "a window post stands out over the rooftop"
     );
     let open: Vec<_> = l.window_bays().filter(|b| b.open).collect();
@@ -1385,11 +1268,77 @@ fn the_rooftop_is_open_to_the_sky() {
     let sky = open[0];
     for dy in 0..h * 2 / 3 {
         for x in sky.span() {
-            assert!(l.glass_at(x, top + dy), "joinery at ({x}, {}) over the roof", top + dy);
+            assert!(
+                l.glass_at(x, top + dy),
+                "joinery at ({x}, {}) over the roof",
+                top + dy
+            );
         }
     }
     assert!(
         !l.glass_at(sky.x + 1, rows.end - 1),
         "no railing along the rooftop's foot"
+    );
+}
+
+/// agent-office: the rooftop is a place to sit out a long idle stretch
+/// looking at the harbour: one bench whose sitters face north to the sea,
+/// and two bistro tables with a chair at each end.
+#[test]
+fn the_rooftop_has_one_bench_facing_the_sea_and_two_bistro_tables() {
+    let l = SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+    let room = l
+        .meeting_rooms
+        .iter()
+        .position(|r| r.style == RoomStyle::Rooftop)
+        .expect("a rooftop");
+    let trio = l.meeting_rooms[room].trio.expect("its furniture");
+    assert_eq!(trio.sofa_seats().count(), 1, "one bench");
+    assert_eq!(trio.tables().count(), 2, "two tables");
+    let seats: Vec<_> = l
+        .waypoints
+        .iter()
+        .filter(|w| w.room_id == Some(room))
+        .collect();
+    let bench: Vec<_> = seats
+        .iter()
+        .filter(|w| w.kind == WaypointKind::MeetingSofa)
+        .collect();
+    assert_eq!(bench.len(), 3);
+    assert!(
+        bench.iter().all(|w| w.facing == Facing::North),
+        "facing the sea"
+    );
+    let chairs = seats
+        .iter()
+        .filter(|w| w.kind == WaypointKind::MeetingChair)
+        .count();
+    assert_eq!(chairs, 4, "a chair at each end of each table");
+}
+
+/// agent-office: your office reads as yours, not a third meeting room: a
+/// bookshelf against its north wall and the Hang Seng screen.
+#[test]
+fn your_office_has_its_bookshelf_and_quote_screen() {
+    let l = SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
+    let b = l
+        .meeting_rooms
+        .iter()
+        .find(|r| r.style == RoomStyle::Boss)
+        .expect("your office")
+        .bounds;
+    let inside =
+        |p: Point| (b.x..b.x + b.width).contains(&p.x) && (b.y..b.y + b.height).contains(&p.y);
+    assert!(
+        l.wall_decor
+            .iter()
+            .any(|d| d.kind == WallDecor::OfficeShelf && inside(d.pos)),
+        "a bookshelf"
+    );
+    assert!(
+        l.pod_decor
+            .iter()
+            .any(|d| d.kind == PodDecor::Tv && inside(d.pos)),
+        "a quote screen"
     );
 }

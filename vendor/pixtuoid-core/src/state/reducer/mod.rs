@@ -1286,7 +1286,13 @@ impl Reducer {
             session_id,
             cwd,
         } = ctx;
-        let Some(desk_index) = scene.next_free_desk() else {
+        // agent-office: a session with a real cwd sits with its repository.
+        let desk = if cwd.file_name().is_some() {
+            scene.next_free_desk_for(cwd)
+        } else {
+            scene.next_free_desk()
+        };
+        let Some(desk_index) = desk else {
             tracing::warn!(
                 ?agent_id,
                 cwd = ?cwd,
