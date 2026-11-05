@@ -42,11 +42,24 @@ pub enum Action {
     OpenNext,
 }
 
-/// The footer's warning while Claude Code's hooks are out.
-const HOOKS_OUT: &str = "未接 hooks，看不到等你确认：agent-office connect";
+/// The footer's warning while Claude Code's hooks are out: short, since it
+/// sits on the row the key hints need.
+const HOOKS_OUT: &str = "未接 hooks（agent-office connect）";
 
 /// How long a note on what a key did stays in the footer.
 const NOTE_FOR: Duration = Duration::from_secs(5);
+/// How long after a first `q` a second one quits: the window stays up all
+/// day, and one stray key used to close it.
+const QUIT_AGAIN_WITHIN: Duration = Duration::from_secs(2);
+
+/// What a note in the footer reports, which sets its colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Under way or done.
+    Ok,
+    /// Did not happen, or cannot.
+    Failed,
+}
 
 pub struct Core {
     pub ui: PanelState,
@@ -55,8 +68,10 @@ pub struct Core {
     /// Claude Code's hooks are in, as of the start: without them no prompt
     /// is seen, and your office stays empty however many wait.
     hooks: bool,
-    /// What the last jump did, shown in place of `summary_note` a while.
-    note: Option<(String, Instant)>,
+    /// What the last key did, shown in place of `summary_note` a while.
+    note: Option<(String, Tone, Instant)>,
+    /// When `q` was pressed once, waiting on a second.
+    quit_armed: Option<Instant>,
     pub pipe: pipeline::Pipeline,
     views_rx: tokio::sync::watch::Receiver<tasks::TaskViews>,
     force_tx: tokio::sync::mpsc::UnboundedSender<AgentId>,
@@ -260,6 +275,7 @@ impl Core {
     /// office `buf_w`×`buf_h`.
     pub fn start(rt: &tokio::runtime::Runtime, buf_w: u16, buf_h: u16) -> Self {
         let summarizer = tasks::client::Summarizer::from_env();
+        let summarizer_on = summarizer.is_some();
         let summary_note = match &summarizer {
             // The model's name is long and `doctor` already shows it.
             Some(_) => "摘要 ✓".to_owned(),
@@ -272,11 +288,15 @@ impl Core {
             (pipe, views_rx, force_tx, fun::hko::spawn())
         });
         Self {
-            ui: PanelState::default(),
+            ui: PanelState {
+                summaries: summarizer_on,
+                ..PanelState::default()
+            },
             head_labels: true,
             summary_note,
             hooks: crate::hook::installed(),
             note: None,
+            quit_armed: None,
             pipe,
             views_rx,
             force_tx,
@@ -326,21 +346,14 @@ impl Core {
         };
         // A hidden session is still live: what you read and its tally carry over.
         self.ui.seen.retain(|id, _| live.agents.contains_key(id));
-        let waiting = scene
-            .agents
-            .values()
-            .filter(|s| {
-                let read = panel::read_since_idle(s, &self.ui.seen);
-                panel::waits_on_you(s, views.get(&s.agent_id), read).is_some()
-            })
-            .map(|s| s.agent_id)
-            .collect();
+        let waiting = panel::waiting(&scene, &views, &order, &self.ui.seen);
         let first_waiting = panel::next_waiting(&scene, &views, now, &self.ui.seen);
         self.watch.observe(&live, &views, now);
         let clock = Clock::now(now);
         let outlook = *self.outlook_rx.borrow();
         // A typhoon closes the rooftop; at lunch everyone is down for a meal.
         let in_pantry = clock.lunch() || outlook.typhoon();
+        self.ui.in_pantry = in_pantry;
         Frame {
             office: as_seen(&scene, &views, &self.ui.seen, in_pantry, now),
             scene,
@@ -429,7 +442,12 @@ impl Core {
     /// Whether `action` quits.
     pub fn act(&mut self, action: Action, floors: &mut impl Floors) -> bool {
         match action {
-            Action::Quit => return true,
+            Action::Quit => {
+                if quits(&mut self.quit_armed, Instant::now()) {
+                    return true;
+                }
+                self.note("再按一次 q 退出", Tone::Ok);
+            }
             Action::Back if self.ui.expanded => self.ui.expanded = false,
             Action::Back => self.ui.selected = None,
             Action::Down | Action::Up => {
@@ -466,13 +484,13 @@ impl Core {
                     self.follow(floors);
                     return self.act(Action::Open, floors);
                 }
-                None => self.note_result(Err("现在没有会话等你".to_owned())),
+                None => self.note("现在没有会话等你", Tone::Failed),
             },
             Action::Open => match self.ui.selected {
                 Some(_) if self.jumps.out => {}
                 Some(id) => {
                     self.jumps.out = true;
-                    self.note_result(Ok("正在打开…"));
+                    self.note("正在打开…", Tone::Ok);
                     let scene = self.scene();
                     let tx = self.jumps.tx.clone();
                     std::thread::spawn(move || {
@@ -480,7 +498,7 @@ impl Core {
                         let _ = tx.send((id, scene, done));
                     });
                 }
-                None => self.note_result(Err("先选中一个 agent".to_owned())),
+                None => self.note("先选中一个 agent", Tone::Failed),
             },
             Action::OpenWaiting => {
                 self.note_result(jump::open_url(jump::NEEDS_INPUT).map(|()| "已在 Claude 打开"))
@@ -508,25 +526,33 @@ impl Core {
         }
     }
 
+    /// A jump's outcome, a failure saying it was the jump that failed.
     fn note_result(&mut self, done: Result<&str, String>) {
-        let text = done.map_or_else(|e| format!("跳转：{e}"), str::to_owned);
-        self.note = Some((text, Instant::now()));
+        match done {
+            Ok(text) => self.note(text, Tone::Ok),
+            Err(e) => self.note(&format!("跳转失败：{e}"), Tone::Failed),
+        }
     }
 
-    /// The footer's right-hand note: a fresh jump result, else the summary
-    /// model, after a warning while the hooks are out.
-    fn status_note(&self) -> String {
+    fn note(&mut self, text: &str, tone: Tone) {
+        self.note = Some((text.to_owned(), tone, Instant::now()));
+    }
+
+    /// The footer's right-hand note: a fresh note on what a key did, else the
+    /// summary model, after a warning while the hooks are out.
+    fn status_note(&self) -> (String, Option<Tone>) {
         match &self.note {
-            Some((text, at)) if at.elapsed() < NOTE_FOR => text.clone(),
-            _ if !self.hooks => format!("{HOOKS_OUT} · {}", self.summary_note),
-            _ => self.summary_note.clone(),
+            Some((text, tone, at)) if at.elapsed() < NOTE_FOR => (text.clone(), Some(*tone)),
+            _ if !self.hooks => (format!("{HOOKS_OUT} · {}", self.summary_note), None),
+            _ => (self.summary_note.clone(), None),
         }
     }
 }
 
 /// The key hints and the floor and summary status along the bottom, after
-/// how many sessions wait on you when any do. The status keeps its room: the
-/// hints are cut short before they run into it.
+/// how many sessions wait on you when any do. The status keeps its room;
+/// the hints that do not fit beside it are left out whole, the least needed
+/// first, rather than cut off mid-word with the last ones lost.
 pub fn footer(
     buf: &mut Buffer,
     area: Rect,
@@ -538,42 +564,93 @@ pub fn footer(
     let dim = Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98));
     let key = Style::default().fg(Color::Rgb(0xe6, 0xe6, 0xe6));
     let labels = if core.head_labels {
-        "隐藏头顶"
+        "隐藏任务"
     } else {
-        "显示头顶"
+        "显示任务"
     };
-    let mut spans = Vec::new();
+    // In the order shown; kept by `rank`, the lower the more needed.
     let base = [
-        ("↑↓", "选中"),
-        ("Enter", "展开"),
-        ("o", "打开会话"),
-        ("w", "等你的"),
-        ("n", "处理下一个"),
-        ("r", "重新总结"),
-        ("b", labels),
-        ("[ ]", "换楼层"),
+        ("↑↓", "选中", 0),
+        ("Enter", "展开", 3),
+        ("o", "打开会话", 0),
+        ("w", "等你的", 4),
+        ("n", "处理下一个", 1),
+        ("r", "重新总结", 7),
+        ("b", labels, 6),
     ];
-    // Each key on a keycap, its action beside it.
-    let cap = key.bg(Color::Rgb(0x3b, 0x40, 0x4c));
-    for (k, what) in base.iter().chain(extra).chain(&[("q", "退出")]) {
-        spans.push(Span::styled(format!(" {k} "), cap));
-        spans.push(Span::styled(format!(" {what}  "), dim));
-    }
+    let floors_hint = (floors.n_floors() > 1).then_some(("[ ]", "换楼层", 5));
+    let hints: Vec<(&str, &str, u8)> = base
+        .into_iter()
+        .chain(floors_hint)
+        .chain(extra.iter().map(|&(k, w)| (k, w, 8)))
+        .chain([("q", "退出", 2)])
+        .collect();
     let mut right = Vec::new();
     if waiting > 0 {
         let wait = Style::default().fg(panel::WAIT);
         right.push(Span::styled(format!("● {waiting} 个等你  "), wait));
     }
-    right.push(Span::styled(
-        format!(
-            "F{}/{}  {} ",
-            floors.current_floor() + 1,
-            floors.n_floors().max(1),
-            core.status_note()
-        ),
-        dim,
-    ));
-    set_hints_and_status(buf, area, &Line::from(spans), &Line::from(right));
+    // The floor only where there is more than one to be on.
+    if floors.n_floors() > 1 {
+        right.push(Span::styled(
+            format!("{}/{} 层  ", floors.current_floor() + 1, floors.n_floors()),
+            dim,
+        ));
+    }
+    let (note, tone) = core.status_note();
+    let note_style = match tone {
+        Some(Tone::Ok) => Style::default().fg(Color::Rgb(0x9e, 0xce, 0x6a)),
+        Some(Tone::Failed) => Style::default().fg(Color::Rgb(0xf7, 0x76, 0x8e)),
+        None => dim,
+    };
+    right.push(Span::styled(format!("{note} "), note_style));
+    let status = Line::from(right);
+    let room = area.width.saturating_sub(
+        u16::try_from(status.width())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1),
+    );
+    // Each key on a keycap, its action beside it.
+    let cap = key.bg(Color::Rgb(0x3b, 0x40, 0x4c));
+    let mut spans = Vec::new();
+    for (k, what, _) in &fit_hints(hints, room) {
+        spans.push(Span::styled(format!(" {k} "), cap));
+        spans.push(Span::styled(format!(" {what}  "), dim));
+    }
+    set_hints_and_status(buf, area, &Line::from(spans), &status);
+}
+
+/// Whether a `q` at `now` quits: the second within [`QUIT_AGAIN_WITHIN`] of
+/// the first; else it arms `armed` for the next.
+fn quits(armed: &mut Option<Instant>, now: Instant) -> bool {
+    if armed
+        .take()
+        .is_some_and(|at| now.duration_since(at) < QUIT_AGAIN_WITHIN)
+    {
+        return true;
+    }
+    *armed = Some(now);
+    false
+}
+
+/// The key hints (key, what it does, rank) that fit `room` cells, in their
+/// order: the highest rank, the least needed, left out first, each whole.
+fn fit_hints<'a>(mut hints: Vec<(&'a str, &'a str, u8)>, room: u16) -> Vec<(&'a str, &'a str, u8)> {
+    let width = |(k, what, _): &(&str, &str, u8)| {
+        crate::text::cells(&format!(" {k} ")) + crate::text::cells(&format!(" {what}  "))
+    };
+    while hints.iter().map(width).sum::<u16>() > room {
+        let Some(worst) = hints
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, h)| (h.2, *i))
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        hints.remove(worst);
+    }
+    hints
 }
 
 /// `hints` along `area`'s row and `status` flush right on it, the hints cut
@@ -620,6 +697,46 @@ mod tests {
             "a gap before it"
         );
         assert_eq!(buf[(0, 0)].symbol(), "t", "the hints still start the row");
+    }
+
+    /// A narrow window cut the hints mid-word and lost `q 退出` first; now
+    /// the least needed go whole, and opening, the next wait and quitting
+    /// stay.
+    #[test]
+    fn a_narrow_footer_drops_whole_hints_least_needed_first() {
+        let hints = vec![
+            ("↑↓", "选中", 0),
+            ("Enter", "展开", 3),
+            ("o", "打开会话", 0),
+            ("n", "处理下一个", 1),
+            ("r", "重新总结", 7),
+            ("q", "退出", 2),
+        ];
+        let all = fit_hints(hints.clone(), 200);
+        assert_eq!(all.len(), hints.len(), "all fit in a wide row");
+        let few = fit_hints(hints, 52);
+        let keys: Vec<&str> = few.iter().map(|h| h.0).collect();
+        assert_eq!(keys, ["↑↓", "o", "n", "q"]);
+    }
+
+    /// One stray `q` closed a window kept up all day; it takes a second one
+    /// soon after.
+    #[test]
+    fn q_quits_only_when_pressed_twice_quickly() {
+        let t = Instant::now();
+        let mut armed = None;
+        assert!(!quits(&mut armed, t), "the first arms");
+        assert!(quits(&mut armed, t + Duration::from_millis(500)));
+        let mut armed = None;
+        assert!(!quits(&mut armed, t));
+        assert!(
+            !quits(&mut armed, t + QUIT_AGAIN_WITHIN + Duration::from_millis(1)),
+            "too late: it arms again"
+        );
+        assert!(quits(
+            &mut armed,
+            t + QUIT_AGAIN_WITHIN + Duration::from_secs(1)
+        ));
     }
 
     /// The office walks a session you opened since it went idle out of the

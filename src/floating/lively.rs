@@ -565,7 +565,7 @@ pub(super) fn replay(
     let u = s.u.max(1);
     let row = 5;
     let most = match &recap.most {
-        Some((name, n)) => format!("最多：{name} {n} 轮"),
+        Some((name, n)) => format!("最多：{} {n} 轮", pixtuoid_scene::badge::shown_label(name)),
         None => "今日未有人完成".to_owned(),
     };
     // The trophy drops in and bounces where the winner's line ends.
@@ -579,7 +579,11 @@ pub(super) fn replay(
     }
     if ago >= REPLAY_DAY + Duration::from_millis(1_200) {
         let stuck = match &recap.stuck {
-            Some((name, secs)) => format!("卡最久：{name} {} 分钟", secs.div_ceil(60)),
+            Some((name, secs)) => format!(
+                "卡最久：{} {} 分钟",
+                pixtuoid_scene::badge::shown_label(name),
+                secs.div_ceil(60)
+            ),
             None => "今日冇人卡住".to_owned(),
         };
         text(canvas, faces, row + 1, &stuck, 0x00ff_8a8a);
@@ -711,12 +715,14 @@ pub(super) fn typhoon_signal(canvas: &mut Canvas, faces: &mut Faces, s: Stage, s
     faces.draw(canvas, x + sym + 3 * pad, base, name, 0x0020_2020, px);
 }
 
-/// The wall board's two lines with the day's tally, in the board's ASCII.
+/// The wall board's two lines with the day's tally, in Chinese like the
+/// rest of the office: the window sets them in its readable faces, the art
+/// font's 8px English having been all but unreadable.
 pub(super) fn tally_lines(stats: &crate::fun::stats::Stats) -> [String; 2] {
     [
-        format!("today {} done", stats.turns),
+        format!("今日完成 {} 轮", stats.turns),
         format!(
-            "{} stuck {} tok",
+            "卡住 {} · {} token",
             stats.stuck,
             crate::fun::stats::tokens_short(stats.tokens)
         ),
@@ -851,7 +857,8 @@ mod tests {
         assert!(fast.px == slow.px);
     }
 
-    /// The board's tally fits its ASCII lines and says what was done.
+    /// The board's tally says what was done in the office's language, short
+    /// enough for the board's line.
     #[test]
     fn the_tally_reads_turns_stuck_and_tokens() {
         let stats = crate::fun::stats::Stats {
@@ -860,11 +867,14 @@ mod tests {
             tokens: 1_234_567,
             ..Default::default()
         };
-        assert_eq!(tally_lines(&stats), ["today 12 done", "2 stuck 1.2M tok"]);
+        assert_eq!(
+            tally_lines(&stats),
+            ["今日完成 12 轮", "卡住 2 · 1.2M token"]
+        );
         assert!(
             tally_lines(&stats)
                 .iter()
-                .all(|l| l.is_ascii() && l.len() <= 26)
+                .all(|l| crate::text::cells(l) <= 20)
         );
     }
 }

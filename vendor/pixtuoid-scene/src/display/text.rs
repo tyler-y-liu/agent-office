@@ -201,7 +201,9 @@ impl Badge {
         theme: &Theme,
     ) -> Self {
         let text = namesakes.text(agent);
-        let ink = crate::badge::badge_ink(&text, crate::badge::tone_of(agent), theme);
+        // agent-office: the source's hue from the raw label, whose prefix the
+        // shown text may have dropped (`shown_label`).
+        let ink = crate::badge::badge_ink(&agent.label, crate::badge::tone_of(agent), theme);
         Self {
             agent: agent.agent_id,
             at: anchor,

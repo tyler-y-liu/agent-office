@@ -35,7 +35,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId, WindowLevel};
+use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 use crate::core::{Action, Core, Floors};
 use crate::panel;
@@ -136,9 +136,17 @@ struct Win {
     wheel_px: f64,
     /// The last frame's layout, which a click is read against.
     last: Option<Layout>,
-    /// The agent last clicked and when, so a second click on it soon after
-    /// opens its session.
-    last_click: Option<(AgentId, Instant)>,
+    /// The agent last clicked, when, and whether its card was expanded
+    /// before: a second click on it soon after opens its session and undoes
+    /// what the first did to the card.
+    last_click: Option<(AgentId, Instant, bool)>,
+    /// An idle worker clicked once, whose answer waits out the double-click
+    /// time: a double click opens it and is not also a poke.
+    pending_poke: Option<(AgentId, Instant)>,
+    /// The pointer is showing a hand, over something a click acts on.
+    pointer: bool,
+    /// The pointer is over the window: past its edge it hovers nothing.
+    cursor_in: bool,
     /// The sign clicked for what its zone is for, by its text, and when.
     about: Option<(String, Instant)>,
     /// What a click last got out of the office, and when.
@@ -361,7 +369,16 @@ impl ApplicationHandler for Floating<'_> {
                 let g = grid(&mut win.faces, scale_factor, PANEL_PT);
                 set_min_size(&win.window, &self.pack, g);
             }
-            WindowEvent::CursorMoved { position, .. } => win.cursor = position,
+            WindowEvent::CursorMoved { position, .. } => {
+                win.cursor = position;
+                win.cursor_in = true;
+                win.hover();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                win.cursor_in = false;
+                win.core.ui.hovered = None;
+                win.next_frame = Instant::now();
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -516,6 +533,9 @@ impl Floating<'_> {
             wheel_px: 0.0,
             last: None,
             last_click: None,
+            pending_poke: None,
+            pointer: false,
+            cursor_in: false,
             about: None,
             reaction: None,
             pokes: HashMap::new(),
@@ -555,6 +575,7 @@ impl Win {
         let frame = self.core.frame();
         // Anything below that moves between beats sets this again.
         self.quick = false;
+        self.land_poke();
 
         let want = fit_for(pack, ow, oh, self.hold.shown);
         let fit = self.hold.fit(want, Instant::now());
@@ -673,15 +694,17 @@ impl Win {
             self.paint_goings_on_over(&mut canvas, &frame, &tags, &signs, &speakers, stage, now);
             self.paint_reaction(&mut canvas, &tags, stage);
             self.quick |= self.reaction.is_some()
+                || self.pending_poke.is_some()
                 || self.replay.is_some()
                 || tags
                     .iter()
                     .any(|t| crate::fun::live_cheer(frame.views.get(&t.agent), now).is_some());
             let u = i64::from(fit.upscale());
             if frame.clock.evening() {
+                paint_board_words(&mut canvas, &mut self.faces, &boards, u);
                 board_hits = boards
                     .iter()
-                    .map(|a| Area {
+                    .map(|(a, _)| Area {
                         x: a.x * u,
                         y: a.y * u,
                         w: a.w * u as u32,
@@ -761,7 +784,6 @@ impl Win {
             &self.core,
             frame.waiting.len(),
             &[
-                ("点门牌", "看说明"),
                 (
                     "t",
                     if self.on_top {
@@ -770,6 +792,7 @@ impl Win {
                         "置顶"
                     },
                 ),
+                ("点门牌", "看说明"),
             ],
         );
         canvas.fill(0, i64::from(oh), w.get(), h.get() - oh, PANEL_BG);
@@ -786,6 +809,9 @@ impl Win {
             cat_hit,
             unit: i64::from(fit.scale().get()),
         });
+        // The cards may have moved under a still pointer (the wheel, a
+        // reorder): what it is over is read against this frame.
+        self.hover();
         let mut buffer = self
             .surface
             .buffer_mut()
@@ -905,6 +931,77 @@ impl Win {
         }
     }
 
+    /// The figure in the office under window point (`x`, `y`), if any.
+    fn figure_at(
+        &self,
+        last: &Layout,
+        x: u32,
+        y: u32,
+    ) -> Option<pixtuoid_scene::display::HoverTarget> {
+        let scale = u32::from(last.office_fit.scale().get());
+        let at = Bounds {
+            x: u16::try_from(x / scale).unwrap_or(u16::MAX),
+            y: u16::try_from(y / scale).unwrap_or(u16::MAX),
+            width: 1,
+            height: 1,
+        };
+        let picture = self.office.session.picture();
+        match picture.as_ref().and_then(|p| match p {
+            Picture::Floor(f) => f.hits.at(at, None),
+            Picture::Slide(_) => None,
+        }) {
+            Some(pixtuoid_scene::hit::SceneHit::Figure(t)) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// A hand over what a click acts on, and the card under the pointer
+    /// lit: the signs, the cat, the board and the panel's title took clicks
+    /// with nothing to say so.
+    fn hover(&mut self) {
+        let Some(last) = self.last.as_ref().filter(|_| self.cursor_in) else {
+            return;
+        };
+        let (x, y) = (self.cursor.x.max(0.0) as u32, self.cursor.y.max(0.0) as u32);
+        let point = Area {
+            x: i64::from(x),
+            y: i64::from(y),
+            w: 1,
+            h: 1,
+        };
+        let in_office = x < last.panel_x;
+        let card = if in_office {
+            None
+        } else {
+            let row = u16::try_from(y / last.grid.row_h.max(1)).unwrap_or(u16::MAX);
+            last.panel_rows
+                .iter()
+                .find(|(r, _)| *r == row)
+                .map(|(_, id)| *id)
+        };
+        let clickable = if in_office {
+            last.board_hits.iter().any(|r| r.meets(&point))
+                || last.cat_hit.is_some_and(|r| r.meets(&point))
+                || last.sign_hits.iter().any(|(r, _)| r.meets(&point))
+                || last.tag_hits.iter().any(|(r, _)| r.meets(&point))
+                || self.figure_at(last, x, y).is_some()
+        } else {
+            y < last.grid.row_h || card.is_some()
+        };
+        if self.core.ui.hovered != card {
+            self.core.ui.hovered = card;
+            self.next_frame = Instant::now();
+        }
+        if clickable != self.pointer {
+            self.pointer = clickable;
+            self.window.set_cursor(if clickable {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+        }
+    }
+
     /// Select the card or the figure under the pointer; a double click opens
     /// its session, and one on the panel's title the sessions waiting. A sign
     /// toggles what its zone is for; any other click puts that away.
@@ -977,24 +1074,9 @@ impl Win {
                 .find(|(r, _)| *r == row)
                 .map(|(_, id)| *id)
         } else {
-            let scale = u32::from(last.office_fit.scale().get());
-            let at = Bounds {
-                x: u16::try_from(x / scale).unwrap_or(u16::MAX),
-                y: u16::try_from(y / scale).unwrap_or(u16::MAX),
-                width: 1,
-                height: 1,
-            };
-            let picture = self.office.session.picture();
-            match picture.as_ref().and_then(|p| match p {
-                Picture::Floor(f) => f.hits.at(at, None),
-                Picture::Slide(_) => None,
-            }) {
-                Some(pixtuoid_scene::hit::SceneHit::Figure(
-                    pixtuoid_scene::display::HoverTarget::Agent(id),
-                )) => Some(*id),
-                Some(pixtuoid_scene::hit::SceneHit::Figure(
-                    pixtuoid_scene::display::HoverTarget::Pet(pet),
-                )) => {
+            match self.figure_at(last, x, y) {
+                Some(pixtuoid_scene::display::HoverTarget::Agent(id)) => Some(id),
+                Some(pixtuoid_scene::display::HoverTarget::Pet(pet)) => {
                     let (cx, cy) = (i64::from(pet.centre.x), i64::from(pet.centre.y));
                     let at = (cx * last.unit, cy * last.unit);
                     self.reaction = Some((Reaction::Cat(at.0, at.1), Instant::now()));
@@ -1005,28 +1087,46 @@ impl Win {
         };
         let Some(id) = id else { return };
         let now = Instant::now();
-        let double = self
+        let first = self
             .last_click
-            .is_some_and(|(prev, at)| prev == id && now - at < DOUBLE_CLICK);
-        if double {
+            .filter(|&(prev, at, _)| prev == id && now - at < DOUBLE_CLICK);
+        if let Some((_, _, expanded)) = first {
             self.last_click = None;
+            // The first click's toggle and poke were on the way to this.
+            self.pending_poke = None;
+            self.core.ui.expanded = expanded;
             self.core.ui.selected = Some(id);
             self.core.act(Action::Open, &mut self.office);
         } else {
-            self.last_click = Some((id, now));
+            self.last_click = Some((id, now, self.core.ui.expanded));
             self.core.select(id, &mut self.office);
             // An idle worker clicked in the office has something to say for
-            // itself; one at work is left to it.
+            // itself, once it is clear this is no double click; one at work
+            // is left to it.
             let idle = self.core.scene().agents.get(&id).is_some_and(|s| {
                 s.exiting_at.is_none() && matches!(s.state, pixtuoid_core::ActivityState::Idle)
             });
             if in_office && idle {
-                let n = self.pokes.entry(id).or_default();
-                let poke = crate::fun::poke(id, *n);
-                *n += 1;
-                self.reaction = Some((Reaction::Worker(id, poke), Instant::now()));
+                self.pending_poke = Some((id, now));
             }
         }
+    }
+
+    /// The pending poke's answer, once a second click can no longer make it
+    /// a double click.
+    fn land_poke(&mut self) {
+        let Some((id, at)) = self.pending_poke else {
+            return;
+        };
+        if at.elapsed() < DOUBLE_CLICK {
+            self.quick = true;
+            return;
+        }
+        self.pending_poke = None;
+        let n = self.pokes.entry(id).or_default();
+        let poke = crate::fun::poke(id, *n);
+        *n += 1;
+        self.reaction = Some((Reaction::Worker(id, poke), Instant::now()));
     }
 }
 
@@ -1038,7 +1138,7 @@ type Drawn = (
     Vec<DoorSign>,
     Vec<AgentId>,
     Vec<rooms::Room>,
-    Vec<Area>,
+    Vec<BoardLine>,
 );
 
 /// What the office is drawn with beyond the scene itself.
@@ -1160,19 +1260,20 @@ impl Win {
                     rooms::whiteboard(canvas, &mut self.faces, stage.scale_factor, room, &lines);
                 }
                 RoomStyle::Waiting => {
-                    let seen = &self.core.ui.seen;
-                    let waiting = frame
-                        .scene
-                        .agents
-                        .values()
-                        .filter(|s| s.parent_id.is_none())
-                        .filter(|s| crate::pipeline::is_shown_source(&s.source))
-                        .filter(|s| {
-                            let read = panel::read_since_idle(s, seen);
-                            panel::waits_on_you(s, frame.views.get(&s.agent_id), read).is_some()
+                    // The sessions standing in line: subagents wait with
+                    // their parent, not in the queue.
+                    let queued = frame
+                        .waiting
+                        .iter()
+                        .filter(|id| {
+                            frame
+                                .scene
+                                .agents
+                                .get(id)
+                                .is_some_and(|s| s.parent_id.is_none())
                         })
                         .count();
-                    rooms::ticket_machine(canvas, room, waiting, stage.ms);
+                    rooms::ticket_machine(canvas, room, queued, stage.ms);
                 }
                 RoomStyle::Boss => {
                     let door = signs
@@ -1516,14 +1617,33 @@ pub(crate) struct Tag {
     name: String,
     ink: u32,
     task: Option<String>,
-    /// Its name and task shown; else only a dot in its marker colour.
+    /// Its whole name and its task shown; else its name cut short
+    /// ([`short_name`]) and no task.
     full: bool,
 }
 
 /// Up to this many figures every badge shows in full; past it only the
-/// ones [`shown_in_full`] picks do, the rest a dot, so a crowd's two-line
-/// tags do not pile up over each other.
+/// ones [`shown_in_full`] picks do, the rest a short name and no task, so a
+/// crowd's two-line tags do not pile up over each other.
 const ALL_FULL_UPTO: usize = 3;
+
+/// Cells a short badge's name may take.
+const SHORT_NAME_CELLS: u16 = 8;
+
+/// `name` cut to [`SHORT_NAME_CELLS`], its namesake number (`·2`) kept: a
+/// dot in its place told no one which session sat there.
+fn short_name(name: &str) -> String {
+    if crate::text::cells(name) <= SHORT_NAME_CELLS {
+        return name.to_owned();
+    }
+    match name.rsplit_once('\u{b7}') {
+        Some((base, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            let room = SHORT_NAME_CELLS.saturating_sub(crate::text::cells(n) + 1);
+            format!("{}\u{b7}{n}", truncate_cells(base, room))
+        }
+        _ => truncate_cells(name, SHORT_NAME_CELLS),
+    }
+}
 
 /// The agents whose badge and task read in full however many are in: the
 /// one selected, and the ones waiting on you or stuck, which you are to act
@@ -1585,17 +1705,16 @@ fn place_tags(
         .iter()
         .map(|b| {
             let at = run_rect(&badge_run(b), d);
-            let name = b.name.text().to_owned();
             let shown = all_full || full.contains(&b.agent);
-            let (w, h) = if shown {
-                (
-                    Faces::cells(&name) * faces.cell_w(name_px) + 3 * pad,
-                    name_px + 2 * pad,
-                )
+            let name = if shown {
+                b.name.text().to_owned()
             } else {
-                let dot = name_px / 2 + 2 * pad;
-                (dot, dot)
+                short_name(b.name.text())
             };
+            let (w, h) = (
+                Faces::cells(&name) * faces.cell_w(name_px) + 3 * pad,
+                name_px + 2 * pad,
+            );
             let cx = (at.x + i64::from(at.w / 2)) * i64::from(u);
             let foot = (at.y + i64::from(at.h)) * i64::from(u);
             Tag {
@@ -1621,7 +1740,7 @@ fn place_tags(
             }
         })
         .collect();
-    // Stable, so the dots keep pixtuoid's order among themselves.
+    // Stable, so the short ones keep pixtuoid's order among themselves.
     tags.sort_by_key(|t| !t.full);
     // A badge that would cover a neighbour's (sitters side by side on a
     // sofa) steps up a tier over its own figure, so every name reads.
@@ -1666,7 +1785,7 @@ fn paint_world_text(
     text: HostText<'_>,
     d: u32,
     board: Option<&[String; 2]>,
-) -> Vec<Area> {
+) -> Vec<BoardLine> {
     let mut signs: Vec<Area> = Vec::new();
     let mut boards = Vec::new();
     let mut lines = board.into_iter().flatten();
@@ -1703,12 +1822,55 @@ fn paint_world_text(
         }
         signs.push(rect);
         if run.role == TextRole::Board {
-            boards.push(rect);
+            // The tally is Chinese, which the art font has none of: its
+            // plate is painted here and its words by the window over it.
+            let words = line
+                .zip(run.spans.first())
+                .map(|(l, sp)| (l.clone(), sp.ink));
+            if words.is_some()
+                && let Some(plate) = run.plate
+            {
+                art.fill(rect.x, rect.y, rect.w, rect.h, to_u32(plate));
+            }
+            boards.push((rect, words.clone()));
+            if words.is_some() {
+                continue;
+            }
         }
         paint_run(art, run, rect);
     }
     boards
 }
+
+/// Set the evening board's tally lines in the readable faces over their
+/// places on the art grid, `u` window pixels an art pixel.
+fn paint_board_words(canvas: &mut Canvas, faces: &mut Faces, boards: &[BoardLine], u: i64) {
+    for (a, words) in boards {
+        let Some((line, ink)) = words else { continue };
+        let px = (a.h * u32::try_from(u).unwrap_or(1)).max(8);
+        // The art's dimmest board ink, made for a glowing 8px font, sank
+        // into the board as smooth type; lifted halfway to white it reads.
+        let lift = |c: u8| c + (0xff - c) / 2;
+        let ink = Rgb {
+            r: lift(ink.r),
+            g: lift(ink.g),
+            b: lift(ink.b),
+        };
+        let base = a.y * u + i64::from(faces.ascent(px));
+        faces.draw(
+            canvas,
+            a.x * u + i64::from(PLATE_PAD) * u,
+            base,
+            line,
+            to_u32(ink),
+            px,
+        );
+    }
+}
+
+/// A line on the wall board, on the art grid, and the words the window sets
+/// on it in place of the art font's.
+type BoardLine = (Area, Option<(String, Rgb)>);
 
 /// Whether the window sets a sign of `role` in the readable faces rather
 /// than the art font: the zones' door signs, in Chinese, and the benches'
@@ -1767,6 +1929,10 @@ fn zone_about(text: &str) -> Option<&'static str> {
     })
 }
 
+/// Points a sign's explanation is set in: a paragraph to read, which at the
+/// sign's own 9pt came out at 9 pixels on a plain display.
+const ABOUT_PT: f64 = 10.5;
+
 /// How long a sign's explanation stays up unless clicked away.
 const ABOUT_FOR: Duration = Duration::from_secs(10);
 /// Cells an explanation's line may take.
@@ -1801,7 +1967,7 @@ fn paint_about(
     bounds: (u32, u32),
     scale_factor: f64,
 ) {
-    let px = pt_px(SIGN_PT, scale_factor);
+    let px = pt_px(ABOUT_PT, scale_factor);
     let pad = 2 * tag_pad(scale_factor);
     let cell = faces.cell_w(px).max(1);
     let fit = bounds.0.saturating_sub(2 * pad + 2) / cell;
@@ -1913,7 +2079,9 @@ fn paint_stuck(
         let (x, y) = (b.x + i64::from(b.w + pad), b.y);
         canvas.fill(x, y, w, b.h, STUCK_RED);
         let base = y + i64::from(pad) + i64::from(faces.ascent(name_px));
-        faces.draw(canvas, x + i64::from(pad), base, "?", TEXT, name_px);
+        // Dark on the red, as the panel's stuck chip is: white on it read
+        // at 2:1.
+        faces.draw(canvas, x + i64::from(pad), base, "?", PANEL_BG, name_px);
     }
 }
 
@@ -2024,16 +2192,6 @@ fn paint_tags(
     for t in tags {
         let r = t.badge;
         canvas.fill(r.x, r.y, r.w, r.h, t.plate);
-        if !t.full {
-            canvas.fill(
-                r.x + i64::from(pad),
-                r.y + i64::from(pad),
-                r.w - 2 * pad,
-                r.h - 2 * pad,
-                t.marker,
-            );
-            continue;
-        }
         canvas.fill(r.x, r.y, pad, r.h, t.marker);
         let ink = if selected == Some(t.agent) {
             0x00ff_ffff
@@ -2063,6 +2221,18 @@ fn paint_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A badge past the crowd's cut keeps a short name, not a dot: a dot
+    /// told no one which session sat there. Its namesake number stays, or
+    /// two sessions of one repo read the same.
+    #[test]
+    fn a_short_badge_keeps_its_name_and_number() {
+        assert_eq!(short_name("blog"), "blog");
+        assert_eq!(short_name("weather-bot"), "weather…");
+        let n = short_name("agent-office\u{b7}2");
+        assert!(n.ends_with("\u{b7}2"), "{n}");
+        assert!(crate::text::cells(&n) <= SHORT_NAME_CELLS, "{n}");
+    }
 
     /// A drag across many sizes keeps the office it started with, and its
     /// desk count with it: each size is its own layout, so taking each one
