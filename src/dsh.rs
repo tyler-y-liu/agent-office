@@ -129,7 +129,10 @@ fn after_disconnect(text: &str) -> String {
 fn with_ours(text: &str, plugin: &Path) -> Result<String> {
     anyhow::ensure!(
         !is_flow(text),
-        "cordis.patch.yml 是 [ ... ] 写法，改成每行一个 `- ` 的写法后再 connect dsh"
+        crate::i18n::t(
+            "cordis.patch.yml 是 [ ... ] 写法，改成每行一个 `- ` 的写法后再 connect dsh",
+            "cordis.patch.yml uses the [ ... ] form; rewrite it with one `- ` item per line, then connect dsh again"
+        )
     );
     let name = serde_json::to_string(&plugin.display().to_string())?;
     let mut out = without_ours(text);
@@ -147,7 +150,9 @@ fn read_patch(home: &Path) -> Result<String> {
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e).with_context(|| format!("读 {} 失败", path.display())),
+        Err(e) => {
+            Err(e).with_context(|| crate::tr!("读 {} 失败", "could not read {}", path.display()))
+        }
     }
 }
 
@@ -156,26 +161,42 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let tmp = path.with_extension("yml.agent-office.tmp");
     std::fs::write(&tmp, text)
         .and_then(|()| std::fs::rename(&tmp, path))
-        .with_context(|| format!("写 {} 失败", path.display()))
+        .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))
 }
 
 /// `agent-office connect dsh`.
 pub fn connect() -> Result<()> {
-    let home = home().context("找不到 dsh 目录（DSH_HOME 或 ~/.dsh）")?;
-    let dir = our_dir().context("找不到 dsh 目录")?;
-    let transcripts = transcripts_dir().context("找不到 dsh 目录")?;
-    let viewing = viewing_dir().context("找不到 dsh 目录")?;
+    let home = home().context(crate::i18n::t(
+        "找不到 dsh 目录（DSH_HOME 或 ~/.dsh）",
+        "cannot find the dsh directory (DSH_HOME or ~/.dsh)",
+    ))?;
+    let dir = our_dir().context(crate::i18n::t(
+        "找不到 dsh 目录",
+        "cannot find the dsh directory",
+    ))?;
+    let transcripts = transcripts_dir().context(crate::i18n::t(
+        "找不到 dsh 目录",
+        "cannot find the dsh directory",
+    ))?;
+    let viewing = viewing_dir().context(crate::i18n::t(
+        "找不到 dsh 目录",
+        "cannot find the dsh directory",
+    ))?;
     std::fs::create_dir_all(&transcripts)
-        .with_context(|| format!("建 {} 失败", transcripts.display()))?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+        .with_context(|| crate::tr!("建 {} 失败", "could not create {}", transcripts.display()))?;
+    let exe = crate::hook::exe_for_hooks()?;
     let plugin = plugin_path(&dir);
     std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing)?)
-        .with_context(|| format!("写 {} 失败", plugin.display()))?;
+        .with_context(|| crate::tr!("写 {} 失败", "could not write {}", plugin.display()))?;
     let before = read_patch(&home)?;
     write_atomic(&patch_path(&home), &with_ours(&before, &plugin)?)?;
     println!(
-        "已挂上 {}；新开的 dsh 进程才生效。移动或删除这个程序后要重新 connect dsh。",
-        plugin.display()
+        "{}",
+        crate::tr!(
+            "已挂上 {}；新开的 dsh 进程才生效。移动或删除这个程序后要重新 connect dsh。",
+            "Mounted {}; it applies to new dsh processes. Run connect dsh again after moving or deleting this program.",
+            plugin.display()
+        )
     );
     Ok(())
 }
@@ -183,12 +204,22 @@ pub fn connect() -> Result<()> {
 /// `agent-office disconnect dsh`: unmount and delete the plugin. The task
 /// logs stay: they are the user's sessions, not ours to drop.
 pub fn disconnect() -> Result<()> {
-    let home = home().context("找不到 dsh 目录（DSH_HOME 或 ~/.dsh）")?;
+    let home = home().context(crate::i18n::t(
+        "找不到 dsh 目录（DSH_HOME 或 ~/.dsh）",
+        "cannot find the dsh directory (DSH_HOME or ~/.dsh)",
+    ))?;
     let before = read_patch(&home)?;
     let after = after_disconnect(&before);
     if after != before {
         write_atomic(&patch_path(&home), &after)?;
-        println!("已从 {} 移除", patch_path(&home).display());
+        println!(
+            "{}",
+            crate::tr!(
+                "已从 {} 移除",
+                "Removed from {}",
+                patch_path(&home).display()
+            )
+        );
     }
     if let Some(dir) = our_dir() {
         let _ = std::fs::remove_file(plugin_path(&dir));

@@ -148,11 +148,11 @@ pub enum Phase {
 impl Phase {
     pub fn label(self) -> &'static str {
         match self {
-            Phase::Research => "调研",
-            Phase::Code => "写码",
-            Phase::Test => "测试",
-            Phase::Run => "执行",
-            Phase::Delegate => "派活",
+            Phase::Research => crate::i18n::t("调研", "research"),
+            Phase::Code => crate::i18n::t("写码", "coding"),
+            Phase::Test => crate::i18n::t("测试", "testing"),
+            Phase::Run => crate::i18n::t("执行", "running"),
+            Phase::Delegate => crate::i18n::t("派活", "delegating"),
         }
     }
 }

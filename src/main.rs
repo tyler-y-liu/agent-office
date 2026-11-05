@@ -10,6 +10,7 @@ mod dsh;
 mod floating;
 mod fun;
 mod hook;
+mod i18n;
 mod jump;
 mod notify;
 mod panel;
@@ -50,9 +51,10 @@ fn main() -> Result<()> {
                 ("disconnect", Some(&"cursor")) => cursor::disconnect(),
                 // A typo must not touch Claude Code's hooks instead.
                 (_, Some(other)) => {
-                    anyhow::bail!(
-                        "不认识 {other}：只有 {cmd}、{cmd} dsh、{cmd} codex、{cmd} cursor"
-                    )
+                    anyhow::bail!(crate::tr!(
+                        "不认识 {other}：只有 {cmd}、{cmd} dsh、{cmd} codex、{cmd} cursor",
+                        "unknown {other}: only {cmd}, {cmd} dsh, {cmd} codex, {cmd} cursor"
+                    ))
                 }
                 _ => unreachable!(),
             };
@@ -60,6 +62,11 @@ fn main() -> Result<()> {
         Some(&"doctor") => return doctor::run(),
         Some(&"roles") => return roles::cli(&args[1..]),
         Some(&"dispatch") => return roles::dispatch_cli(&args[1..]),
+        // Lets `brew test` and bug reports check the install without opening the window.
+        Some(&"--version") => {
+            println!("agent-office {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         _ => {}
     }
     let socket = hook::socket_path();

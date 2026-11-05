@@ -72,8 +72,8 @@ pub enum Stuck {
 impl Stuck {
     pub fn describe(self) -> String {
         match self {
-            Stuck::Failing(n) => format!("连续失败 {n} 次"),
-            Stuck::Quiet(m) => format!("{m} 分钟没动静"),
+            Stuck::Failing(n) => crate::tr!("连续失败 {n} 次", "{n} failures in a row"),
+            Stuck::Quiet(m) => crate::tr!("{m} 分钟没动静", "quiet for {m} min"),
         }
     }
 }
@@ -541,7 +541,7 @@ async fn run(
                 let asks = e
                     .outcome
                     .as_ref()
-                    .is_some_and(|(_, line)| line.starts_with("问："));
+                    .is_some_and(|(_, line)| crate::i18n::is_ask(line));
                 if asks || !crate::core::idle_long(slot, SystemTime::now()) {
                     let basis = format!(
                         "{prompt}\u{1f}{}",

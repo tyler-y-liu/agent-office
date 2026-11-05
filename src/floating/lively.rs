@@ -12,6 +12,7 @@ use pixtuoid_scene::layout::{CHARACTER_SPRITE_H, CHARACTER_SPRITE_W};
 use super::vector::Faces;
 use super::{Area, Canvas, DoorSign, Tag, pt_px, tag_pad};
 use crate::fun::{Festival, Mood};
+use crate::i18n::t;
 use crate::tasks::Cheer;
 
 /// Where the office stands in the window and how big its pixels are.
@@ -383,9 +384,9 @@ pub(super) fn confetti(canvas: &mut Canvas, s: Stage, t: &Tag, ago: Duration) {
 /// What a cheer says on its plate, and the plate's colour.
 fn cheer_plate(c: Cheer) -> (&'static str, u32) {
     match c {
-        Cheer::TestsPassed => ("测试全过！", 0x002e_8b57),
-        Cheer::Shipped => ("已推送！", 0x00b0_3a2e),
-        Cheer::Recovered => ("终于过咗！", 0x00b8_860b),
+        Cheer::TestsPassed => (t("测试全过！", "All green!"), 0x002e_8b57),
+        Cheer::Shipped => (t("已推送！", "Shipped!"), 0x00b0_3a2e),
+        Cheer::Recovered => (t("终于过咗！", "Fixed at last!"), 0x00b8_860b),
     }
 }
 
@@ -468,7 +469,14 @@ pub(super) fn boss(
     if rise >= 1.0 {
         let pad = i64::from(tag_pad(s.scale_factor));
         let at = (x + sprite_w(BOSS) * u + pad, y);
-        plate(canvas, faces, s, at, "批咗！", (0x00f4_f1e8, 0x0020_2020));
+        plate(
+            canvas,
+            faces,
+            s,
+            at,
+            t("批咗！", "Approved!"),
+            (0x00f4_f1e8, 0x0020_2020),
+        );
     }
 }
 
@@ -568,14 +576,21 @@ pub(super) fn replay(
         let base = y + pad + row * line_h + i64::from(faces.ascent(px));
         faces.draw(canvas, x + pad, base, line, ink, px);
     };
-    text(canvas, faces, 0, "今日回顾", 0x00ff_4fa3);
+    text(
+        canvas,
+        faces,
+        0,
+        t("今日回顾", "Today in review"),
+        0x00ff_4fa3,
+    );
 
     // The day so far, its hours filling in one after another.
     let t = (ago.as_secs_f64() / REPLAY_DAY.as_secs_f64()).min(1.0);
     let hours_shown = (t * 24.0).ceil() as usize;
     let done: u32 = stats.hours.iter().take(hours_shown).sum();
-    let clock = format!(
+    let clock = crate::tr!(
         "{:02}:00  完成 {done} 轮",
+        "{:02}:00  {done} turns done",
         hours_shown.min(24).saturating_sub(1)
     );
     text(canvas, faces, 1, &clock, 0x00e6_e6e6);
@@ -609,8 +624,12 @@ pub(super) fn replay(
     let u = s.u.max(1);
     let row = 5;
     let most = match &recap.most {
-        Some((name, n)) => format!("最多：{} {n} 轮", pixtuoid_scene::badge::shown_label(name)),
-        None => "今日未有人完成".to_owned(),
+        Some((name, n)) => crate::tr!(
+            "最多：{} {n} 轮",
+            "Most: {} {n} turns",
+            pixtuoid_scene::badge::shown_label(name)
+        ),
+        None => crate::i18n::t("今日未有人完成", "No one finished today").to_owned(),
     };
     // The trophy drops in and bounces where the winner's line ends.
     let since = (ago - REPLAY_DAY).as_secs_f64();
@@ -623,12 +642,13 @@ pub(super) fn replay(
     }
     if ago >= REPLAY_DAY + Duration::from_millis(1_200) {
         let stuck = match &recap.stuck {
-            Some((name, secs)) => format!(
+            Some((name, secs)) => crate::tr!(
                 "卡最久：{} {} 分钟",
+                "Stuck longest: {} {} min",
                 pixtuoid_scene::badge::shown_label(name),
                 secs.div_ceil(60)
             ),
-            None => "今日冇人卡住".to_owned(),
+            None => crate::i18n::t("今日冇人卡住", "No one got stuck today").to_owned(),
         };
         text(canvas, faces, row + 1, &stuck, 0x00ff_8a8a);
     }
@@ -657,7 +677,7 @@ pub(super) fn festival(
                     canvas.fill(x + 2 * u, top + 2 * u, (2 * u) as u32, (2 * u) as u32, col);
                 }
             }
-            if let Some(o) = signs.iter().find(|d| d.text == "你的办公室") {
+            if let Some(o) = signs.iter().find(|d| d.text == super::office_sign()) {
                 let th = TREE.len() as i64 * u;
                 sprite(
                     canvas,
@@ -733,11 +753,11 @@ pub(super) fn typhoon_signal(canvas: &mut Canvas, faces: &mut Faces, s: Stage, s
         ],
     };
     let name = match signal {
-        1 => "一号风球",
-        3 => "三号风球",
-        8 => "八号风球",
-        9 => "九号风球",
-        _ => "十号风球",
+        1 => t("一号风球", "Signal No. 1"),
+        3 => t("三号风球", "Signal No. 3"),
+        8 => t("八号风球", "Signal No. 8"),
+        9 => t("九号风球", "Signal No. 9"),
+        _ => t("十号风球", "Signal No. 10"),
     };
     let u = s.u;
     let px = pt_px(10.0, s.scale_factor);
@@ -759,14 +779,17 @@ pub(super) fn typhoon_signal(canvas: &mut Canvas, faces: &mut Faces, s: Stage, s
     faces.draw(canvas, x + sym + 3 * pad, base, name, 0x0020_2020, px);
 }
 
-/// The wall board's two lines with the day's tally, in Chinese like the
-/// rest of the office: the window sets them in its readable faces, the art
-/// font's 8px English having been all but unreadable.
+/// The wall board's two lines with the day's tally, in the office's
+/// language: the window sets them in its readable faces, the art font's 8px
+/// English having been all but unreadable.
 pub(super) fn tally_lines(stats: &crate::fun::stats::Stats) -> [String; 2] {
     [
-        format!("今日完成 {} 轮", stats.turns),
-        format!(
-            "卡住 {} · {} token",
+        crate::tr!("今日完成 {} 轮", "{} turns today", stats.turns),
+        crate::tr!(
+            // "Stuck N" read as N stuck now, beside a panel with none: it is
+            // the day's count.
+            "卡过 {} · {} token",
+            "stuck {}× · {} tok",
             stats.stuck,
             crate::fun::stats::tokens_short(stats.tokens)
         ),
@@ -904,7 +927,8 @@ mod tests {
     }
 
     /// The board's tally says what was done in the office's language, short
-    /// enough for the board's line.
+    /// enough for the board's line; its stuck count reads as the day's, not
+    /// as how many are stuck now, which the panel's header says.
     #[test]
     fn the_tally_reads_turns_stuck_and_tokens() {
         let stats = crate::fun::stats::Stats {
@@ -915,13 +939,16 @@ mod tests {
         };
         assert_eq!(
             tally_lines(&stats),
-            ["今日完成 12 轮", "卡住 2 · 1.2M token"]
+            ["今日完成 12 轮", "卡过 2 · 1.2M token"]
         );
         assert!(
             tally_lines(&stats)
                 .iter()
                 .all(|l| crate::text::cells(l) <= 20)
         );
+        let en = crate::i18n::with(crate::i18n::Lang::En, || tally_lines(&stats));
+        assert_eq!(en, ["12 turns today", "stuck 2× · 1.2M tok"]);
+        assert!(en.iter().all(|l| crate::text::cells(l) <= 20), "{en:?}");
     }
 
     /// The ticket flies only once the subagent is drawn (a sub is hidden

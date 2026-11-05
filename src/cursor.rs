@@ -96,20 +96,26 @@ fn remove_ours(doc: &mut Value) {
 }
 
 fn add_ours(doc: &mut Value, command: &str) -> Result<()> {
-    let root = doc.as_object_mut().context("hooks.json 顶层不是对象")?;
+    let root = doc.as_object_mut().context(crate::i18n::t(
+        "hooks.json 顶层不是对象",
+        "hooks.json is not an object at its top level",
+    ))?;
     // Cursor loads no hooks from a file without a version; a user's own stays.
     root.entry("version").or_insert_with(|| json!(1));
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .context("hooks.json 的 hooks 不是对象")?;
+        .context(crate::i18n::t(
+            "hooks.json 的 hooks 不是对象",
+            "hooks in hooks.json is not an object",
+        ))?;
     for event in EVENTS {
         hooks
             .entry(event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
-            .with_context(|| format!("hooks.{event} 不是数组"))?
+            .with_context(|| crate::tr!("hooks.{event} 不是数组", "hooks.{event} is not an array"))?
             .push(json!({ "command": command }));
     }
     Ok(())
@@ -128,35 +134,54 @@ fn read_hooks(path: &Path) -> Result<(Option<String>, Value)> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => Some(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e).with_context(|| format!("读 {} 失败", path.display())),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| crate::tr!("读 {} 失败", "could not read {}", path.display()));
+        }
     };
     let v = serde_json::from_str(raw.as_deref().unwrap_or("{}"))
-        .with_context(|| format!("{} 不是合法 JSON", path.display()))?;
+        .with_context(|| crate::tr!("{} 不是合法 JSON", "{} is not valid JSON", path.display()))?;
     Ok((raw, v))
 }
 
 fn write_hooks(path: &Path, before: Option<&str>, doc: &Value) -> Result<()> {
     if let Some(before) = before {
         let backup = path.with_extension("json.agent-office.bak");
-        std::fs::write(&backup, before)
-            .with_context(|| format!("备份到 {} 失败", backup.display()))?;
-        println!("原文件备份在 {}", backup.display());
+        std::fs::write(&backup, before).with_context(|| {
+            crate::tr!(
+                "备份到 {} 失败",
+                "could not back up to {}",
+                backup.display()
+            )
+        })?;
+        println!(
+            "{}",
+            crate::tr!(
+                "原文件备份在 {}",
+                "Backed up the original to {}",
+                backup.display()
+            )
+        );
     }
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("建 {} 失败", dir.display()))?;
+        std::fs::create_dir_all(dir)
+            .with_context(|| crate::tr!("建 {} 失败", "could not create {}", dir.display()))?;
     }
     let tmp = path.with_extension("json.agent-office.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(doc)? + "\n")
         .and_then(|()| std::fs::rename(&tmp, path))
-        .with_context(|| format!("写 {} 失败", path.display()))?;
-    println!("已更新 {}", path.display());
+        .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
+    println!("{}", crate::tr!("已更新 {}", "Updated {}", path.display()));
     Ok(())
 }
 
 /// `agent-office connect cursor`.
 pub fn connect() -> Result<()> {
-    let path = hooks_path().context("找不到 Cursor 配置目录")?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let path = hooks_path().context(crate::i18n::t(
+        "找不到 Cursor 配置目录",
+        "cannot find the Cursor config directory",
+    ))?;
+    let exe = crate::hook::exe_for_hooks()?;
     let quoted = exe.display().to_string().replace('\'', "'\\''");
     let command = format!("'{quoted}' hook --source {CURSOR_SOURCE}");
     let (raw, mut doc) = read_hooks(&path)?;
@@ -164,8 +189,12 @@ pub fn connect() -> Result<()> {
     add_ours(&mut doc, &command)?;
     write_hooks(&path, raw.as_deref(), &doc)?;
     println!(
-        "Cursor 的 hooks 指向 {}；新开的 cursor-agent 才生效。移动或删除这个程序后要重新 connect cursor。",
-        exe.display()
+        "{}",
+        crate::tr!(
+            "Cursor 的 hooks 指向 {}；新开的 cursor-agent 才生效。移动或删除这个程序后要重新 connect cursor。",
+            "Cursor hooks now point to {}; they apply to new cursor-agent runs. Run connect cursor again after moving or deleting this program.",
+            exe.display()
+        )
     );
     Ok(())
 }
@@ -173,7 +202,10 @@ pub fn connect() -> Result<()> {
 /// `agent-office disconnect cursor`. The task logs stay: they are the
 /// user's sessions, not ours to drop.
 pub fn disconnect() -> Result<()> {
-    let path = hooks_path().context("找不到 Cursor 配置目录")?;
+    let path = hooks_path().context(crate::i18n::t(
+        "找不到 Cursor 配置目录",
+        "cannot find the Cursor config directory",
+    ))?;
     let (raw, mut doc) = read_hooks(&path)?;
     if raw.is_none() {
         return Ok(());

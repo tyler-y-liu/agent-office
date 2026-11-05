@@ -1729,10 +1729,32 @@ fn a_sub_agent_sits_on_its_parents_floor_else_an_open_one() {
     assert_eq!(scene.agents[&c].floor_idx, 2);
 }
 
+/// Every seat must lie on its floor as the office now lays it out: a desk
+/// off its floor is drawn nowhere, and the allocator counts it on another
+/// floor, sending newcomers upstairs.
+fn assert_seats_match_floors(scene: &SceneState) {
+    for a in scene.agents.values() {
+        assert_eq!(
+            scene.floor_of(a.desk_index),
+            a.floor_idx,
+            "{:?}'s desk {:?} lies on another floor than the one it is drawn on",
+            a.agent_id,
+            a.desk_index
+        );
+        assert!(
+            scene.floor_range(a.floor_idx).contains(&a.desk_index.0),
+            "{:?}'s desk is past its floor's last one, so it is drawn nowhere",
+            a.agent_id
+        );
+    }
+}
+
 /// A seat was frozen at allocation, so one who overflowed upstairs kept a
-/// floor open alone after the ground floor emptied.
+/// floor open, working or not, after the ground floor emptied: the office
+/// read as people scattered over floors for no reason you could see. Now
+/// anyone moves down as soon as a lower floor has room.
 #[test]
-fn an_idle_agent_upstairs_moves_down_once_a_lower_desk_frees() {
+fn an_agent_upstairs_moves_down_once_a_lower_desk_frees() {
     let mut scene = SceneState::new(caps(&[1, 1]));
     let mut r = Reducer::new();
     let now = SystemTime::now();
@@ -1742,22 +1764,17 @@ fn an_idle_agent_upstairs_moves_down_once_a_lower_desk_frees() {
     seat(&mut r, &mut scene, b, "/repo-b", None, now);
     assert_eq!(scene.agents[&b].floor_idx, 1);
 
-    // b is at work: it stays where you may be watching it.
     scene.agents.remove(&a);
     scene.agents.get_mut(&b).unwrap().state = ActivityState::Running { item: None };
     r.tick(&mut scene, now);
-    assert_eq!(scene.agents[&b].floor_idx, 1, "a working agent is not moved");
-
-    scene.agents.get_mut(&b).unwrap().state = ActivityState::Idle;
-    r.tick(&mut scene, now);
     let slot = &scene.agents[&b];
-    assert_eq!(slot.floor_idx, 0, "idle, it takes the freed ground-floor desk");
+    assert_eq!(slot.floor_idx, 0, "at work too, it takes the freed ground-floor desk");
     assert_eq!(slot.desk_index, GlobalDeskIndex(0));
     assert_eq!(scene.floors_in_use(), 1, "and the second floor closes");
 }
 
-/// Moving down must not split a team: a sub-agent keeps its parent's floor,
-/// and a parent waits for its sub-agents before it moves.
+/// Moving down must not split a team: the session and its sub-agents move
+/// together, only to a floor with a desk for each.
 #[test]
 fn moving_down_keeps_a_team_on_one_floor() {
     let mut scene = SceneState::new(caps(&[2, 2]));
@@ -1774,12 +1791,48 @@ fn moving_down_keeps_a_team_on_one_floor() {
     assert_eq!(scene.agents[&sub].floor_idx, 1);
 
     scene.agents.remove(&a);
-    scene.agents.remove(&b);
     r.tick(&mut scene, now);
-    assert_eq!(scene.agents[&up].floor_idx, 1, "the parent waits for its sub-agent");
+    assert_eq!(scene.agents[&up].floor_idx, 1, "one desk below is not room for two");
     assert_eq!(scene.agents[&sub].floor_idx, 1, "the sub-agent stays beside it");
 
-    scene.agents.remove(&sub);
+    scene.agents.remove(&b);
     r.tick(&mut scene, now);
-    assert_eq!(scene.agents[&up].floor_idx, 0, "alone, the parent moves down");
+    assert_eq!(scene.agents[&up].floor_idx, 0, "with room for both, the team moves down");
+    assert_eq!(scene.agents[&sub].floor_idx, 0);
+    assert_seats_match_floors(&scene);
+}
+
+/// Each floor's desk count follows the window's size. A window made narrower
+/// and wide again reread every seat's global desk number against new floors:
+/// sessions that came in meanwhile went upstairs and stayed there, and one
+/// whose number now fell on another floor was drawn on none. Once the window
+/// is wide again, everyone fits the ground floor and sits there.
+#[test]
+fn a_window_narrowed_and_widened_leaves_no_one_upstairs() {
+    let mut scene = SceneState::new(caps(&[4, 4, 4]));
+    let mut r = Reducer::new();
+    let now = SystemTime::now();
+    let ids: Vec<AgentId> = ["a", "b", "c"]
+        .iter()
+        .map(|n| AgentId::from_parts("claude-code", n))
+        .collect();
+    seat(&mut r, &mut scene, ids[0], "/repo", None, now);
+
+    scene.floor_capacities = caps(&[1, 1, 1]);
+    seat(&mut r, &mut scene, ids[1], "/repo", None, now);
+    seat(&mut r, &mut scene, ids[2], "/repo", None, now);
+    r.tick(&mut scene, now);
+    assert_seats_match_floors(&scene);
+    assert_eq!(scene.floors_in_use(), 3, "narrow, one desk a floor seats three on three");
+
+    scene.floor_capacities = caps(&[4, 4, 4]);
+    for id in &ids {
+        scene.agents.get_mut(id).unwrap().state = ActivityState::Running { item: None };
+    }
+    r.tick(&mut scene, now);
+    assert_seats_match_floors(&scene);
+    for id in &ids {
+        assert_eq!(scene.agents[id].floor_idx, 0, "{id:?} is back on the ground floor");
+    }
+    assert_eq!(scene.floors_in_use(), 1);
 }

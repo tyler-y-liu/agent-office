@@ -56,9 +56,6 @@ pub struct PanelState {
     pub reveal: bool,
     /// The card under the pointer.
     pub hovered: Option<AgentId>,
-    /// Lunch or a typhoon: the idle are drawn in the cha chaan teng, not on
-    /// the rooftop, and their group's header says so.
-    pub in_pantry: bool,
     /// Task lines are summarized: a raw one is then marked as not yet.
     pub summaries: bool,
 }
@@ -103,7 +100,7 @@ pub fn waits_on_you(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> Op
             if !read
                 && view.is_some_and(|v| {
                     v.outcome_summarized
-                        && v.outcome.as_deref().is_some_and(|o| o.starts_with("问："))
+                        && v.outcome.as_deref().is_some_and(|o| crate::i18n::is_ask(o))
                 }) =>
         {
             Some(Wait::Reply)
@@ -157,18 +154,76 @@ impl Group {
         }
     }
 
-    /// The group's header: what it needs from you, then where they are;
-    /// `in_pantry` while the idle are down in the cha chaan teng.
-    pub fn title(self, in_pantry: bool) -> &'static str {
+    /// The group's header: what it needs from you. Where its agents are is
+    /// left out: they walk there, and a room named over someone still at
+    /// their desk sent you looking in the wrong place.
+    pub fn title(self) -> &'static str {
         match self {
-            Self::Waiting => "等你 · 等候区",
-            Self::Stuck => "卡住 · 工位",
-            Self::Done => "做完待看 · 茶水间",
-            Self::Working => "干活 · 工位",
-            Self::Idle if in_pantry => "闲着 · 茶餐厅",
-            Self::Idle => "闲着 · 天台",
+            Self::Waiting => crate::i18n::t("等你", "Waiting"),
+            Self::Stuck => crate::i18n::t("卡住", "Stuck"),
+            Self::Done => crate::i18n::t("做完待看", "Done, to read"),
+            Self::Working => crate::i18n::t("干活", "Working"),
+            Self::Idle => crate::i18n::t("闲着", "Idle"),
         }
     }
+
+    /// The word the panel's header counts this group by.
+    fn tally_word(self) -> &'static str {
+        match self {
+            Self::Done => crate::i18n::t("待看", "To read"),
+            g => g.title(),
+        }
+    }
+
+    /// Its colour, the same on the panel's header and cards and on its
+    /// agents' name badges in the office.
+    pub fn color(self) -> Color {
+        match self {
+            Self::Waiting => WAIT,
+            Self::Stuck => STUCK,
+            Self::Done => TASK,
+            Self::Working => WORK,
+            Self::Idle => DIM,
+        }
+    }
+}
+
+/// The panel's header: how many sessions need what of you, in the order the
+/// groups are listed, and the working and idle after. A group with no one in
+/// it is left out; with no one needing you it says so first, so a glance
+/// answers "do I have anything to do" without reading the cards.
+fn header_spans(roots: &[Group], waiting: usize) -> Vec<Span<'static>> {
+    let count = |g: Group| match g {
+        // The footer's and the Dock's count, a subagent's prompt included.
+        Group::Waiting => waiting,
+        g => roots.iter().filter(|&&r| r == g).count(),
+    };
+    let bold = |c: Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::raw(" ")];
+    let needs = [Group::Waiting, Group::Stuck, Group::Done];
+    if needs.iter().all(|&g| count(g) == 0) {
+        spans.push(Span::styled(
+            crate::i18n::t("暂时不用你", "Nothing needs you"),
+            bold(TEXT),
+        ));
+    }
+    for g in needs.into_iter().chain([Group::Working, Group::Idle]) {
+        let n = count(g);
+        if n == 0 {
+            continue;
+        }
+        if spans.len() > 1 {
+            spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+        }
+        let style = if needs.contains(&g) {
+            bold(g.color())
+        } else {
+            Style::default().fg(g.color())
+        };
+        spans.push(Span::styled(format!("{n} {}", g.tally_word()), style));
+    }
+    spans.push(Span::raw(" "));
+    spans
 }
 
 /// The agents in display order: roots grouped by [`Group`], those waiting on
@@ -287,16 +342,6 @@ pub fn step(order: &[(AgentId, u8)], cur: Option<AgentId>, delta: isize) -> Opti
     Some(order[i].0)
 }
 
-fn group_color(g: Group) -> Color {
-    match g {
-        Group::Waiting => WAIT,
-        Group::Stuck => STUCK,
-        Group::Done => TASK,
-        Group::Working => WORK,
-        Group::Idle => DIM,
-    }
-}
-
 /// The first letter of the repository a label names (`cc·repo`), as an
 /// avatar shows it.
 fn avatar_initial(label: &str) -> char {
@@ -318,19 +363,22 @@ fn status(
     now: SystemTime,
 ) -> (String, Color) {
     if slot.exiting_at.is_some() {
-        return ("离开中".into(), DIM);
+        return (crate::i18n::t("离开中", "leaving").into(), DIM);
     }
     // Waiting on the user says what to do; a stuck verdict is for one working.
     if let Some(s) = crate::tasks::stuck_at_work(slot, view) {
         return (format!("{STUCK_MARK} {}", s.describe()), STUCK);
     }
     match &slot.state {
-        ActivityState::RequiresAction { .. } => ("! 等你确认".into(), WAIT),
+        ActivityState::RequiresAction { .. } => (
+            crate::i18n::t("! 等你确认", "! needs approval").into(),
+            WAIT,
+        ),
         ActivityState::Running { item } => {
             let what = match (item, view.and_then(|v| v.phase)) {
                 (Some(_), Some(p)) => format!("▸ {}", p.label()),
-                (Some(_), None) => "▸ 工作中".to_owned(),
-                (None, _) => "… 思考中".to_owned(),
+                (Some(_), None) => crate::i18n::t("▸ 工作中", "▸ working").to_owned(),
+                (None, _) => crate::i18n::t("… 思考中", "… thinking").to_owned(),
             };
             let took = view
                 .and_then(|v| v.turn_started)
@@ -342,20 +390,29 @@ fn status(
         }
         // Opened or not, the question stays unanswered until you reply.
         ActivityState::Idle if waits_on_you(slot, view, false) == Some(Wait::Reply) => (
-            format!("? {REPLY_WAIT} {}", ago(slot.state_started_at)),
+            format!("? {} {}", reply_wait(), ago(slot.state_started_at)),
             WAIT,
         ),
         // Read, it is up on the rooftop however short its idle stretch: the
         // card says why, or "空闲 7m" up there reads as a bug.
-        ActivityState::Idle if read => {
-            (format!("✓ 已看 · 空闲 {}", ago(slot.state_started_at)), DIM)
-        }
+        ActivityState::Idle if read => (
+            crate::tr!(
+                "✓ 已看 · 空闲 {}",
+                "✓ read · idle {}",
+                ago(slot.state_started_at)
+            ),
+            DIM,
+        ),
         // In the pantry to be read: its chip says done, in its group's
         // colour, not idle under a header that says to read it.
-        ActivityState::Idle if Group::of(slot, view, now, read) == Group::Done => {
-            (format!("✓ 做完 {}", ago(slot.state_started_at)), TASK)
-        }
-        ActivityState::Idle => (format!("· 空闲 {}", ago(slot.state_started_at)), DIM),
+        ActivityState::Idle if Group::of(slot, view, now, read) == Group::Done => (
+            crate::tr!("✓ 做完 {}", "✓ done {}", ago(slot.state_started_at)),
+            TASK,
+        ),
+        ActivityState::Idle => (
+            crate::tr!("· 空闲 {}", "· idle {}", ago(slot.state_started_at)),
+            DIM,
+        ),
     }
 }
 
@@ -383,7 +440,9 @@ fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
             // A turn that ended on a question waits for your reply: the
             // outcome says what it asked.
             match view.and_then(|v| v.outcome.as_deref()) {
-                Some(o) if wait == REPLY_WAIT => Some((format!("{wait}：{o}"), WAIT)),
+                Some(o) if wait == reply_wait() => {
+                    Some((crate::tr!("{wait}：{o}", "{wait}: {o}"), WAIT))
+                }
                 _ => Some((wait, WAIT)),
             }
         }
@@ -393,7 +452,7 @@ fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
             let o = v.outcome.clone()?;
             let color = if !v.outcome_summarized {
                 DIM
-            } else if o.starts_with("问：") {
+            } else if crate::i18n::is_ask(&o) {
                 WAIT
             } else {
                 TEXT
@@ -405,7 +464,9 @@ fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
 }
 
 /// The agent finished its turn and waits on your answer.
-const REPLY_WAIT: &str = "等你回复";
+fn reply_wait() -> &'static str {
+    crate::i18n::t("等你回复", "Waiting for your reply")
+}
 
 /// What the agent waits on, in words. pixtuoid's reason is `"permission"`
 /// for a PermissionRequest hook and Claude's own English line for a
@@ -413,12 +474,13 @@ const REPLY_WAIT: &str = "等你回复";
 fn waiting_on(reason: Option<&str>, last_tool: Option<&str>) -> String {
     match reason {
         Some("permission") | None => match last_tool {
-            Some(t) => format!("等你批准：{t}"),
-            None => "等你批准工具调用".to_owned(),
+            Some(t) => crate::tr!("等你批准：{t}", "Approve: {t}"),
+            None => crate::i18n::t("等你批准工具调用", "Waiting for you to approve a tool call")
+                .to_owned(),
         },
-        Some(r) if r.contains("waiting for your input") => REPLY_WAIT.to_owned(),
+        Some(r) if r.contains("waiting for your input") => reply_wait().to_owned(),
         Some(r) if r.contains("needs your permission") => match last_tool {
-            Some(t) => format!("等你批准：{t}"),
+            Some(t) => crate::tr!("等你批准：{t}", "Approve: {t}"),
             None => one_line(r),
         },
         Some(r) => one_line(r),
@@ -608,16 +670,21 @@ fn card(
         )),
         Some(t) => {
             // With summaries off a raw line is all there is: no mark for it.
-            let mark = look.summaries && !pending;
+            let mark =
+                (look.summaries && !pending).then(|| crate::i18n::t(" ·未总结", " ·unsummarized"));
+            let room = 2 + mark.map_or(0, crate::text::cells);
             spans.push(Span::styled(
-                truncate_cells(&t, body_w.saturating_sub(if mark { 8 } else { 2 })),
+                truncate_cells(&t, body_w.saturating_sub(room)),
                 Style::default().fg(DIM),
             ));
-            if mark {
-                spans.push(Span::styled(" ·未总结", Style::default().fg(DIM)));
+            if let Some(mark) = mark {
+                spans.push(Span::styled(mark, Style::default().fg(DIM)));
             }
         }
-        None => spans.push(Span::styled("（还没有指令）", Style::default().fg(DIM))),
+        None => spans.push(Span::styled(
+            crate::i18n::t("（还没有指令）", "(no prompt yet)"),
+            Style::default().fg(DIM),
+        )),
     }
     if pending {
         spans.push(Span::styled(" …", Style::default().fg(DIM)));
@@ -638,7 +705,7 @@ fn card(
     if expanded && let Some(v) = view {
         if let Some(p) = &v.prompt {
             lines.push(Line::from(Span::styled(
-                format!("{pad}指令"),
+                format!("{pad}{}", crate::i18n::t("指令", "Prompt")),
                 Style::default().fg(DIM),
             )));
             for l in wrap(p, body_w).into_iter().take(6) {
@@ -652,7 +719,7 @@ fn card(
             && let Some(r) = &v.reply
         {
             lines.push(Line::from(Span::styled(
-                format!("{pad}最后回复"),
+                format!("{pad}{}", crate::i18n::t("最后回复", "Last reply")),
                 Style::default().fg(DIM),
             )));
             // The end of a long reply is where it concludes.
@@ -666,7 +733,10 @@ fn card(
         }
         if let Some(t) = &v.todo {
             lines.push(Line::from(vec![
-                Span::styled(format!("{pad}待办 "), Style::default().fg(DIM)),
+                Span::styled(
+                    format!("{pad}{}", crate::i18n::t("待办 ", "Todo ")),
+                    Style::default().fg(DIM),
+                ),
                 Span::styled(
                     truncate_cells(t, body_w.saturating_sub(5)),
                     Style::default().fg(TEXT),
@@ -675,7 +745,7 @@ fn card(
         }
         if !v.recent_tools.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("{pad}最近动作"),
+                format!("{pad}{}", crate::i18n::t("最近动作", "Recent actions")),
                 Style::default().fg(DIM),
             )));
             for t in v.recent_tools.iter().rev() {
@@ -716,18 +786,17 @@ pub fn render(
     // Counted as the footer and the Dock count: a question to you waits as a
     // prompt does.
     let waiting = waiting(scene, views, &order, &state.seen).len();
-    let title = if waiting > 0 {
-        format!(" 任务 · {} 个 agent · {waiting} 个等你 ", order.len())
-    } else {
-        format!(" 任务 · {} 个 agent ", order.len())
-    };
+    let roots: Vec<Group> = order
+        .iter()
+        .filter(|(_, d)| *d == 0)
+        .filter_map(|(id, _)| scene.agents.get(id))
+        .map(|s| group_of(s))
+        .collect();
+    let title = Line::from(header_spans(&roots, waiting));
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(Color::Rgb(0x3b, 0x40, 0x4c)))
-        .title(Span::styled(
-            title,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ));
+        .title(title);
     let inner = block.inner(area);
     block.render(area, buf);
     let inner = Rect {
@@ -741,7 +810,7 @@ pub fn render(
             inner.x,
             inner.y,
             &Line::from(Span::styled(
-                "还没有 agent 会话在运行",
+                crate::i18n::t("还没有 agent 会话在运行", "No agent sessions running yet"),
                 Style::default().fg(DIM),
             )),
             inner.width,
@@ -809,9 +878,9 @@ pub fn render(
                     lines.insert(
                         0,
                         Line::from(Span::styled(
-                            format!("{} ({n})", group.title(state.in_pantry)),
+                            format!("{} ({n})", group.title()),
                             Style::default()
-                                .fg(group_color(group))
+                                .fg(Group::color(group))
                                 .add_modifier(Modifier::BOLD),
                         )),
                     );
@@ -938,6 +1007,30 @@ mod tests {
     use pixtuoid_core::source::{AgentEvent, Transport};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
+
+    /// The header answers "is there anything for me" at a glance: what needs
+    /// you is counted by name, in its group's colour, and with nothing
+    /// needing you it says so rather than leaving you to read every card.
+    #[test]
+    fn the_header_counts_what_needs_you_first() {
+        let text = |sp: &[Span]| sp.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let roots = [
+            Group::Done,
+            Group::Working,
+            Group::Stuck,
+            Group::Done,
+            Group::Idle,
+        ];
+        let spans = header_spans(&roots, 1);
+        assert_eq!(
+            text(&spans).trim(),
+            "1 等你 · 1 卡住 · 2 待看 · 1 干活 · 1 闲着"
+        );
+        let stuck = spans.iter().find(|s| s.content.contains("卡住")).unwrap();
+        assert_eq!(stuck.style.fg, Some(STUCK));
+        let calm = header_spans(&[Group::Working, Group::Working], 0);
+        assert_eq!(text(&calm).trim(), "暂时不用你 · 2 干活");
+    }
 
     fn start(
         scene: &mut SceneState,

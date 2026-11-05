@@ -14,18 +14,39 @@ use crate::text::{one_line, truncate_cells};
 
 /// `KEY=value` lines read when the variables are not in the environment.
 pub(crate) const ENV_FILE: &str = ".config/agent-office/env";
-/// What a label may take: twenty CJK characters.
+/// What a label may take: twenty CJK characters, or forty Latin ones.
 pub const SUMMARY_CELLS: u16 = 40;
 
-const SYSTEM: &str = "你给 AI 编程助手正在做的任务起一句话标题。\
+const SYSTEM_ZH: &str = "你给 AI 编程助手正在做的任务起一句话标题。\
 根据开发者最新的指令（必要时参考之前的指令、当前 todo 和最近动作），\
 用简体中文写一句动宾结构的短句，不超过20个汉字，不加句号、引号或任何前缀，只输出这一句。";
 
-const OUTCOME_SYSTEM: &str = "你用一句话告诉开发者 AI 编程助手这一轮的结果。\
+const SYSTEM_EN: &str = "You title the task an AI coding assistant is working on in one line. \
+From the developer's latest prompt (and, if needed, the earlier prompts, the current todo and recent actions), \
+write one short English verb phrase of at most 40 characters, with no period, quotes or prefix. Output only that phrase.";
+
+const OUTCOME_SYSTEM_ZH: &str = "你用一句话告诉开发者 AI 编程助手这一轮的结果。\
 根据它的任务和它最后的回复，用简体中文写一句短句，不超过20个汉字：\
 做完了就说做成了什么；没做成就说卡在哪；回复里明确向开发者提了问题、要他回答或拿主意才能继续，就以「问：」开头说问的是什么。\
 它在等自己的后台任务、子代理、CI 或部署，或只是顺带提议、留了待办，都不算问，照实说进展。\
 不加句号、引号或别的前缀，只输出这一句。";
+
+const OUTCOME_SYSTEM_EN: &str = "In one line, tell the developer how this turn of an AI coding assistant ended. \
+From its task and its last reply, write one short English sentence of at most 40 characters: \
+if it finished, say what it got done; if not, say where it got stuck; if the reply explicitly asks the developer a question, \
+or needs their answer or decision to go on, start with \"Q: \" and say what it asks. \
+Waiting on its own background tasks, subagents, CI or deploys, or merely offering a suggestion or leaving a todo, \
+is not asking: report the progress as it is. \
+No period, quotes or other prefix. Output only that line.";
+
+/// The summary's instructions, in the language its line is shown in.
+fn system() -> &'static str {
+    crate::i18n::t(SYSTEM_ZH, SYSTEM_EN)
+}
+
+fn outcome_system() -> &'static str {
+    crate::i18n::t(OUTCOME_SYSTEM_ZH, OUTCOME_SYSTEM_EN)
+}
 
 /// What a finished turn's outcome is read from.
 #[derive(Debug, Clone, Default)]
@@ -104,20 +125,20 @@ impl Summarizer {
 
     /// What [`Self::summarize`] would ask, as a [`memo`](super::memo) key.
     pub fn summary_key(&self, input: &SummaryInput) -> String {
-        super::memo::key(&[&self.model, SYSTEM, &user_message(input)])
+        super::memo::key(&[&self.model, system(), &user_message(input)])
     }
 
     /// What [`Self::summarize_outcome`] would ask, as a [`memo`](super::memo) key.
     pub fn outcome_key(&self, input: &OutcomeInput) -> String {
-        super::memo::key(&[&self.model, OUTCOME_SYSTEM, &outcome_message(input)])
+        super::memo::key(&[&self.model, outcome_system(), &outcome_message(input)])
     }
 
     pub async fn summarize(&self, input: &SummaryInput) -> Result<String> {
-        self.ask(SYSTEM, user_message(input)).await
+        self.ask(system(), user_message(input)).await
     }
 
     pub async fn summarize_outcome(&self, input: &OutcomeInput) -> Result<String> {
-        let line = self.ask(OUTCOME_SYSTEM, outcome_message(input)).await?;
+        let line = self.ask(outcome_system(), outcome_message(input)).await?;
         Ok(unasked(line, &input.reply))
     }
 
@@ -163,44 +184,100 @@ pub(crate) fn env_file_var(file: &str, key: &str) -> Option<String> {
 }
 
 fn user_message(input: &SummaryInput) -> String {
-    let mut m = format!("项目: {}\n", input.project);
+    use crate::i18n::t;
+    let mut m = format!("{}: {}\n", t("项目", "Project"), input.project);
     for p in &input.earlier_prompts {
-        m.push_str(&format!("之前的指令: {}\n", truncate_cells(p, 300)));
+        m.push_str(&format!(
+            "{}: {}\n",
+            t("之前的指令", "Earlier prompt"),
+            truncate_cells(p, 300)
+        ));
     }
     m.push_str(&format!(
-        "最新指令: {}\n",
+        "{}: {}\n",
+        t("最新指令", "Latest prompt"),
         truncate_cells(&input.latest_prompt, 1500)
     ));
-    if let Some(t) = &input.todo {
-        m.push_str(&format!("当前 todo: {t}\n"));
+    if let Some(todo) = &input.todo {
+        m.push_str(&format!("{}: {todo}\n", t("当前 todo", "Current todo")));
     }
     if !input.recent_tools.is_empty() {
-        m.push_str(&format!("最近动作: {}\n", input.recent_tools.join("; ")));
+        m.push_str(&format!(
+            "{}: {}\n",
+            t("最近动作", "Recent actions"),
+            input.recent_tools.join("; ")
+        ));
     }
     m
 }
 
 fn outcome_message(input: &OutcomeInput) -> String {
-    let mut m = format!("项目: {}\n", input.project);
-    if let Some(t) = &input.task {
-        m.push_str(&format!("任务: {}\n", truncate_cells(t, 600)));
+    use crate::i18n::t;
+    let mut m = format!("{}: {}\n", t("项目", "Project"), input.project);
+    if let Some(task) = &input.task {
+        m.push_str(&format!(
+            "{}: {}\n",
+            t("任务", "Task"),
+            truncate_cells(task, 600)
+        ));
     }
     // A long reply's conclusion is at its end.
     let n = input.reply.chars().count();
     let tail: String = input.reply.chars().skip(n.saturating_sub(1500)).collect();
-    m.push_str(&format!("最后的回复: {tail}\n"));
+    m.push_str(&format!("{}: {tail}\n", t("最后的回复", "Last reply")));
     m
 }
 
 /// `line` without its 「问：」 when `reply` asks nothing: a 「问：」 lines the
 /// session up as waiting on you and banners it, and the model also reads one
-/// into a turn that ended waiting on its own background work.
+/// into a turn that ended waiting on its own background work. A reply asks
+/// with a question mark, or by handing you the call in words at its end
+/// (「还要你定两件事：…」 ends on a full stop and still waits on you).
 fn unasked(line: String, reply: &str) -> String {
-    match line.strip_prefix("问：") {
-        Some(rest) if !reply.contains(['？', '?']) => rest.trim().to_owned(),
+    let tail: String = {
+        let n = reply.chars().count();
+        reply.chars().skip(n.saturating_sub(ASK_TAIL)).collect()
+    };
+    // A full-width mark is prose; a plain `?` mid-reply is as often code
+    // (`foo()?`) or a URL, so only the ending's counts.
+    let lower = tail.to_lowercase();
+    let asks = reply.contains('？')
+        || tail.contains('?')
+        || ASKS_YOU.iter().any(|p| tail.contains(p))
+        || ASKS_YOU_EN.iter().any(|p| lower.contains(p));
+    match crate::i18n::strip_ask(&line) {
+        Some(rest) if !asks => rest.trim().to_owned(),
         _ => line,
     }
 }
+
+/// How far from a reply's end [`ASKS_YOU`] is looked for: a hand-off closes
+/// the reply, and the same words earlier on recount what was decided.
+const ASK_TAIL: usize = 200;
+
+/// Words that hand the developer a decision. Not 「告诉我」 or 「需要你」:
+/// replies close with 「有问题告诉我」 and 「不需要你做什么」 asking nothing.
+const ASKS_YOU: [&str; 8] = [
+    "要你定",
+    "你来定",
+    "你定一下",
+    "你决定",
+    "你选",
+    "等你点头",
+    "拍板",
+    "请确认",
+];
+
+/// [`ASKS_YOU`] in English, lower-cased; the reply's language is the
+/// session's, not the office's. Not "let me know": replies close with "let
+/// me know if anything breaks" asking nothing.
+const ASKS_YOU_EN: [&str; 5] = [
+    "your call",
+    "you decide",
+    "up to you",
+    "please confirm",
+    "need your decision",
+];
 
 /// The model's line as a label: one line, no quotes or closing stop, capped.
 fn clean(raw: &str) -> Option<String> {
@@ -214,6 +291,8 @@ fn clean(raw: &str) -> Option<String> {
     let line = line
         .strip_prefix("标题：")
         .or_else(|| line.strip_prefix("任务："))
+        .or_else(|| line.strip_prefix("Title:"))
+        .or_else(|| line.strip_prefix("Task:"))
         .unwrap_or(line)
         .trim();
     (!line.is_empty()).then(|| truncate_cells(line, SUMMARY_CELLS))
@@ -266,6 +345,64 @@ mod tests {
             "问：要合并吗"
         );
         assert_eq!(unasked("登录页已修好".into(), "修好了"), "登录页已修好");
+    }
+
+    /// A reply that hands you a decision without a question mark still waits
+    /// on you: dropping its 「问：」 filed a turn waiting on a spending call as
+    /// done, with no banner and no place in the queue.
+    #[test]
+    fn a_decision_handed_over_in_words_is_still_a_question() {
+        let reply = "先走 A + 不签名。\n\n还要你定两件事：仓库是公开（A）还是另建公开仓库（B），以及要不要花 99 美元/年做签名。";
+        assert_eq!(
+            unasked("问：仓库公开还是另建，是否花99美元签名".into(), reply),
+            "问：仓库公开还是另建，是否花99美元签名"
+        );
+        // The same words long before the end recount a call already made.
+        let recount = format!("按你决定的方案做完了。{}已推送。", "测试全过，".repeat(60));
+        assert_eq!(unasked("问：要发版吗".into(), &recount), "要发版吗");
+        // A sign-off and a `?` in code ask nothing of a turn waiting on CI.
+        let waits = format!(
+            "改成 `let x = foo()?;`。{}还在等 CI，有问题告诉我。",
+            "已推送，".repeat(60)
+        );
+        assert_eq!(unasked("问：CI 结果".into(), &waits), "CI 结果");
+    }
+
+    /// An English office must get English lines, and not the Chinese a
+    /// memo kept for the same session: the language is part of the request.
+    #[test]
+    fn the_request_follows_the_offices_language() {
+        use crate::i18n::{Lang, with};
+        let s = Summarizer::new("https://x", "k".into(), "m".into());
+        let input = SummaryInput {
+            project: "web".into(),
+            latest_prompt: "fix login".into(),
+            ..Default::default()
+        };
+        let en = with(Lang::En, || {
+            assert!(system().contains("English"));
+            assert!(user_message(&input).starts_with("Project: web\n"));
+            s.summary_key(&input)
+        });
+        assert_ne!(en, with(Lang::Zh, || s.summary_key(&input)));
+    }
+
+    /// An English question lines the session up as waiting on you just as a
+    /// Chinese one does, and loses its mark the same way when nothing is asked.
+    #[test]
+    fn an_english_question_needs_one_in_the_reply() {
+        assert_eq!(
+            unasked("Q: merge it".into(), "Tests pass. Merge to main?"),
+            "Q: merge it"
+        );
+        assert_eq!(
+            unasked("Q: pick a host".into(), "Two options above. Your call."),
+            "Q: pick a host"
+        );
+        assert_eq!(
+            unasked("Q: CI result".into(), "Pushed; waiting on CI."),
+            "CI result"
+        );
     }
 
     #[test]

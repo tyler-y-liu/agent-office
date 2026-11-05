@@ -188,7 +188,14 @@ pub(super) fn whiteboard(
     let mut y = y0 + pad;
     let room_for = |y: i64| y + line_h <= y0 + h - i64::from(2 * t);
     if room_for(y) {
-        faces.draw(canvas, x0 + pad, y + ascent, "议程", MARKER_RED, px);
+        faces.draw(
+            canvas,
+            x0 + pad,
+            y + ascent,
+            crate::i18n::t("议程", "Agenda"),
+            MARKER_RED,
+            px,
+        );
         y += line_h;
     }
     if lines.is_empty() {

@@ -59,17 +59,18 @@ pub fn prepare_socket_dir(socket: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
     b.create(dir)
-        .with_context(|| format!("创建 {} 失败", dir.display()))?;
+        .with_context(|| crate::tr!("创建 {} 失败", "could not create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let m = std::fs::symlink_metadata(dir)?;
         let mine = m.uid() == rustix::process::getuid().as_raw();
         if !m.is_dir() || !mine || m.permissions().mode() & 0o077 != 0 {
-            anyhow::bail!(
+            anyhow::bail!(crate::tr!(
                 "{} 不是只属于你的目录（可能被别人抢先建了）：删掉它，或者用 AGENT_OFFICE_SOCKET 换个路径",
+                "{} is not a directory only you own (someone may have made it first): delete it, or pick another path with AGENT_OFFICE_SOCKET",
                 dir.display()
-            );
+            ));
         }
     }
     Ok(())
@@ -161,7 +162,10 @@ fn cli_pid(me: i32, row_of: impl Fn(i32) -> Option<(i32, String)>) -> Option<i32
 
 fn settings_path() -> Result<PathBuf> {
     Ok(crate::tasks::claude_dir()
-        .context("找不到 Claude 配置目录")?
+        .context(crate::i18n::t(
+            "找不到 Claude 配置目录",
+            "cannot find the Claude config directory",
+        ))?
         .join("settings.json"))
 }
 
@@ -171,10 +175,13 @@ fn read_settings() -> Result<(PathBuf, Option<String>, Value)> {
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => Some(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e).with_context(|| format!("读 {} 失败", path.display())),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| crate::tr!("读 {} 失败", "could not read {}", path.display()));
+        }
     };
     let v = serde_json::from_str(raw.as_deref().unwrap_or("{}"))
-        .with_context(|| format!("{} 不是合法 JSON", path.display()))?;
+        .with_context(|| crate::tr!("{} 不是合法 JSON", "{} is not valid JSON", path.display()))?;
     Ok((path, raw, v))
 }
 
@@ -209,20 +216,24 @@ fn remove_ours(settings: &mut Value) {
 }
 
 fn add_ours(settings: &mut Value, command: &str) -> Result<()> {
-    let root = settings
-        .as_object_mut()
-        .context("settings.json 顶层不是对象")?;
+    let root = settings.as_object_mut().context(crate::i18n::t(
+        "settings.json 顶层不是对象",
+        "settings.json is not an object at its top level",
+    ))?;
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .context("settings.json 的 hooks 不是对象")?;
+        .context(crate::i18n::t(
+            "settings.json 的 hooks 不是对象",
+            "hooks in settings.json is not an object",
+        ))?;
     for event in EVENTS {
         hooks
             .entry(event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
-            .with_context(|| format!("hooks.{event} 不是数组"))?
+            .with_context(|| crate::tr!("hooks.{event} 不是数组", "hooks.{event} is not an array"))?
             .push(json!({
                 "matcher": "",
                 "hooks": [{"type": "command", "command": command, "timeout": 5}],
@@ -254,9 +265,21 @@ fn has_every_event(settings: &Value) -> bool {
 fn write_settings(path: &PathBuf, before: Option<&str>, settings: &Value) -> Result<()> {
     if let Some(before) = before {
         let backup = path.with_extension("json.agent-office.bak");
-        std::fs::write(&backup, before)
-            .with_context(|| format!("备份到 {} 失败", backup.display()))?;
-        println!("原文件备份在 {}", backup.display());
+        std::fs::write(&backup, before).with_context(|| {
+            crate::tr!(
+                "备份到 {} 失败",
+                "could not back up to {}",
+                backup.display()
+            )
+        })?;
+        println!(
+            "{}",
+            crate::tr!(
+                "原文件备份在 {}",
+                "Backed up the original to {}",
+                backup.display()
+            )
+        );
     }
     let text = serde_json::to_string_pretty(settings)? + "\n";
     // Claude Code reads this file while running: a rename never shows it half
@@ -269,14 +292,40 @@ fn write_settings(path: &PathBuf, before: Option<&str>, settings: &Value) -> Res
         let tmp = path.with_extension("json.agent-office.tmp");
         std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path))
     };
-    result.with_context(|| format!("写 {} 失败", path.display()))?;
-    println!("已更新 {}", path.display());
+    result.with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
+    println!("{}", crate::tr!("已更新 {}", "Updated {}", path.display()));
     Ok(())
+}
+
+/// The path hooks call this binary by. A Homebrew install resolves to a
+/// versioned `Cellar/agent-office/<ver>/bin`, which `brew upgrade` deletes;
+/// its `opt` link follows upgrades, so hooks keep working without reconnecting.
+pub fn exe_for_hooks() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    Ok(brew_opt_path(&exe).filter(|p| p.exists()).unwrap_or(exe))
+}
+
+fn brew_opt_path(exe: &std::path::Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    let version = bin.parent()?;
+    let formula = version.parent()?;
+    let cellar = formula.parent()?;
+    if bin.file_name()? != "bin" || cellar.file_name()? != "Cellar" {
+        return None;
+    }
+    Some(
+        cellar
+            .parent()?
+            .join("opt")
+            .join(formula.file_name()?)
+            .join("bin")
+            .join(exe.file_name()?),
+    )
 }
 
 /// `agent-office connect`: hook this binary in, replacing an earlier install.
 pub fn connect() -> Result<()> {
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = exe_for_hooks()?;
     let quoted = exe.display().to_string().replace('\'', "'\\''");
     let command = format!("'{quoted}' hook");
     let (path, raw, mut settings) = read_settings()?;
@@ -284,8 +333,12 @@ pub fn connect() -> Result<()> {
     add_ours(&mut settings, &command)?;
     write_settings(&path, raw.as_deref(), &settings)?;
     println!(
-        "hooks 指向 {}；新开的 Claude 会话才生效。移动或删除这个程序后要重新 connect。",
-        exe.display()
+        "{}",
+        crate::tr!(
+            "hooks 指向 {}；新开的 Claude 会话才生效。移动或删除这个程序后要重新 connect。",
+            "Hooks now point to {}; they apply to new Claude sessions. Run connect again after moving or deleting this program.",
+            exe.display()
+        )
     );
     Ok(())
 }
@@ -300,6 +353,19 @@ pub fn disconnect() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `brew upgrade` removes the old Cellar version, so hooks written with it
+    /// would silently stop firing; they must point at the stable `opt` link.
+    #[test]
+    fn brew_cellar_path_maps_to_opt_link() {
+        let cellar = std::path::Path::new("/opt/homebrew/Cellar/agent-office/0.1.0/bin/agent-office");
+        assert_eq!(
+            brew_opt_path(cellar).unwrap(),
+            std::path::Path::new("/opt/homebrew/opt/agent-office/bin/agent-office")
+        );
+        let cargo = std::path::Path::new("/Users/me/.cargo/bin/agent-office");
+        assert_eq!(brew_opt_path(cargo), None);
+    }
 
     /// The user's own hooks and every other key must come through untouched,
     /// and reconnecting must not stack a second copy of ours.

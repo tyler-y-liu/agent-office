@@ -93,17 +93,21 @@ fn codex(args: &[&std::ffi::OsStr]) -> Result<()> {
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
-        .context("运行 codex 失败：codex 不在 PATH 上？")?;
+        .context(crate::i18n::t(
+            "运行 codex 失败：codex 不在 PATH 上？",
+            "could not run codex: is it on PATH?",
+        ))?;
     if !out.status.success() {
         let why = if out.stderr.is_empty() {
             &out.stdout
         } else {
             &out.stderr
         };
-        bail!(
+        bail!(crate::tr!(
             "`codex {shown}` 失败：{}",
+            "`codex {shown}` failed: {}",
             String::from_utf8_lossy(why).trim()
-        );
+        ));
     }
     Ok(())
 }
@@ -123,14 +127,16 @@ fn cached_hooks() -> PathBuf {
 
 /// `agent-office connect codex`.
 pub fn connect() -> Result<()> {
-    let root = root().context("找不到 HOME")?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let root = root().context(crate::i18n::t("找不到 HOME", "HOME is not set"))?;
+    let exe = crate::hook::exe_for_hooks()?;
     for (rel, content) in layout(&hook_command(&exe))? {
         let path = root.join(rel);
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("建 {} 失败", dir.display()))?;
+            std::fs::create_dir_all(dir)
+                .with_context(|| crate::tr!("建 {} 失败", "could not create {}", dir.display()))?;
         }
-        std::fs::write(&path, content).with_context(|| format!("写 {} 失败", path.display()))?;
+        std::fs::write(&path, content)
+            .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
     }
     // Adding a marketplace Codex already records from another dir is an
     // error, and from this one a no-op; dropping it first covers both.
@@ -151,8 +157,12 @@ pub fn connect() -> Result<()> {
     // Also what refreshes Codex's cached copy after a reconnect.
     codex(&["plugin".as_ref(), "add".as_ref(), plugin_id().as_ref()])?;
     println!(
-        "已在 Codex 装上插件 {}；新开的 Codex 会话才生效。移动或删除这个程序后要重新 connect codex。",
-        plugin_id()
+        "{}",
+        crate::tr!(
+            "已在 Codex 装上插件 {}；新开的 Codex 会话才生效。移动或删除这个程序后要重新 connect codex。",
+            "Installed plugin {} in Codex; it applies to new Codex sessions. Run connect codex again after moving or deleting this program.",
+            plugin_id()
+        )
     );
     Ok(())
 }
@@ -172,9 +182,18 @@ pub fn disconnect() -> Result<()> {
         ])?;
     }
     if let Some(root) = root().filter(|r| r.is_dir()) {
-        std::fs::remove_dir_all(&root).with_context(|| format!("删 {} 失败", root.display()))?;
+        std::fs::remove_dir_all(&root)
+            .with_context(|| crate::tr!("删 {} 失败", "could not delete {}", root.display()))?;
     }
-    println!("已从 Codex 移除插件 {}", plugin_id());
+    println!(
+        "{}",
+        crate::tr!(
+            "已从 Codex 移除插件 {}",
+            "Removed plugin {} from Codex",
+            plugin_id()
+        )
+    );
+
     Ok(())
 }
 
