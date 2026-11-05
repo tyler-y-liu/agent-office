@@ -117,6 +117,8 @@ struct Win {
     /// The agent last clicked and when, so a second click on it soon after
     /// opens its session.
     last_click: Option<(AgentId, Instant)>,
+    /// The sign clicked for what its zone is for, by its text, and when.
+    about: Option<(String, Instant)>,
     next_frame: Instant,
     occluded: bool,
     /// The frame, and the office at art density before its upscale: kept
@@ -134,6 +136,8 @@ struct Layout {
     panel_rows: Vec<(u16, AgentId)>,
     /// Each badge and task label drawn, in window pixels.
     tag_hits: Vec<(Area, AgentId)>,
+    /// Each door sign and bench plate drawn, by its text.
+    sign_hits: Vec<(Area, String)>,
 }
 
 struct Office {
@@ -343,6 +347,7 @@ impl Floating<'_> {
             cursor: PhysicalPosition::default(),
             last: None,
             last_click: None,
+            about: None,
             next_frame: Instant::now(),
             occluded: false,
             canvas: Canvas::new(0, 0, 0),
@@ -381,6 +386,7 @@ impl Win {
         }
         let min = pixtuoid_scene::layout::min_layout_size();
         let mut tag_hits = Vec::new();
+        let mut sign_hits = Vec::new();
         let mut inks = HashMap::new();
         if fit.logical().w < min.w || fit.logical().h < min.h {
             let base = i64::from(g.row_h) + i64::from(self.faces.ascent(g.px));
@@ -428,6 +434,13 @@ impl Win {
                         .map(|r| (r, t.agent))
                 })
                 .collect();
+            if let Some((text, at)) = &self.about
+                && at.elapsed() < ABOUT_FOR
+                && let Some(sign) = signs.iter().find(|s| &s.text == text)
+            {
+                paint_about(&mut canvas, &mut self.faces, sign, (ow, oh), sf);
+            }
+            sign_hits = signs.iter().map(|s| (s.area, s.text.clone())).collect();
         }
 
         // The cards and footer are laid out as cells, then set in the readable
@@ -455,14 +468,17 @@ impl Win {
             foot_area,
             &self.office,
             &self.core,
-            &[(
-                "t",
-                if self.on_top {
-                    "取消置顶"
-                } else {
-                    "置顶"
-                },
-            )],
+            &[
+                ("点门牌", "看说明"),
+                (
+                    "t",
+                    if self.on_top {
+                        "取消置顶"
+                    } else {
+                        "置顶"
+                    },
+                ),
+            ],
         );
         canvas.fill(0, i64::from(oh), w.get(), h.get() - oh, PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &foot, (0, oh), g);
@@ -473,6 +489,7 @@ impl Win {
             grid: g,
             panel_rows,
             tag_hits,
+            sign_hits,
         });
         let mut buffer = self
             .surface
@@ -543,10 +560,30 @@ impl Win {
     }
 
     /// Select the card or the figure under the pointer; a double click opens
-    /// its session, and one on the panel's title the sessions waiting.
+    /// its session, and one on the panel's title the sessions waiting. A sign
+    /// toggles what its zone is for; any other click puts that away.
     fn click(&mut self) {
         let Some(last) = &self.last else { return };
         let (x, y) = (self.cursor.x.max(0.0) as u32, self.cursor.y.max(0.0) as u32);
+        let shown = self.about.take();
+        let point = Area {
+            x: i64::from(x),
+            y: i64::from(y),
+            w: 1,
+            h: 1,
+        };
+        if let Some((_, text)) = last
+            .sign_hits
+            .iter()
+            .filter(|_| x < last.panel_x)
+            .find(|(r, _)| r.meets(&point))
+        {
+            let again = shown.is_some_and(|(t, at)| &t == text && at.elapsed() < ABOUT_FOR);
+            if !again {
+                self.about = Some((text.clone(), Instant::now()));
+            }
+            return;
+        }
         if x >= last.panel_x && y < last.grid.row_h {
             self.core.act(Action::OpenWaiting, &mut self.office);
             return;
@@ -945,6 +982,8 @@ pub(crate) struct DoorSign {
     /// Its plate, in window pixels.
     area: Area,
     text: String,
+    /// What its zone is for, shown when it is clicked.
+    about: &'static str,
     plate: u32,
     ink: u32,
 }
@@ -961,6 +1000,91 @@ fn door_sign_zh(text: &str) -> Option<&'static str> {
         "ROOF" => "天台",
         _ => return None,
     })
+}
+
+/// What a zone pixtuoid signs in ASCII is for: who is in there, and what
+/// moves them on, so the office reads without the README.
+fn zone_about(text: &str) -> Option<&'static str> {
+    Some(match text {
+        "MTG A" | "MTG B" => "子 agent 跑满 15 秒的会话，和它的子 agent 一起在这儿开会。",
+        "PANTRY" => {
+            "刚做完、你还没看的会话在这儿等你看结果。双击打开看过，或者做完满 15 分钟，就上天台。"
+        }
+        "WAIT" => {
+            "等你批准或回复超过 20 秒的会话，按先后在这儿排队，排第一个的坐你办公室的访客椅。你处理完它就回工位。"
+        }
+        "OFFICE" => "访客椅上坐的是等你最久的那个会话，先处理它。",
+        "ROOF" => {
+            "闲着、不用你管的会话：做完超过 15 分钟，或者你已经打开看过。你给它发新消息它就回工位。"
+        }
+        _ => return None,
+    })
+}
+
+/// What a bench is for, its plate naming the repo.
+const DESK_ABOUT: &str =
+    "这张长桌坐这个仓库的会话，干活的坐在工位上。红圈加红「?」的是卡住了，去看看。";
+
+/// How long a sign's explanation stays up unless clicked away.
+const ABOUT_FOR: Duration = Duration::from_secs(10);
+/// Cells an explanation's line may take.
+const ABOUT_CELLS: u32 = 26;
+const ABOUT_BG: u32 = 0x0024_2833;
+const ABOUT_EDGE: u32 = 0x005a_6070;
+
+/// `s` broken into lines of at most `max` cells, at any character: the
+/// explanations are Chinese, which breaks anywhere.
+fn wrap_cells(s: &str, max: u32) -> Vec<String> {
+    let max = max.max(2);
+    let mut lines = vec![String::new()];
+    let mut used = 0;
+    for c in s.chars() {
+        let w = Faces::cells(&c.to_string());
+        if used + w > max {
+            lines.push(String::new());
+            used = 0;
+        }
+        used += w;
+        lines.last_mut().expect("never empty").push(c);
+    }
+    lines
+}
+
+/// `sign`'s explanation on a plate under it, or over it when there is no room
+/// below, kept inside the office of `bounds` window pixels.
+fn paint_about(
+    canvas: &mut Canvas,
+    faces: &mut Faces,
+    sign: &DoorSign,
+    bounds: (u32, u32),
+    scale_factor: f64,
+) {
+    let px = pt_px(SIGN_PT, scale_factor);
+    let pad = 2 * tag_pad(scale_factor);
+    let cell = faces.cell_w(px).max(1);
+    let fit = bounds.0.saturating_sub(2 * pad + 2) / cell;
+    let lines = wrap_cells(sign.about, ABOUT_CELLS.min(fit));
+    let line_h = px + px / 3;
+    let widest = lines.iter().map(|l| Faces::cells(l)).max().unwrap_or(0);
+    let w = widest * cell + 2 * pad;
+    let h = u32::try_from(lines.len()).unwrap_or(0) * line_h + 2 * pad;
+    let (bw, bh) = (i64::from(bounds.0), i64::from(bounds.1));
+    let a = sign.area;
+    let x = (a.x + i64::from(a.w / 2) - i64::from(w / 2)).clamp(0, (bw - i64::from(w)).max(0));
+    let gap = i64::from(pad);
+    let below = a.y + i64::from(a.h) + gap;
+    let y = if below + i64::from(h) <= bh {
+        below
+    } else {
+        (a.y - gap - i64::from(h)).max(0)
+    };
+    canvas.fill(x - 1, y - 1, w + 2, h + 2, ABOUT_EDGE);
+    canvas.fill(x, y, w, h, ABOUT_BG);
+    let ascent = i64::from(faces.ascent(px));
+    for (i, line) in lines.iter().enumerate() {
+        let top = y + i64::from(pad) + i64::try_from(i).unwrap_or(0) * i64::from(line_h);
+        faces.draw(canvas, x + i64::from(pad), top + ascent, line, TEXT, px);
+    }
 }
 
 /// The door signs among `text`'s, at `d` art pixels a layout unit and `u`
@@ -994,6 +1118,10 @@ fn door_signs(
                     y: cy - i64::from(h / 2),
                     w,
                     h,
+                },
+                about: match r.role {
+                    TextRole::DoorSign => zone_about(&text)?,
+                    _ => DESK_ABOUT,
                 },
                 text: zh,
                 plate: r.plate.map_or(PANEL_BG, to_u32),
@@ -1128,5 +1256,33 @@ mod tests {
             assert_eq!(door_sign_zh(ascii), Some(zh));
         }
         assert_eq!(door_sign_zh("LOBBY"), None);
+    }
+
+    /// Clicking any zone's sign must say what the zone is for: a sign the
+    /// map missed would click to nothing, and the office would read only
+    /// with the README beside it.
+    #[test]
+    fn every_door_sign_says_what_its_zone_is_for() {
+        for ascii in ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"] {
+            assert!(zone_about(ascii).is_some_and(|s| !s.is_empty()), "{ascii}");
+        }
+        assert_eq!(zone_about("LOBBY"), None);
+    }
+
+    /// An explanation is set on a plate of bounded width: a line wider than
+    /// asked would run off the office or under the panel, and losing or
+    /// reordering a character would change what it says.
+    #[test]
+    fn an_explanation_wraps_within_its_width_and_keeps_every_character() {
+        let s = zone_about("WAIT").expect("signed");
+        for max in [3, 10, 26] {
+            let lines = wrap_cells(s, max);
+            assert!(
+                lines.iter().all(|l| Faces::cells(l) <= max),
+                "{max}: {lines:?}"
+            );
+            assert_eq!(lines.concat(), s, "{max}");
+        }
+        assert_eq!(wrap_cells("短", 26), vec!["短".to_owned()]);
     }
 }
