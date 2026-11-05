@@ -206,7 +206,7 @@ impl Badge {
             agent: agent.agent_id,
             at: anchor,
             // agent-office: its repository's colour.
-            marker: crate::badge::repo_hue(agent, &namesakes.2).unwrap_or(ink.marker),
+            marker: crate::badge::repo_hue(agent).unwrap_or(ink.marker),
             name: TextSpan::new(text, ink.name),
             plate: crate::badge::badge_plate_colour(theme),
         }
@@ -370,7 +370,7 @@ impl TextRun {
     }
 
     /// agent-office: a plate over each bench naming the repository its
-    /// sitters work in, on that repository's colour ([`crate::badge::repo_hues`]),
+    /// sitters work in, on that repository's colour ([`crate::badge::repo_hue`]),
     /// so the benches read as projects. Only a bench whose sitters all work in
     /// one repository is named: a plate over a shared bench would name some of
     /// them wrongly. An empty bench has none. `agents` are the floor's.
@@ -379,7 +379,6 @@ impl TextRun {
         agents: &[pixtuoid_core::AgentSlot],
     ) -> Vec<Self> {
         use pixtuoid_core::state::project_root;
-        let hues = crate::badge::repo_hues(agents);
         let ids = layout.bench_ids();
         let mut benches: Vec<(u16, u16, crate::layout::HomeDesk)> = Vec::new();
         for (i, d) in layout.home_desks.iter().enumerate() {
@@ -410,7 +409,7 @@ impl TextRun {
                 // The repository's own name, as its directory has it (a
                 // worktree is its repository's).
                 let repo = root.file_name()?.to_string_lossy().into_owned();
-                let plate = crate::badge::repo_hue(sitter, &hues)?;
+                let plate = crate::badge::repo_hue(sitter)?;
                 Some(Self {
                     // On the sitters' side of the screens: over a row facing
                     // the viewer, under one facing the windows.
@@ -609,13 +608,14 @@ mod tests {
         a.label = "cc·agent-office".into();
         a.cwd = std::sync::Arc::from(std::path::Path::new("/w/agent-office"));
         a.desk_index = pixtuoid_core::state::GlobalDeskIndex(0);
+        a.repo_hue = Some(3);
         let agents = [a];
         let plates = super::TextRun::bench_plates(&l, &agents);
         assert_eq!(plates.len(), 1, "one occupied row, one plate");
         let plate = &plates[0];
         assert_eq!(plate.text(), "agent-office");
-        let hues = crate::badge::repo_hues(&agents);
-        assert_eq!(plate.plate, crate::badge::repo_hue(&agents[0], &hues));
+        assert_eq!(plate.plate, crate::badge::repo_hue(&agents[0]));
+        assert!(plate.plate.is_some(), "on the colour core dealt");
         let desk = l.home_desks[0];
         assert!(
             plate.at.x.abs_diff(desk.at.x) < 4 * (crate::layout::DESK_W + 4),
@@ -643,6 +643,7 @@ mod tests {
             );
             a.cwd = std::sync::Arc::from(std::path::Path::new(cwd));
             a.desk_index = pixtuoid_core::state::GlobalDeskIndex(desk);
+            a.repo_hue = Some(0);
             a
         };
         let plates = |agents: &[pixtuoid_core::AgentSlot]| {

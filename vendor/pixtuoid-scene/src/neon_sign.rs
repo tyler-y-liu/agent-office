@@ -957,6 +957,7 @@ mod tests {
                 effort: None,
                 tokens_used: 0,
                 last_usage: None,
+                repo_hue: None,
             }
         }
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);

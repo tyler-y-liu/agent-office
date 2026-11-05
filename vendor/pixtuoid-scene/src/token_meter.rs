@@ -129,6 +129,7 @@ mod tests {
             effort: None,
             tokens_used: 0,
             last_usage: Some(pixtuoid_core::state::UsageObservation::new(delta, at)),
+            repo_hue: None,
         }
     }
 

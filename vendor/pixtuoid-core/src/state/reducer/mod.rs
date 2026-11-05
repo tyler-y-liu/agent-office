@@ -299,6 +299,8 @@ impl Reducer {
             .retain(|id, _| scene.agents.contains_key(id));
         self.pending_b1_cascades
             .retain(|id, _| scene.agents.contains_key(id));
+        // agent-office: the sweeps above may have let a repository go.
+        scene.assign_repo_hues();
     }
 
     /// Mark exiting every non-exiting slot whose source is NOT connected, then
@@ -328,6 +330,19 @@ impl Reducer {
     /// Fold one `AgentEvent` into the scene at `now`, tagged with the
     /// `Transport` it arrived on (load-bearing for hook-wins dedup).
     pub fn apply(
+        &mut self,
+        scene: &mut SceneState,
+        event: AgentEvent,
+        now: SystemTime,
+        from: Transport,
+    ) {
+        self.apply_event(scene, event, now, from);
+        // agent-office: an event may bring, move or sweep away a session, and
+        // its repository's colour with it.
+        scene.assign_repo_hues();
+    }
+
+    fn apply_event(
         &mut self,
         scene: &mut SceneState,
         event: AgentEvent,
@@ -1352,6 +1367,8 @@ impl Reducer {
                 effort: None,
                 tokens_used: 0,
                 last_usage: None,
+                // agent-office: dealt after the event (`assign_repo_hues`).
+                repo_hue: None,
             },
         );
         true

@@ -133,6 +133,7 @@ fn office_scene(n: usize, max_desks: usize, base: SystemTime, busy: bool) -> Sce
                 effort: None,
                 tokens_used: 0,
                 last_usage: None,
+                repo_hue: None,
             },
         );
     }

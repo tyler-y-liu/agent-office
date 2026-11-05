@@ -96,37 +96,17 @@ const REPO_HUES: [Rgb; 8] = [
     },
 ];
 
-/// agent-office: each repository among `agents` and its colour: its badges'
-/// marker and its cards' avatar, so a bench's sitters and the cards they
-/// match read as one project. A worktree counts as its repository. Colours
-/// go in the order the repositories' first sessions started, so up to eight
-/// never share one and a repository keeps its colour while it has a session;
-/// an agent whose directory is unknown has none.
-pub fn repo_hues<'a>(
-    agents: impl IntoIterator<Item = &'a AgentSlot>,
-) -> HashMap<std::path::PathBuf, Rgb> {
-    let mut first: HashMap<std::path::PathBuf, std::time::SystemTime> = HashMap::new();
-    for a in agents.into_iter().filter(|a| !a.unknown_cwd) {
-        let root = pixtuoid_core::state::project_root(&a.cwd).to_path_buf();
-        let at = first.entry(root).or_insert(a.created_at);
-        *at = (*at).min(a.created_at);
-    }
-    let mut roots: Vec<_> = first.into_iter().collect();
-    roots.sort_by(|(ra, ta), (rb, tb)| ta.cmp(tb).then_with(|| ra.cmp(rb)));
-    roots
-        .into_iter()
-        .enumerate()
-        .map(|(i, (root, _))| (root, REPO_HUES[i % REPO_HUES.len()]))
-        .collect()
-}
+// agent-office: core deals the indices this palette is read with.
+const _: () = assert!(REPO_HUES.len() == pixtuoid_core::state::REPO_HUE_COUNT as usize);
 
-/// agent-office: `agent`'s repository's colour in `hues` ([`repo_hues`]).
-pub fn repo_hue(agent: &AgentSlot, hues: &HashMap<std::path::PathBuf, Rgb>) -> Option<Rgb> {
-    if agent.unknown_cwd {
-        return None;
-    }
-    hues.get(pixtuoid_core::state::project_root(&agent.cwd))
-        .copied()
+/// agent-office: `agent`'s repository's colour — its badges' marker, its
+/// bench's plate and its cards' avatar, so they read as one project. Core
+/// deals it ([`SceneState::assign_repo_hues`]); `None` while the agent's
+/// directory is unknown.
+///
+/// [`SceneState::assign_repo_hues`]: pixtuoid_core::state::SceneState::assign_repo_hues
+pub fn repo_hue(agent: &AgentSlot) -> Option<Rgb> {
+    agent.repo_hue.map(|i| REPO_HUES[usize::from(i)])
 }
 
 /// The colours of a badge's two parts, the one decision every painter reads:
@@ -173,8 +153,6 @@ pub(crate) struct Namesakes(
     /// it started ([`start_order`]).
     HashMap<pixtuoid_core::AgentId, usize>,
     HashMap<pixtuoid_core::AgentId, usize>,
-    /// agent-office: each repository's colour ([`repo_hues`]).
-    pub(crate) HashMap<std::path::PathBuf, Rgb>,
 );
 
 impl Namesakes {
@@ -184,11 +162,7 @@ impl Namesakes {
         for agent in &agents {
             *counts.entry(&*agent.label).or_insert(0) += 1;
         }
-        Self(
-            start_order(&agents, &counts),
-            HashMap::new(),
-            repo_hues(agents),
-        )
+        Self(start_order(&agents, &counts), HashMap::new())
     }
 
     /// agent-office: also mark each parent's brief sub-agents, which are not
@@ -321,7 +295,7 @@ pub fn disambig_suffix(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{BadgeTone, Namesakes, badge_hue, disambig_suffix, tone_of, truncate_label};
-    use super::{Rgb, repo_hue, repo_hues};
+    use super::{REPO_HUES, repo_hue};
     use pixtuoid_core::AgentId;
     use pixtuoid_core::state::{
         ActivityState, AgentSlot, GlobalDeskIndex, SceneState, ToolKind, ToolUse,
@@ -334,40 +308,151 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
 
-    /// agent-office: a repository's sessions share one colour and up to
-    /// eight repositories never share one, so a bench and its cards read as
-    /// one project at a glance; a worktree is its repository's.
-    #[test]
-    fn each_repository_wears_its_own_colour() {
-        let at = |label: &str, cwd: &str, secs: u64| AgentSlot {
+    /// agent-office: a session in `cwd` that started `secs` in.
+    fn in_repo(name: &str, cwd: &str, secs: u64) -> AgentSlot {
+        AgentSlot {
             cwd: Arc::from(PathBuf::from(cwd).as_path()),
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
-            ..slot(label, &format!("s-{label}-{secs}"), 0, running())
-        };
+            ..slot(name, &format!("s-{name}"), 0, running())
+        }
+    }
+
+    /// agent-office: `slots` seated, their colours dealt.
+    fn dealt(slots: &[AgentSlot]) -> SceneState {
+        let mut s = scene_of(slots.to_vec());
+        s.assign_repo_hues();
+        s
+    }
+
+    fn hue_in(s: &SceneState, a: &AgentSlot) -> Option<pixtuoid_core::sprite::Rgb> {
+        repo_hue(&s.agents[&a.agent_id])
+    }
+
+    /// agent-office: a repository's sessions, worktrees included, share one
+    /// colour and up to eight repositories never share one, so a bench and
+    /// its cards read as one project at a glance; a session whose directory
+    /// is unknown may be anyone's, so it wears none.
+    #[test]
+    fn each_repository_wears_its_own_colour() {
         let mut agents: Vec<AgentSlot> = (0..8)
-            .map(|i| at(&format!("r{i}"), &format!("/w/repo{i}"), i))
+            .map(|i| in_repo(&format!("r{i}"), &format!("/w/repo{i}"), i))
             .collect();
-        agents.push(at("same", "/w/repo3", 20));
-        agents.push(at("tree", "/w/repo5/.claude/worktrees/x", 21));
-        let hues = repo_hues(&agents);
-        let hue = |a: &AgentSlot| repo_hue(a, &hues).expect("a hue");
-        let mut distinct: Vec<Rgb> = agents[..8].iter().map(hue).collect();
-        distinct.sort_by_key(|c| (c.r, c.g, c.b));
+        agents.push(in_repo("same", "/w/repo3", 20));
+        agents.push(in_repo("tree", "/w/repo5/.claude/worktrees/x", 21));
+        let mut unknown = in_repo("u", "/w/x", 30);
+        unknown.unknown_cwd = true;
+        agents.push(unknown.clone());
+        let s = dealt(&agents);
+        let hue = |a: &AgentSlot| hue_in(&s, a).expect("a hue");
+        let mut distinct: Vec<_> = agents[..8].iter().map(hue).map(|c| (c.r, c.g, c.b)).collect();
+        distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), 8, "eight repositories, eight colours");
-        assert_eq!(
-            hue(&agents[8]),
-            hue(&agents[3]),
-            "a repository's sessions match"
+        assert_eq!(hue(&agents[8]), hue(&agents[3]), "a repository's sessions match");
+        assert_eq!(hue(&agents[9]), hue(&agents[5]), "a worktree is its repository's");
+        assert_eq!(hue_in(&s, &unknown), None);
+    }
+
+    /// agent-office: the colour is how a repository's sitters and cards are
+    /// told apart, so it holds while the repository has a session — dealing
+    /// by start order recoloured every later repository whenever an earlier
+    /// one's sessions all left. Driven through the reducer, so it also proves
+    /// the apply path and tick's sweep both deal colours.
+    #[test]
+    fn a_repository_keeps_its_colour_when_an_older_one_leaves() {
+        use pixtuoid_core::{AgentEvent, Reducer, Transport};
+        let mut r = Reducer::new();
+        let mut scene = SceneState::uniform(8);
+        let t0 = SystemTime::now();
+        let ids: Vec<AgentId> = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(i, repo)| {
+                let id = AgentId::from_transcript_path(&format!("/p/{repo}.jsonl"));
+                r.apply(
+                    &mut scene,
+                    AgentEvent::SessionStart {
+                        agent_id: id,
+                        source: "claude-code".into(),
+                        session_id: format!("s-{repo}").into(),
+                        cwd: PathBuf::from(format!("/w/{repo}")),
+                        parent_id: None,
+                    },
+                    t0 + Duration::from_secs(i as u64),
+                    Transport::Hook,
+                );
+                id
+            })
+            .collect();
+        let hue = |s: &SceneState, id: &AgentId| repo_hue(&s.agents[id]);
+        let before: Vec<_> = ids.iter().map(|id| hue(&scene, id)).collect();
+        assert!(before.iter().all(Option::is_some), "each dealt a colour");
+        r.apply(
+            &mut scene,
+            AgentEvent::SessionEnd {
+                agent_id: ids[0],
+                as_child: false,
+            },
+            t0 + Duration::from_secs(3),
+            Transport::Hook,
         );
-        assert_eq!(
-            hue(&agents[9]),
-            hue(&agents[5]),
-            "a worktree is its repository's"
+        // Past the walkout, well short of any stale sweep of b and c.
+        r.tick(
+            &mut scene,
+            t0 + Duration::from_secs(4) + pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW,
         );
-        let mut unknown = at("u", "/w/x", 30);
-        unknown.unknown_cwd = true;
-        assert_eq!(repo_hue(&unknown, &hues), None);
+        assert!(!scene.agents.contains_key(&ids[0]), "the oldest has left");
+        assert_eq!(hue(&scene, &ids[1]), before[1], "b keeps its colour");
+        assert_eq!(hue(&scene, &ids[2]), before[2], "c keeps its colour");
+    }
+
+    /// agent-office: two repositories asking for one colour are parted, and
+    /// when the one that won it leaves the other keeps the colour it took.
+    #[test]
+    fn colliding_repositories_part_and_stay_parted() {
+        let alone = |cwd: &str| {
+            let a = in_repo("probe", cwd, 0);
+            hue_in(&dealt(std::slice::from_ref(&a)), &a)
+        };
+        let want = alone("/w/r0");
+        let rival = (1..)
+            .map(|i| format!("/w/r{i}"))
+            .find(|p| alone(p) == want)
+            .expect("some path asks for the same colour");
+        let first = in_repo("first", "/w/r0", 0);
+        let second = in_repo("second", &rival, 1);
+        let mut s = dealt(&[first.clone(), second.clone()]);
+        assert_eq!(hue_in(&s, &first), want, "the older takes what it asked for");
+        let took = hue_in(&s, &second);
+        assert_ne!(took, want, "the younger is parted from it");
+        s.agents.remove(&first.agent_id);
+        s.assign_repo_hues();
+        assert_eq!(hue_in(&s, &second), took, "and keeps what it took");
+    }
+
+    /// agent-office: a repository reopened in a quiet office wears the colour
+    /// it had, so "blue is this project" can stick from run to run; a session
+    /// that moves into a repository wears that repository's.
+    #[test]
+    fn a_reopened_repository_wears_its_own_colour_again() {
+        let a = in_repo("a", "/w/agent-office", 0);
+        let mut s = dealt(std::slice::from_ref(&a));
+        let own = hue_in(&s, &a);
+        s.agents.clear();
+        s.assign_repo_hues();
+        let again = in_repo("again", "/w/agent-office", 100);
+        s.agents.insert(again.agent_id, again.clone());
+        s.assign_repo_hues();
+        assert_eq!(hue_in(&s, &again), own, "its own colour back");
+
+        let mover = in_repo("mover", "/w/elsewhere", 101);
+        s.agents.insert(mover.agent_id, mover.clone());
+        s.assign_repo_hues();
+        s.agents.get_mut(&mover.agent_id).unwrap().cwd =
+            Arc::from(PathBuf::from("/w/agent-office/.claude/worktrees/y").as_path());
+        s.assign_repo_hues();
+        assert_eq!(hue_in(&s, &mover), own, "moved in, so it matches");
+        assert!(REPO_HUES.contains(&own.unwrap()));
     }
 
     fn slot(label: &str, session_id: &str, desk: usize, state: ActivityState) -> AgentSlot {
@@ -393,6 +478,7 @@ mod tests {
             effort: None,
             tokens_used: 0,
             last_usage: None,
+            repo_hue: None,
         }
     }
 
