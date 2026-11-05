@@ -21,6 +21,8 @@ mod windows;
 pub(crate) use approach::{approach_point, first_reachable_on_side, stand_point};
 pub(crate) use compute::PANTRY_COUNTER_LARGE_W;
 pub use compute::min_layout_size;
+// agent-office: the wall band's depth, for the host's floor effects.
+pub use compute::north_wall_h;
 pub(crate) use decor::{
     DwellWindow, SEAT_RENDER_Y_OFF, WALKING_Y_OFF, desk_furniture_def, desk_walk_anchor_facing,
     seated_foot_cell,

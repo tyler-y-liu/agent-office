@@ -487,6 +487,20 @@ impl ClockReading {
     }
 }
 
+/// agent-office: the harbour is closed to traffic (a typhoon signal No. 8 or
+/// higher is up): the ferry, the junk and the TurboJET stay in port.
+static HARBOUR_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// agent-office: close the harbour to its boats, or open it again.
+pub fn set_harbour_closed(closed: bool) {
+    HARBOUR_CLOSED.store(closed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// agent-office: whether the harbour's boats stay in port.
+pub(crate) fn harbour_closed() -> bool {
+    HARBOUR_CLOSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// agent-office: the zone the sky and the wall clock read their time in, as
 /// seconds east of UTC; unset, the machine's own.
 static CLOCK_ZONE: std::sync::OnceLock<chrono::FixedOffset> = std::sync::OnceLock::new();

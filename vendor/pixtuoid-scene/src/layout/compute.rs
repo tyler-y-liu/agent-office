@@ -83,6 +83,12 @@ pub(super) const fn top_margin(buf_h: u16) -> u16 {
     pct_at_least(buf_h, TOP_MARGIN_PCT, MIN_TOP_MARGIN)
 }
 
+/// agent-office: the north wall band's depth for a buffer `buf_h` tall, for a
+/// host that lays its own effects over the floor and not over the windows.
+pub fn north_wall_h(buf_h: u16) -> u16 {
+    top_margin(buf_h)
+}
+
 const fn cubicle_aisle_h(usable_h: u16) -> u16 {
     const CUBICLE_AISLE_PCT: u16 = 10;
     pct_at_least(usable_h, CUBICLE_AISLE_PCT, MIN_CUBICLE_AISLE_H)

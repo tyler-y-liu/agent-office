@@ -585,9 +585,12 @@ impl CityStrip {
         harbour.water(&mut strip);
         // agent-office: the traffic, farthest first, each after the beams
         // (they find a roof as the first thing down a column).
-        harbour.junk(&mut strip);
-        harbour.ferry(&mut strip);
-        harbour.turbojet(&mut strip);
+        // agent-office: under a typhoon signal the boats stay in port.
+        if !crate::sky::harbour_closed() {
+            harbour.junk(&mut strip);
+            harbour.ferry(&mut strip);
+            harbour.turbojet(&mut strip);
+        }
         harbour.kites(&mut strip);
         harbour.aircraft(&mut strip);
         strip
