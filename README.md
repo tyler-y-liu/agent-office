@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A pixel office on Victoria Harbour for your Claude Code sessions. Every session is a little worker with its current task over its head. See at a glance who is waiting for your approval and who looks stuck, and double-click to jump back to that session.
 
-![agent-office](docs/screenshot.png)
+![agent-office](docs/demo.gif)
 
 ## What it does
 

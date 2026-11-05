@@ -4,7 +4,7 @@
 
 开在维港边的像素办公室，给你的 Claude Code 会话用。每个会话是一个小人，头顶写着它正在做什么。谁在等你批准、谁像是卡住了，一眼就看得到，双击就能跳回那个会话。
 
-![agent-office](docs/screenshot.png)
+![agent-office](docs/demo.gif)
 
 ## 能做什么
 
