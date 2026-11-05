@@ -872,44 +872,79 @@ impl SceneState {
             .unwrap_or(1)
     }
 
-    /// agent-office: move each idle agent upstairs to a free desk on a lower
-    /// floor. A floor's seat is frozen at allocation, so once the ground
-    /// floor emptied, one who had overflowed kept a whole floor open by
-    /// itself. Only an idle session moves: one at work or at a permission
-    /// prompt stays where you may be watching it, and a team stays together
-    /// (a sub-agent keeps its parent's floor; a parent with sub-agents still
-    /// there waits for them). Lowest floors first, oldest first, so the move
-    /// is stable from tick to tick.
-    pub fn move_idle_agents_down(&mut self) {
-        let with_team: std::collections::HashSet<AgentId> = self
-            .agents
-            .values()
-            .filter(|a| a.exiting_at.is_none())
-            .filter_map(|a| a.parent_id)
+    /// agent-office: keep everyone as low as the office allows, each team on
+    /// one floor. A floor's seat is frozen at allocation, and its desk is a
+    /// GLOBAL number read against each floor's current desk count, which
+    /// follows the window's size. So one who overflowed kept a floor open
+    /// after the ground floor emptied, and a window narrowed then widened
+    /// reread seats onto other floors (or past a floor's last desk, drawn
+    /// nowhere) and sent newcomers upstairs: people ended up scattered over
+    /// floors for no reason one could see. Now a team (a session and its
+    /// sub-agents) whose seat no longer lies on its floor, or that fits a
+    /// lower floor whole, moves to the lowest floor with a desk for each.
+    /// Lowest floors first, oldest first, so the result is stable from tick
+    /// to tick; one walking out keeps its desk until it is gone.
+    pub fn settle_floors(&mut self) {
+        let root_of = |id: AgentId| -> AgentId {
+            let mut cur = id;
+            // Bounded: a corrupt parent cycle must not hang the reducer.
+            for _ in 0..self.agents.len() {
+                match self.agents.get(&cur).and_then(|a| a.parent_id) {
+                    Some(p) if self.agents.get(&p).is_some_and(|p| p.exiting_at.is_none()) => {
+                        cur = p
+                    }
+                    _ => break,
+                }
+            }
+            cur
+        };
+        let mut teams: std::collections::BTreeMap<AgentId, Vec<AgentId>> = Default::default();
+        for a in self.agents.values().filter(|a| a.exiting_at.is_none()) {
+            teams.entry(root_of(a.agent_id)).or_default().push(a.agent_id);
+        }
+        let mut order: Vec<(usize, SystemTime, AgentId)> = teams
+            .keys()
+            .filter_map(|r| self.agents.get(r).map(|a| (a.floor_idx, a.created_at, *r)))
             .collect();
-        let mut upstairs: Vec<(usize, SystemTime, AgentId)> = self
-            .agents
-            .values()
-            .filter(|a| {
-                a.floor_idx > 0
-                    && a.exiting_at.is_none()
-                    && a.state == ActivityState::Idle
-                    && a.parent_id.is_none()
-                    && !with_team.contains(&a.agent_id)
-            })
-            .map(|a| (a.floor_idx, a.created_at, a.agent_id))
-            .collect();
-        upstairs.sort();
-        for (floor, _, id) in upstairs {
-            let Some(a) = self.agents.get(&id) else { continue };
-            let cwd = (!a.unknown_cwd && a.cwd.file_name().is_some()).then(|| Arc::clone(&a.cwd));
-            let Some(desk) = self.free_desk_where(cwd.as_deref(), |f| f < floor) else {
+        order.sort();
+        for (_, _, root) in order {
+            let mut team = teams.remove(&root).unwrap_or_default();
+            // The session seats first so its sub-agents sit by it.
+            team.sort_by_key(|id| (*id != root, self.agents[id].created_at));
+            let floor = self.agents[&root].floor_idx;
+            let seated = team.iter().all(|id| {
+                let a = &self.agents[id];
+                a.floor_idx == floor && self.floor_range(floor).contains(&a.desk_index.0)
+            });
+            let taken: std::collections::HashSet<usize> = self
+                .agents
+                .values()
+                .filter(|a| !team.contains(&a.agent_id))
+                .map(|a| a.desk_index.0)
+                .collect();
+            let room = |f: usize| self.floor_range(f).filter(|i| !taken.contains(i)).count();
+            let limit = if seated { floor } else { MAX_FLOORS };
+            let Some(to) = (0..limit).find(|&f| room(f) >= team.len()) else {
                 continue;
             };
-            let to = self.floor_of(desk);
-            if let Some(a) = self.agents.get_mut(&id) {
-                a.desk_index = desk;
-                a.floor_idx = to;
+            // Off the desks they leave, so the seating below may reuse them.
+            for id in &team {
+                if let Some(a) = self.agents.get_mut(id) {
+                    a.desk_index = GlobalDeskIndex(usize::MAX);
+                }
+            }
+            for id in &team {
+                let a = &self.agents[id];
+                let cwd = (!a.unknown_cwd && a.cwd.file_name().is_some()).then(|| Arc::clone(&a.cwd));
+                // Checked above to have a desk for each; were it short, one
+                // left at the sentinel is reseated on the next pass.
+                let Some(desk) = self.free_desk_where(cwd.as_deref(), |f| f == to) else {
+                    break;
+                };
+                if let Some(a) = self.agents.get_mut(id) {
+                    a.desk_index = desk;
+                    a.floor_idx = to;
+                }
             }
         }
     }

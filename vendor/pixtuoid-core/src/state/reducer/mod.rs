@@ -299,8 +299,9 @@ impl Reducer {
             .retain(|id, _| scene.agents.contains_key(id));
         self.pending_b1_cascades
             .retain(|id, _| scene.agents.contains_key(id));
-        // agent-office: the sweeps above may have freed a lower floor's desk.
-        scene.move_idle_agents_down();
+        // agent-office: the sweeps above may have freed a lower floor's desk,
+        // and the window may have changed each floor's desk count.
+        scene.settle_floors();
         // agent-office: the sweeps above may have let a repository go.
         scene.assign_repo_hues();
     }
