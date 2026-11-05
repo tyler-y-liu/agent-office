@@ -42,6 +42,10 @@ use font::{Canvas, LINE_H, rgb};
 use vector::Faces;
 
 const FRAME: Duration = Duration::from_millis(50);
+/// How long the window must keep its size before the office lays out for
+/// it: every few pixels of a drag is a new layout, its desks and agents
+/// reshuffled, so a drag redraws the office it started with.
+const RESIZE_SETTLE: Duration = Duration::from_millis(300);
 /// Two clicks on one agent this close together are a double click (macOS's
 /// default interval is about this).
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
@@ -126,6 +130,36 @@ struct Win {
     canvas: Canvas,
     art: Canvas,
     faces: Faces,
+    hold: ResizeHold,
+}
+
+/// The office's fit across a window resize: the one shown holds while the
+/// window is still changing size, and the new size's is taken once it has
+/// settled for [`RESIZE_SETTLE`].
+#[derive(Default)]
+struct ResizeHold {
+    shown: Option<PixelFit>,
+    resized_at: Option<Instant>,
+}
+
+impl ResizeHold {
+    fn resized(&mut self, now: Instant) {
+        self.resized_at = Some(now);
+    }
+
+    /// The fit a frame at `now` draws, `want` the window's size's own.
+    fn fit(&mut self, want: PixelFit, now: Instant) -> PixelFit {
+        let resizing = self
+            .resized_at
+            .is_some_and(|at| now.duration_since(at) < RESIZE_SETTLE);
+        match self.shown {
+            Some(shown) if resizing => shown,
+            _ => {
+                self.resized_at = None;
+                *self.shown.insert(want)
+            }
+        }
+    }
 }
 
 /// Where the last frame put things, in physical pixels.
@@ -201,15 +235,27 @@ fn office_px(w: u32, h: u32, g: Grid) -> (u32, u32) {
     )
 }
 
-fn fit_for(pack: &OfficeArt, w: u32, h: u32) -> PixelFit {
-    PixelFit::at_least_density(
-        office_scale(h),
-        pack.max_density_variant(),
-        Size {
-            w: u16::try_from(w).unwrap_or(u16::MAX),
-            h: u16::try_from(h).unwrap_or(u16::MAX),
-        },
-    )
+/// Units tall the office may run at the scale it is shown at before a new
+/// scale is taken. The scale steps by the art's density (4, 8, 12...), so a
+/// step halves or doubles the office: without this band a window an edge
+/// away from a step flipped between two offices.
+const KEEP_SCALE_UNITS: std::ops::RangeInclusive<u16> = 110..=300;
+
+/// The fit of a `w`×`h` office, `shown` the one on screen: its scale while
+/// it still lays out within [`KEEP_SCALE_UNITS`], else this size's own.
+fn fit_for(pack: &OfficeArt, w: u32, h: u32, shown: Option<PixelFit>) -> PixelFit {
+    let px = Size {
+        w: u16::try_from(w).unwrap_or(u16::MAX),
+        h: u16::try_from(h).unwrap_or(u16::MAX),
+    };
+    let min = pixtuoid_scene::layout::min_layout_size();
+    let held = shown.map(|f| f.over(px)).filter(|f| {
+        let l = f.logical();
+        l.w >= min.w && l.h >= min.h && KEEP_SCALE_UNITS.contains(&l.h)
+    });
+    held.unwrap_or_else(|| {
+        PixelFit::at_least_density(office_scale(h), pack.max_density_variant(), px)
+    })
 }
 
 impl ApplicationHandler for Floating<'_> {
@@ -237,6 +283,15 @@ impl ApplicationHandler for Floating<'_> {
                 }
             }
             WindowEvent::Occluded(hidden) => win.occluded = hidden,
+            // Drawn now, not on the next tick: until a frame of the new size
+            // is presented, macOS shows the old one pinned top-left.
+            WindowEvent::Resized(_) => {
+                win.hold.resized(Instant::now());
+                if let Err(e) = win.redraw(&self.pack, self.theme) {
+                    self.error = Some(e);
+                    el.exit();
+                }
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let g = grid(&mut win.faces, scale_factor, PANEL_PT);
                 set_min_size(&win.window, &self.pack, g);
@@ -330,7 +385,7 @@ impl Floating<'_> {
         // agent arriving before it lands on a desk that exists.
         let size = window.inner_size();
         let (ow, oh) = office_px(size.width, size.height, g);
-        let logical = fit_for(&self.pack, ow, oh).logical();
+        let logical = fit_for(&self.pack, ow, oh, None).logical();
         Ok(Win {
             window,
             surface,
@@ -353,6 +408,7 @@ impl Floating<'_> {
             canvas: Canvas::new(0, 0, 0),
             art: Canvas::new(0, 0, 0),
             faces,
+            hold: ResizeHold::default(),
         })
     }
 }
@@ -375,7 +431,8 @@ impl Win {
         canvas.reset(w.get(), h.get(), bg);
         let frame = self.core.frame();
 
-        let fit = fit_for(pack, ow, oh);
+        let want = fit_for(pack, ow, oh, self.hold.shown);
+        let fit = self.hold.fit(want, Instant::now());
         if self.office.caps_size != Some(fit.logical()) {
             self.office.caps_size = Some(fit.logical());
             crate::pipeline::store_caps(
@@ -1240,6 +1297,83 @@ fn paint_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drag across many sizes keeps the office it started with, and its
+    /// desk count with it: each size is its own layout, so taking each one
+    /// as it came reshuffled the rooms and moved agents between floors
+    /// every few pixels. Once the size settles, the office lays out for it.
+    #[test]
+    fn a_resize_holds_the_office_until_the_window_settles() {
+        let pack = pixtuoid_scene::pack::load_bundled_pack().expect("bundled pack");
+        let fit = |w, h| fit_for(&pack, w, h, None);
+        let mut hold = ResizeHold::default();
+        let t0 = Instant::now();
+        let before = fit(1500, 1100);
+        assert_eq!(
+            hold.fit(before, t0),
+            before,
+            "the first frame takes its own"
+        );
+
+        let step = Duration::from_millis(16);
+        let mut now = t0;
+        for (w, h) in [(1520, 1080), (1600, 1000), (1800, 900), (1900, 1400)] {
+            now += step;
+            hold.resized(now);
+            assert_ne!(fit(w, h).logical(), before.logical(), "{w}x{h}");
+            assert_eq!(hold.fit(fit(w, h), now), before, "mid-drag at {w}x{h}");
+        }
+
+        let settled = fit(1900, 1400);
+        let late = now + RESIZE_SETTLE / 2;
+        assert_eq!(hold.fit(settled, late), before, "not yet settled");
+        let done = now + RESIZE_SETTLE;
+        assert_eq!(hold.fit(settled, done), settled, "settled");
+        assert_eq!(
+            hold.fit(fit(1200, 900), done + step),
+            fit(1200, 900),
+            "no resize since, so a new size is taken at once"
+        );
+    }
+
+    /// A height near a scale step keeps the office shown, whichever way it
+    /// came: the step halves or doubles the office, so a window resting by
+    /// it would flip between two layouts on an edge's nudge. Well past the
+    /// band the scale steps, so the art neither shrinks to specks nor grows
+    /// to fill the window with a desk.
+    #[test]
+    fn a_height_near_a_scale_step_keeps_the_scale_shown() {
+        let pack = pixtuoid_scene::pack::load_bundled_pack().expect("bundled pack");
+        let scale = |f: PixelFit| f.scale().get();
+        let (small, big) = (
+            fit_for(&pack, 1300, 900, None),
+            fit_for(&pack, 1300, 1300, None),
+        );
+        assert!(
+            scale(small) < scale(big),
+            "two scales either side of a step"
+        );
+
+        let step = (900..1300)
+            .find(|&h| scale(fit_for(&pack, 1300, h, None)) != scale(small))
+            .expect("a step between them");
+        for h in [step - 40, step, step + 40] {
+            let up = fit_for(&pack, 1300, h, Some(small));
+            let down = fit_for(&pack, 1300, h, Some(big));
+            assert_eq!(scale(up), scale(small), "growing to {h}");
+            assert_eq!(scale(down), scale(big), "shrinking to {h}");
+            assert_eq!(up.logical().h, u16::try_from(h).unwrap() / scale(small));
+        }
+
+        assert_eq!(
+            scale(fit_for(&pack, 1300, 2400, Some(small))),
+            scale(fit_for(&pack, 1300, 2400, None))
+        );
+        assert_eq!(
+            scale(fit_for(&pack, 1300, 700, Some(big))),
+            scale(fit_for(&pack, 1300, 700, None))
+        );
+    }
 
     /// Every zone pixtuoid signs reads in Chinese in the window: a sign the
     /// map missed would vanish, not fall back to ASCII.
