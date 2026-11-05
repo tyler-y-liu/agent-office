@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 use crate::pipeline::{CC_SOURCE, CODEX_SOURCE, CURSOR_SOURCE, is_shown_source};
 use crate::text::truncate_cells;
 use client::{OutcomeInput, SUMMARY_CELLS, Summarizer, SummaryInput};
-pub use extract::Phase;
+pub use extract::{Cheer, Phase};
 use extract::{SubMeta, Tail, Transcript};
 use trigger::Trigger;
 
@@ -48,6 +48,8 @@ pub struct TaskView {
     pub outcome_summarized: bool,
     /// The agent's last reply.
     pub reply: Option<String>,
+    /// The last thing it pulled off worth a cheer, and when.
+    pub cheer: Option<(Cheer, SystemTime)>,
 }
 
 /// Why an agent looks stuck.
@@ -535,6 +537,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         outcome: outcome.as_ref().map(|(o, _)| o.clone()),
         outcome_summarized: outcome.is_some_and(|(_, s)| s),
         reply: t.last_reply.clone(),
+        cheer: t.cheer,
     }
 }
 

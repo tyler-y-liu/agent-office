@@ -4,6 +4,7 @@
 //! font. Drawn on the CPU (softbuffer): one frame is a copy and an upscale.
 
 mod font;
+mod lively;
 mod vector;
 
 use std::collections::HashMap;
@@ -461,11 +462,45 @@ impl Win {
                 TEXT,
                 g.px,
             );
-        } else if let Some((tags, signs)) =
-            self.render_office(&frame.office, fit, theme, &frame.labels, sf)
-        {
+        } else if let Some((tags, mut signs, speakers)) = {
+            let now = SystemTime::now();
+            let board = frame
+                .clock
+                .evening()
+                .then(|| lively::tally_lines(&self.core.watch.stats));
+            // A typhoon keeps the boats in port.
+            pixtuoid_scene::sky::set_harbour_closed(frame.outlook.typhoon());
+            let weather = frame
+                .outlook
+                .weather
+                .map_or(WeatherPolicy::Clock, WeatherPolicy::Forced);
+            self.render_office(
+                &frame.office,
+                fit,
+                theme,
+                &frame.labels,
+                sf,
+                OfficeExtras {
+                    weather,
+                    board,
+                    now,
+                },
+            )
+        } {
             canvas.blit_scaled(&self.art, 0, 0, u32::from(fit.upscale()));
+            let now = SystemTime::now();
+            let stage = lively::Stage {
+                u: i64::from(fit.upscale().max(1)),
+                scale_factor: sf,
+                w: ow,
+                h: oh,
+                floor_top: i64::from(pixtuoid_scene::layout::north_wall_h(fit.logical().h))
+                    * i64::from(fit.scale().get()),
+                ms: lively::ms_of(now),
+            };
+            self.paint_goings_on_under(&mut canvas, &frame, &tags, &mut signs, stage, now);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
+            self.paint_honours(&mut canvas, &signs, stage);
             let stuck: Vec<AgentId> = frame
                 .scene
                 .agents
@@ -488,6 +523,7 @@ impl Win {
                 sf,
                 self.core.ui.selected,
             );
+            self.paint_goings_on_over(&mut canvas, &frame, &tags, &signs, &speakers, stage, now);
             inks = tags.iter().map(|t| (t.agent, t.marker_rgb)).collect();
             tag_hits = tags
                 .iter()
@@ -576,15 +612,16 @@ impl Win {
         theme: &'static Theme,
         labels: &HashMap<AgentId, String>,
         scale_factor: f64,
-    ) -> Option<(Vec<Tag>, Vec<DoorSign>)> {
+        extras: OfficeExtras,
+    ) -> Option<(Vec<Tag>, Vec<DoorSign>, Vec<AgentId>)> {
         let _feed = self.office.session.render(
             fit.look(WorldText::Host),
             RenderInputs {
                 world: FloorInputs {
                     scene,
-                    now: SystemTime::now(),
+                    now: extras.now,
                     floor: FloorMeta::ground()
-                        .with_weather(WeatherPolicy::Clock)
+                        .with_weather(extras.weather)
                         .with_motion(Motion::Full),
                     pets: PetInputs::default(),
                 },
@@ -609,6 +646,7 @@ impl Win {
         }
         let mut tags = Vec::new();
         let mut signs = Vec::new();
+        let mut speakers = Vec::new();
         if let Picture::Floor(floor) = picture
             && let Some(text) = floor.text
         {
@@ -617,9 +655,17 @@ impl Win {
             signs = door_signs(&mut self.faces, text, d, u, scale_factor);
             let avoid: Vec<Area> = signs.iter().map(|s| s.area).collect();
             tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor, &avoid);
-            paint_world_text(art, text, d, u, &tags);
+            paint_world_text(art, text, d, extras.board.as_ref());
+            speakers = text
+                .bubbles
+                .iter()
+                .filter_map(|r| match r.role {
+                    TextRole::Bubble(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
         }
-        Some((tags, signs))
+        Some((tags, signs, speakers))
     }
 
     /// Scroll the panel's cards when the pointer is over the panel. Up the
@@ -727,6 +773,160 @@ impl Win {
         } else {
             self.last_click = Some((id, now));
             self.core.select(id, &mut self.office);
+        }
+    }
+}
+
+/// What the office is drawn with beyond the scene itself.
+struct OfficeExtras {
+    weather: WeatherPolicy,
+    /// The wall board's two lines, in place of its own.
+    board: Option<[String; 2]>,
+    now: SystemTime,
+}
+
+/// How long one chitchat line stays before the speaker says the next.
+const CHITCHAT_TURN_MS: u64 = 4_000;
+
+impl Win {
+    /// What goes under the readable text: the gold of a top bench's plate,
+    /// the late-night dark, the festival's dress, and what stands by each
+    /// figure (supper, a briefcase, its mood, the cat, confetti).
+    fn paint_goings_on_under(
+        &mut self,
+        canvas: &mut Canvas,
+        frame: &crate::core::Frame,
+        tags: &[Tag],
+        signs: &mut [DoorSign],
+        stage: lively::Stage,
+        now: SystemTime,
+    ) {
+        let repos = &self.core.watch.stats.repos;
+        for sign in signs.iter_mut() {
+            let turns = sign.repo.as_ref().and_then(|r| repos.get(r)).copied();
+            if crate::fun::stats::tier(turns.unwrap_or(0)) >= 2 {
+                sign.plate = lively::GOLD_PLATE;
+                sign.ink = 0x0020_2020;
+            }
+        }
+        let clock = frame.clock;
+        let overtime: Vec<AgentId> = frame
+            .scene
+            .agents
+            .values()
+            .filter(|s| crate::fun::overtime(s, frame.views.get(&s.agent_id), &clock, now))
+            .map(|s| s.agent_id)
+            .collect();
+        if clock.late() && !overtime.is_empty() {
+            lively::night_lights(canvas, stage, tags, &overtime);
+        }
+        if let Some(f) = clock.festival() {
+            lively::festival(canvas, &mut self.faces, stage, f, signs);
+        }
+        let stuck: Vec<(AgentId, crate::tasks::Stuck)> = frame
+            .scene
+            .agents
+            .values()
+            .filter_map(|s| {
+                crate::tasks::stuck_at_work(s, frame.views.get(&s.agent_id))
+                    .map(|st| (s.agent_id, st))
+            })
+            .collect();
+        let typhoon = frame.outlook.typhoon();
+        for t in tags {
+            let working =
+                frame.scene.agents.get(&t.agent).is_some_and(|s| {
+                    matches!(s.state, pixtuoid_core::ActivityState::Running { .. })
+                });
+            if overtime.contains(&t.agent) {
+                lively::overtime_supper(canvas, stage, t);
+            }
+            if typhoon && working {
+                lively::packing_up(canvas, stage, t);
+            }
+            if let Some((_, st)) = stuck.iter().find(|(id, _)| *id == t.agent) {
+                lively::mood(canvas, stage, t, crate::fun::Mood::of(*st));
+            }
+            if let Some((_, ago)) = crate::fun::live_cheer(frame.views.get(&t.agent), now) {
+                lively::confetti(canvas, stage, t, ago);
+            }
+        }
+        if let Some(id) = crate::fun::cat_visits(&stuck)
+            && let Some(t) = tags.iter().find(|t| t.agent == id)
+        {
+            lively::cat_by(canvas, stage, t);
+        }
+    }
+
+    /// A repository's stars and fortune tree by its bench plate.
+    fn paint_honours(&self, canvas: &mut Canvas, signs: &[DoorSign], stage: lively::Stage) {
+        let repos = &self.core.watch.stats.repos;
+        for sign in signs {
+            let Some(turns) = sign.repo.as_ref().and_then(|r| repos.get(r)) else {
+                continue;
+            };
+            let tier = crate::fun::stats::tier(*turns);
+            if tier > 0 {
+                lively::bench_honours(canvas, stage, sign, tier);
+            }
+        }
+    }
+
+    /// What goes over the readable text: cheers and the clapping for a
+    /// comeback, the chitchat, the boss at your door, the typhoon signal.
+    #[expect(clippy::too_many_arguments, reason = "one frame's layers, drawn once")]
+    fn paint_goings_on_over(
+        &mut self,
+        canvas: &mut Canvas,
+        frame: &crate::core::Frame,
+        tags: &[Tag],
+        signs: &[DoorSign],
+        speakers: &[AgentId],
+        stage: lively::Stage,
+        now: SystemTime,
+    ) {
+        use crate::fun::Occasion;
+        let mut taken: Vec<Area> = tags
+            .iter()
+            .flat_map(|t| std::iter::once(t.badge).chain(t.label))
+            .chain(signs.iter().map(|s| s.area))
+            .collect();
+        for t in tags {
+            let Some((cheer, _)) = crate::fun::live_cheer(frame.views.get(&t.agent), now) else {
+                continue;
+            };
+            lively::cheer_label(canvas, &mut self.faces, stage, t, cheer);
+            if cheer == crate::tasks::Cheer::Recovered {
+                for o in tags.iter().filter(|o| lively::neighbours(t, o, stage.u)) {
+                    lively::clapping(canvas, stage, o);
+                }
+            }
+        }
+        let occasion = if frame.outlook.typhoon() {
+            Occasion::Typhoon
+        } else if frame.clock.lunch() {
+            Occasion::Lunch
+        } else {
+            Occasion::Ordinary
+        };
+        let turn = stage.ms / CHITCHAT_TURN_MS;
+        for id in speakers {
+            let Some(t) = tags.iter().find(|t| t.agent == *id) else {
+                continue;
+            };
+            let line = crate::fun::chitchat(*id, frame.views.get(id), occasion, turn, now);
+            if let Some(a) = lively::chitchat(canvas, &mut self.faces, stage, t, line, &taken) {
+                taken.push(a);
+            }
+        }
+        if let Some(ago) = self.core.watch.boss_at_door(now)
+            && let Some(door) = signs.iter().find(|s| s.text == "你的办公室")
+        {
+            let stay = crate::fun::stats::BOSS_FOR;
+            lively::boss(canvas, &mut self.faces, stage, door, ago, stay);
+        }
+        if let Some(signal) = frame.outlook.signal {
+            lively::typhoon_signal(canvas, &mut self.faces, stage, signal);
         }
     }
 }
@@ -1013,38 +1213,40 @@ fn place_tags(
     tags
 }
 
-/// The signs and chitchat bubbles pixtuoid would bake, on the art grid in
-/// its order. A bubble is skipped over an agent that has a task to show, and
-/// where it would sit under a readable badge or label (`tags`, in window
-/// pixels, `u` to an art pixel).
-fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, u: u32, tags: &[Tag]) {
-    let u = i64::from(u.max(1));
-    let to_art = |r: &Area| Area {
-        x: r.x / u,
-        y: r.y / u,
-        w: (r.w as i64 / u + 1) as u32,
-        h: (r.h as i64 / u + 1) as u32,
-    };
-    let readable: Vec<Area> = tags
-        .iter()
-        .flat_map(|t| std::iter::once(t.badge).chain(t.label))
-        .map(|r| to_art(&r))
-        .collect();
-    for run in text.bubbles {
-        if let TextRole::Bubble(agent) = run.role
-            && tags.iter().any(|t| t.agent == agent && t.task.is_some())
-        {
-            continue;
-        }
-        let rect = run_rect(run, d);
-        if !readable.iter().any(|t| t.meets(&rect)) {
-            paint_run(art, run, rect);
-        }
-    }
+/// The signs pixtuoid would bake, on the art grid in its order. Its
+/// chitchat bubbles are left to the window, which sets them in Chinese
+/// ([`lively::chitchat`]); `board`, when given, takes the place of the wall
+/// board's two lines.
+fn paint_world_text(art: &mut Canvas, text: HostText<'_>, d: u32, board: Option<&[String; 2]>) {
     let mut signs: Vec<Area> = Vec::new();
+    let mut lines = board.into_iter().flatten();
     // Door signs are set in the readable faces over the upscaled office
     // ([`door_signs`]): the art font has no Chinese.
     for run in text.signs.iter().filter(|r| !set_readable(r.role)) {
+        let swapped;
+        let line = if run.role == TextRole::Board {
+            lines.next()
+        } else {
+            None
+        };
+        let run = match line {
+            Some(line) => {
+                let ink = run.spans.first().map_or(
+                    Rgb {
+                        r: 0xe6,
+                        g: 0xe6,
+                        b: 0xe6,
+                    },
+                    |s| s.ink,
+                );
+                swapped = TextRun {
+                    spans: vec![pixtuoid_scene::display::TextSpan::new(line.clone(), ink)],
+                    ..run.clone()
+                };
+                &swapped
+            }
+            None => run,
+        };
         let rect = run_rect(run, d);
         if signs.iter().any(|s| s.meets(&rect)) {
             continue;
@@ -1067,6 +1269,8 @@ pub(crate) struct DoorSign {
     /// Its plate, in window pixels.
     area: Area,
     text: String,
+    /// A bench plate's repository, as pixtuoid names it; `None` on a door.
+    repo: Option<String>,
     /// What its zone is for, shown when it is clicked.
     about: &'static str,
     plate: u32,
@@ -1209,6 +1413,7 @@ fn door_signs(
                     _ => DESK_ABOUT,
                 },
                 text: zh,
+                repo: (r.role == TextRole::BenchPlate).then_some(text),
                 plate: r.plate.map_or(PANEL_BG, to_u32),
                 ink: r.spans.first().map_or(TEXT, |s| to_u32(s.ink)),
             })

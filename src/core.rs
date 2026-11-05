@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
+use crate::fun::{self, Clock, hko::Outlook, stats::Watch};
 use crate::panel::{self, PanelState};
 use crate::{jump, pipeline, tasks, text};
 
@@ -52,6 +53,9 @@ pub struct Core {
     pub pipe: pipeline::Pipeline,
     views_rx: tokio::sync::watch::Receiver<tasks::TaskViews>,
     force_tx: tokio::sync::mpsc::UnboundedSender<AgentId>,
+    /// The day's tally, the repositories' records and the boss's comings.
+    pub watch: Watch,
+    outlook_rx: tokio::sync::watch::Receiver<Outlook>,
 }
 
 /// One frame's worth of state.
@@ -62,38 +66,66 @@ pub struct Frame {
     pub views: tasks::TaskViews,
     /// The head label per agent; empty while they are hidden.
     pub labels: HashMap<AgentId, String>,
+    /// The office's clock now.
+    pub clock: Clock,
+    /// Hong Kong's weather, when the user asked for it.
+    pub outlook: Outlook,
 }
 
 /// `scene` as the office draws it: a session you opened since it went idle
 /// ([`panel::read_since_idle`]) has had its result read, so it idles as one
 /// past the pantry, out on the rooftop; its idle stretch is drawn as starting
 /// [`IDLE_ROOFTOP_MS`](pixtuoid_scene::pose::IDLE_ROOFTOP_MS) ago at least.
-/// The panel keeps the real start for its "空闲 Xm".
+/// While `in_pantry` (lunch, or a typhoon closing the rooftop) every idle
+/// agent is drawn in the pantry, the cha chaan teng, instead: its idle
+/// stretch is drawn a minute short of the rooftop's at most. The panel keeps
+/// the real start for its "空闲 Xm".
 pub fn as_seen(
     scene: &Arc<SceneState>,
     seen: &HashMap<AgentId, SystemTime>,
+    in_pantry: bool,
     now: SystemTime,
 ) -> Arc<SceneState> {
-    let read: Vec<AgentId> = scene
-        .agents
-        .values()
-        .filter(|s| panel::read_since_idle(s, seen))
-        .map(|s| s.agent_id)
-        .collect();
-    if read.is_empty() {
+    let rooftop = Duration::from_millis(pixtuoid_scene::pose::IDLE_ROOFTOP_MS);
+    let ago = |d: Duration| now.checked_sub(d).unwrap_or(SystemTime::UNIX_EPOCH);
+    let (moved, start): (Vec<AgentId>, SystemTime) = if in_pantry {
+        let last_pantry = ago(rooftop - PANTRY_MARGIN);
+        let ids = scene
+            .agents
+            .values()
+            .filter(|s| s.state == pixtuoid_core::ActivityState::Idle && s.exiting_at.is_none())
+            .filter(|s| s.state_started_at < last_pantry)
+            .map(|s| s.agent_id)
+            .collect();
+        (ids, last_pantry)
+    } else {
+        let ids = scene
+            .agents
+            .values()
+            .filter(|s| panel::read_since_idle(s, seen))
+            .map(|s| s.agent_id)
+            .collect();
+        (ids, ago(rooftop))
+    };
+    if moved.is_empty() {
         return Arc::clone(scene);
     }
-    let past_pantry = now
-        .checked_sub(Duration::from_millis(pixtuoid_scene::pose::IDLE_ROOFTOP_MS))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut drawn = (**scene).clone();
-    for id in read {
+    for id in moved {
         if let Some(s) = drawn.agents.get_mut(&id) {
-            s.state_started_at = s.state_started_at.min(past_pantry);
+            s.state_started_at = if in_pantry {
+                start
+            } else {
+                s.state_started_at.min(start)
+            };
         }
     }
     Arc::new(drawn)
 }
+
+/// How far short of the rooftop's an idle stretch held in the pantry is
+/// drawn: enough that a frame's lag never tips it over.
+const PANTRY_MARGIN: Duration = Duration::from_secs(60);
 
 impl Core {
     /// Start the sources and the task loop on `rt`, the floors seating `caps`.
@@ -104,10 +136,10 @@ impl Core {
             None => "摘要关闭".to_owned(),
         };
         let socket = crate::hook::socket_path();
-        let (pipe, views_rx, force_tx) = rt.block_on(async {
+        let (pipe, views_rx, force_tx, outlook_rx) = rt.block_on(async {
             let pipe = pipeline::spawn(socket, caps);
             let (views_rx, force_tx) = tasks::spawn(pipe.scene_rx.clone(), summarizer);
-            (pipe, views_rx, force_tx)
+            (pipe, views_rx, force_tx, fun::hko::spawn())
         });
         Self {
             ui: PanelState::default(),
@@ -117,6 +149,8 @@ impl Core {
             pipe,
             views_rx,
             force_tx,
+            watch: Watch::load(),
+            outlook_rx,
         }
     }
 
@@ -147,11 +181,18 @@ impl Core {
             HashMap::new()
         };
         self.ui.seen.retain(|id, _| scene.agents.contains_key(id));
+        self.watch.observe(&scene, &views, now);
+        let clock = Clock::now(now);
+        let outlook = *self.outlook_rx.borrow();
+        // A typhoon closes the rooftop; at lunch everyone is down for a meal.
+        let in_pantry = clock.lunch() || outlook.typhoon();
         Frame {
-            office: as_seen(&scene, &self.ui.seen, now),
+            office: as_seen(&scene, &self.ui.seen, in_pantry, now),
             scene,
             views,
             labels,
+            clock,
+            outlook,
         }
     }
 
@@ -337,9 +378,12 @@ mod tests {
             s.state_started_at = now - Duration::from_secs(60);
         }
         let scene = Arc::new(scene);
-        assert!(Arc::ptr_eq(&as_seen(&scene, &HashMap::new(), now), &scene));
+        assert!(Arc::ptr_eq(
+            &as_seen(&scene, &HashMap::new(), false, now),
+            &scene
+        ));
         let seen = HashMap::from([(ids[0], now - Duration::from_secs(5))]);
-        let drawn = as_seen(&scene, &seen, now);
+        let drawn = as_seen(&scene, &seen, false, now);
         let idle_for =
             |s: &SceneState, id| now.duration_since(s.agents[id].state_started_at).unwrap();
         assert!(
@@ -357,5 +401,60 @@ mod tests {
             Duration::from_secs(60),
             "the panel's scene untouched"
         );
+    }
+
+    /// At lunch, or with a typhoon closing the rooftop, every idle agent is
+    /// drawn in the cha chaan teng, even one read and one idle for an hour;
+    /// one just gone idle keeps its own stretch, and a working one is left
+    /// at its desk.
+    #[test]
+    fn lunch_brings_every_idle_agent_down_to_the_cha_chaan_teng() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(7200);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["long", "read", "fresh", "busy"]
+            .iter()
+            .map(|sid| {
+                let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+                r.apply(
+                    &mut scene,
+                    AgentEvent::SessionStart {
+                        agent_id: id,
+                        source: pipeline::CC_SOURCE.into(),
+                        session_id: (*sid).into(),
+                        cwd: "/repo".into(),
+                        parent_id: None,
+                    },
+                    t0,
+                    Transport::Hook,
+                );
+                id
+            })
+            .collect();
+        let idle_since = [3600, 1200, 30, 3600];
+        for (id, secs) in ids.iter().zip(idle_since) {
+            let s = scene.agents.get_mut(id).unwrap();
+            s.state = pixtuoid_core::ActivityState::Idle;
+            s.state_started_at = now - Duration::from_secs(secs);
+        }
+        scene.agents.get_mut(&ids[3]).unwrap().state =
+            pixtuoid_core::ActivityState::Running { item: None };
+        let scene = Arc::new(scene);
+        let seen = HashMap::from([(ids[1], now - Duration::from_secs(5))]);
+        let drawn = as_seen(&scene, &seen, true, now);
+        let idle_ms = |id: &AgentId| {
+            now.duration_since(drawn.agents[id].state_started_at)
+                .unwrap()
+                .as_millis() as u64
+        };
+        let rooftop = pixtuoid_scene::pose::IDLE_ROOFTOP_MS;
+        assert!(
+            idle_ms(&ids[0]) < rooftop,
+            "an hour idle, still in the pantry"
+        );
+        assert!(idle_ms(&ids[1]) < rooftop, "read, but down for lunch");
+        assert_eq!(idle_ms(&ids[2]), 30_000, "just idle, left as it is");
+        assert_eq!(idle_ms(&ids[3]), 3_600_000, "working, left at its desk");
     }
 }
