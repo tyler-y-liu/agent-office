@@ -44,6 +44,8 @@ pub mod burn;
 pub(crate) mod cached_layer;
 pub(crate) mod celestial;
 pub(crate) mod character;
+/// agent-office: an agent's head, for the panel's card.
+pub use character::portrait;
 pub mod chitchat;
 pub(crate) mod clouds;
 pub(crate) mod composite;
@@ -95,6 +97,8 @@ pub mod sky;
 pub(crate) mod skyline;
 #[doc(hidden)]
 pub mod tally;
+/// agent-office: what a working agent's screen shows.
+pub mod desk_show;
 /// agent-office: sub-agent teams in the meeting rooms.
 pub(crate) mod team;
 /// The color-theme MODEL: the `Theme` role palette and the bundled themes.

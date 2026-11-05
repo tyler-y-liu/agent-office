@@ -85,6 +85,48 @@ pub(crate) fn character_frame<'c>(
     recolor(dense, &key, pack, cache)
 }
 
+/// agent-office: `agent`'s head as the office draws it standing, recoloured and
+/// dressed in its hairstyle, cropped to the head and its hair: the face the
+/// panel's card wears, so a card and its figure are seen to be one agent. Drawn
+/// from the densest art at `scale`; the whole frame's top half where the art
+/// marks no head.
+pub fn portrait(
+    agent: &AgentSlot,
+    pack: &OfficeArt,
+    scale: crate::render_scale::RenderScale,
+    now: SystemTime,
+) -> Frame {
+    let pose = SpritePose {
+        anim_name: Piece::Standing,
+        frame_idx: 0,
+        flip_x: false,
+        glow_tint: None,
+    };
+    let mut cache = FrameCache::new();
+    let head = crate::pack::densest_frame(pack, Piece::Standing, 0, scale).head;
+    let art = character_frame(pose, agent, pack, scale, &mut cache, now);
+    let f = art.frame;
+    // The mark sits mid-face: as far again below it is the chin.
+    let bottom = head.map_or(f.height() / 2, |h| art.rise + h.y() * 2 + 1);
+    let bottom = bottom.min(f.height());
+    let opaque = |x: u16, y: u16| f.get(x, y).copied().flatten().is_some();
+    let cols: Vec<u16> = (0..f.width())
+        .filter(|&x| (0..bottom).any(|y| opaque(x, y)))
+        .collect();
+    let top = (0..bottom)
+        .find(|&y| (0..f.width()).any(|x| opaque(x, y)))
+        .unwrap_or(0);
+    let (Some(&x0), Some(&x1)) = (cols.first(), cols.last()) else {
+        return Frame::from_pixels(0, 0, Vec::new());
+    };
+    let (w, h) = (x1 - x0 + 1, bottom - top);
+    let pixels = (top..bottom)
+        .flat_map(|y| (x0..=x1).map(move |x| (x, y)))
+        .map(|(x, y)| f.get(x, y).copied().flatten())
+        .collect();
+    Frame::from_pixels(w, h, pixels)
+}
+
 /// [`character_frame`] for a [`CharacterKey`] resolved at `scale`.
 pub(crate) fn keyed_character_frame<'c>(
     key: &CharacterKey,
@@ -210,6 +252,36 @@ pub(crate) struct CharacterFrame<'c> {
 mod tests {
     use super::*;
     use std::fmt::Write as _;
+
+    /// agent-office: the panel's card wears its agent's head, so the card
+    /// matches the figure: cropped above the shoulders, wearing the agent's
+    /// own hair, and so unlike a coworker's.
+    #[test]
+    fn a_portrait_is_the_agents_own_head() {
+        let pack = crate::pack::test_office();
+        let scale = crate::render_scale::RenderScale::new(4).expect("4x");
+        let now = SystemTime::UNIX_EPOCH;
+        let a = test_support::make_slot_cwd("/a.jsonl", "/demo/api", false);
+        let b = test_support::make_slot_cwd("/zz.jsonl", "/demo/web", false);
+        let pa = portrait(&a, &pack, scale, now);
+        let body = crate::pack::densest_frame(&pack, Piece::Standing, 0, scale);
+        assert!(
+            pa.height() > 0 && pa.height() < body.frame.height() * 2 / 3,
+            "cropped to the head"
+        );
+        let hair = test_support::color_of(&a, HAIR_KEY);
+        let has = |f: &Frame, c| {
+            (0..f.height()).any(|y| (0..f.width()).any(|x| f.get(x, y).copied().flatten() == c))
+        };
+        assert!(has(&pa, hair), "wears its own hair colour");
+        let px = |f: &Frame| -> Vec<Option<Rgb>> {
+            (0..f.height())
+                .flat_map(|y| (0..f.width()).map(move |x| (x, y)))
+                .map(|(x, y)| f.get(x, y).copied().flatten())
+                .collect()
+        };
+        assert_ne!(px(&pa), px(&portrait(&b, &pack, scale, now)));
+    }
 
     /// The README banner's coworker: whose transcript and working directory
     /// pick their outfit, hair, skin and hairstyle, as any agent's do.

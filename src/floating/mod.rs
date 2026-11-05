@@ -5,6 +5,7 @@
 
 mod font;
 mod lively;
+mod rooms;
 mod vector;
 
 use std::collections::HashMap;
@@ -463,7 +464,7 @@ impl Win {
                 TEXT,
                 g.px,
             );
-        } else if let Some((tags, mut signs, speakers)) = {
+        } else if let Some((tags, mut signs, speakers, rooms)) = {
             let now = SystemTime::now();
             let board = frame
                 .clock
@@ -471,6 +472,17 @@ impl Win {
                 .then(|| lively::tally_lines(&self.core.watch.stats));
             // A typhoon keeps the boats in port.
             pixtuoid_scene::sky::set_harbour_closed(frame.outlook.typhoon());
+            pixtuoid_scene::desk_show::set_desk_shows(
+                frame
+                    .office
+                    .agents
+                    .values()
+                    .filter_map(|s| {
+                        let show = crate::fun::desk_show(s, frame.views.get(&s.agent_id), now)?;
+                        Some((s.agent_id, show))
+                    })
+                    .collect(),
+            );
             let weather = frame
                 .outlook
                 .weather
@@ -500,6 +512,7 @@ impl Win {
                 ms: lively::ms_of(now),
             };
             self.paint_goings_on_under(&mut canvas, &frame, &tags, &mut signs, stage, now);
+            self.paint_rooms(&mut canvas, &frame, &tags, &signs, &rooms, stage);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
             self.paint_honours(&mut canvas, &signs, stage);
             let stuck: Vec<AgentId> = frame
@@ -550,7 +563,7 @@ impl Win {
         let rows = u16::try_from(oh / g.row_h).unwrap_or(0);
         let panel_area = Rect::new(0, 0, cols, rows);
         let mut cells = Buffer::empty(panel_area);
-        let panel_rows = panel::render(
+        let drawn = panel::render(
             &mut cells,
             panel_area,
             &frame.scene,
@@ -560,6 +573,21 @@ impl Win {
         );
         canvas.fill(i64::from(panel_x), 0, w.get() - panel_x, h.get(), PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &cells, (panel_x, 0), g);
+        paint_outlines(&mut canvas, &drawn.outlines, (panel_x, cols), g, sf);
+        for &(row, col, id, faded) in &drawn.avatars {
+            if let Some(slot) = frame.scene.agents.get(&id) {
+                paint_portrait(
+                    &mut canvas,
+                    pack,
+                    slot,
+                    &cells,
+                    (row, col),
+                    (panel_x, g),
+                    faded,
+                );
+            }
+        }
+        let panel_rows = drawn.rows;
         let foot_cols = u16::try_from(w.get() / g.cell_w).unwrap_or(0);
         let foot_area = Rect::new(0, 0, foot_cols, 1);
         let mut foot = Buffer::empty(foot_area);
@@ -614,7 +642,7 @@ impl Win {
         labels: &HashMap<AgentId, String>,
         scale_factor: f64,
         extras: OfficeExtras,
-    ) -> Option<(Vec<Tag>, Vec<DoorSign>, Vec<AgentId>)> {
+    ) -> Option<(Vec<Tag>, Vec<DoorSign>, Vec<AgentId>, Vec<rooms::Room>)> {
         let _feed = self.office.session.render(
             fit.look(WorldText::Host),
             RenderInputs {
@@ -648,11 +676,13 @@ impl Win {
         let mut tags = Vec::new();
         let mut signs = Vec::new();
         let mut speakers = Vec::new();
+        let mut south = Vec::new();
         if let Picture::Floor(floor) = picture
             && let Some(text) = floor.text
         {
             let d = u32::from(fit.density().get());
             let u = u32::from(fit.upscale());
+            south = rooms::rooms_of(floor.hits.layout(), d, u);
             signs = door_signs(&mut self.faces, text, d, u, scale_factor);
             let avoid: Vec<Area> = signs.iter().map(|s| s.area).collect();
             tags = place_tags(&mut self.faces, text, d, u, labels, scale_factor, &avoid);
@@ -666,7 +696,7 @@ impl Win {
                 })
                 .collect();
         }
-        Some((tags, signs, speakers))
+        Some((tags, signs, speakers, south))
     }
 
     /// Scroll the panel's cards when the pointer is over the panel. Up the
@@ -865,6 +895,52 @@ impl Win {
         }
     }
 
+    /// What sets the south rooms apart: the meeting rooms' whiteboards with
+    /// their subagents' tasks, the waiting area's ticket machine counting
+    /// those waiting on you, your office's window on the harbour.
+    fn paint_rooms(
+        &mut self,
+        canvas: &mut Canvas,
+        frame: &crate::core::Frame,
+        tags: &[Tag],
+        signs: &[DoorSign],
+        rooms: &[rooms::Room],
+        stage: lively::Stage,
+    ) {
+        use pixtuoid_scene::layout::RoomStyle;
+        for room in rooms {
+            match room.style {
+                RoomStyle::Office => {
+                    let lines = rooms::board_lines(&room.area, tags, &frame.scene, &frame.views);
+                    rooms::whiteboard(canvas, &mut self.faces, stage.scale_factor, room, &lines);
+                }
+                RoomStyle::Waiting => {
+                    let seen = &self.core.ui.seen;
+                    let waiting = frame
+                        .scene
+                        .agents
+                        .values()
+                        .filter(|s| s.parent_id.is_none())
+                        .filter(|s| crate::pipeline::is_shown_source(&s.source))
+                        .filter(|s| {
+                            let read = panel::read_since_idle(s, seen);
+                            panel::waits_on_you(s, frame.views.get(&s.agent_id), read).is_some()
+                        })
+                        .count();
+                    rooms::ticket_machine(canvas, room, waiting, stage.ms);
+                }
+                RoomStyle::Boss => {
+                    let door = signs
+                        .iter()
+                        .find(|s| s.text == OFFICE_SIGN)
+                        .map(|s| &s.area);
+                    rooms::sea_window(canvas, room, door, frame.clock.hour, stage.ms);
+                }
+                RoomStyle::Rooftop => {}
+            }
+        }
+    }
+
     /// A repository's stars and fortune tree by its bench plate.
     fn paint_honours(&self, canvas: &mut Canvas, signs: &[DoorSign], stage: lively::Stage) {
         let repos = &self.core.watch.stats.repos;
@@ -1003,6 +1079,100 @@ fn paint_cells(
                 color_u32(cell.fg, TEXT),
                 g.px,
             );
+        }
+    }
+}
+
+/// Ink of the outline round a card done and waiting to be read: the panel's
+/// colour for that group.
+const DONE_OUTLINE: u32 = 0x00ff_e8a3;
+
+/// An outline round each card in `outlines` (its first and last panel rows),
+/// across the panel of `cols` cells at `panel_x`.
+fn paint_outlines(
+    canvas: &mut Canvas,
+    outlines: &[(u16, u16)],
+    (panel_x, cols): (u32, u16),
+    g: Grid,
+    sf: f64,
+) {
+    let t = (sf.round() as u32).max(1);
+    // Half a cell in from the panel's text on each side.
+    let x0 = i64::from(panel_x + g.cell_w * 3 / 2);
+    let x1 = i64::from(panel_x + u32::from(cols) * g.cell_w - g.cell_w / 2);
+    let w = u32::try_from(x1 - x0).unwrap_or(0);
+    for &(top, bottom) in outlines {
+        let y0 = i64::from(u32::from(top) * g.row_h + t);
+        let y1 = i64::from((u32::from(bottom) + 1) * g.row_h - t);
+        let h = u32::try_from(y1 - y0).unwrap_or(0);
+        canvas.fill(x0, y0, w, t, DONE_OUTLINE);
+        canvas.fill(x0, y1 - i64::from(t), w, t, DONE_OUTLINE);
+        canvas.fill(x0, y0, t, h, DONE_OUTLINE);
+        canvas.fill(x1 - i64::from(t), y0, t, h, DONE_OUTLINE);
+    }
+}
+
+/// `slot`'s head over its avatar at (`row`, `col`) of the panel's `cells`, on
+/// the avatar's own colour, so the card shows the figure it belongs to. Set at
+/// a whole multiple of its art pixels where it fits, else every n-th of them;
+/// `faded` sinks it into the panel as its card is.
+fn paint_portrait(
+    canvas: &mut Canvas,
+    pack: &OfficeArt,
+    slot: &pixtuoid_core::AgentSlot,
+    cells: &Buffer,
+    (row, col): (u16, u16),
+    (panel_x, g): (u32, Grid),
+    faded: bool,
+) {
+    let Some(scale) = pixtuoid_scene::render_scale::RenderScale::new(4) else {
+        return;
+    };
+    let head = pixtuoid_scene::portrait(slot, pack, scale, SystemTime::now());
+    let (pw, ph) = (u32::from(head.width()), u32::from(head.height()));
+    if pw == 0 || ph == 0 || col >= cells.area.width || row >= cells.area.height {
+        return;
+    }
+    let (bx, by) = (
+        panel_x + u32::from(col) * g.cell_w,
+        u32::from(row) * g.row_h,
+    );
+    let (bw, bh) = (u32::from(panel::AVATAR_CELLS) * g.cell_w, g.row_h);
+    let chip = color_u32(cells[(col, row)].bg, PANEL_BG);
+    canvas.fill(i64::from(bx), i64::from(by), bw, bh, chip);
+    let up = (bw / pw).min(bh / ph);
+    let (k, step) = if up >= 1 {
+        (up, 1)
+    } else {
+        (1, pw.div_ceil(bw).max(ph.div_ceil(bh)))
+    };
+    let (dw, dh) = (pw / step * k, ph / step * k);
+    let (ox, oy) = (bx + (bw - dw.min(bw)) / 2, by + (bh - dh.min(bh)) / 2);
+    let sink = |c: u32| {
+        if !faded {
+            return c;
+        }
+        let ch = |s: u32| {
+            let (a, z) = ((c >> s) & 0xff, (PANEL_BG >> s) & 0xff);
+            ((a * 45 + z * 55) / 100) << s
+        };
+        ch(16) | ch(8) | ch(0)
+    };
+    for y in 0..ph / step {
+        for x in 0..pw / step {
+            let px = head.get(
+                u16::try_from(x * step).unwrap_or(u16::MAX),
+                u16::try_from(y * step).unwrap_or(u16::MAX),
+            );
+            if let Some(Some(c)) = px.copied() {
+                canvas.fill(
+                    i64::from(ox + x * k),
+                    i64::from(oy + y * k),
+                    k,
+                    k,
+                    sink(to_u32(c)),
+                );
+            }
         }
     }
 }
