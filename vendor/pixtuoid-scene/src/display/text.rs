@@ -296,8 +296,6 @@ pub enum TextRole {
     Bubble(AgentId),
     /// agent-office: a zone's sign by its door.
     DoorSign,
-    /// agent-office: a bench's plate naming the repository sat at it.
-    BenchPlate,
 }
 
 impl TextRun {
@@ -348,96 +346,17 @@ impl TextRun {
     }
 
     /// The room's signs: `board`'s lines, the floor indicator naming
-    /// `floor` over the elevator, then agent-office's door signs and the
-    /// benches' plates for `agents` on this floor.
+    /// `floor` over the elevator, then agent-office's door signs.
     pub(crate) fn signs(
         board: &crate::neon_sign::BoardModel,
         layout: &crate::layout::SceneLayout,
-        agents: &[pixtuoid_core::AgentSlot],
         floor: crate::floor::FloorMeta,
         theme: &Theme,
     ) -> Vec<Self> {
         let mut runs = board.runs(theme);
         runs.push(Self::indicator(layout.door, floor, theme));
         runs.extend(Self::door_signs(layout));
-        let here: Vec<_> = agents
-            .iter()
-            .filter(|a| a.floor_idx == floor.floor_idx)
-            .cloned()
-            .collect();
-        runs.extend(Self::bench_plates(layout, &here));
         runs
-    }
-
-    /// agent-office: a plate over each bench naming the repository its
-    /// sitters work in, on that repository's colour ([`crate::badge::repo_hues`]),
-    /// so the benches read as projects. Only a bench whose sitters all work in
-    /// one repository is named: a plate over a shared bench would name some of
-    /// them wrongly. An empty bench has none. `agents` are the floor's.
-    pub(crate) fn bench_plates(
-        layout: &crate::layout::SceneLayout,
-        agents: &[pixtuoid_core::AgentSlot],
-    ) -> Vec<Self> {
-        use pixtuoid_core::state::project_root;
-        let hues = crate::badge::repo_hues(agents);
-        let ids = layout.bench_ids();
-        let mut benches: Vec<(u16, u16, crate::layout::HomeDesk)> = Vec::new();
-        for (i, d) in layout.home_desks.iter().enumerate() {
-            let id = usize::from(ids[i]);
-            if benches.len() <= id {
-                benches.resize(id + 1, (d.at.x, d.at.x, *d));
-            }
-            let (x0, x1, first) = &mut benches[id];
-            if d.at.x < *x0 {
-                (*x0, *first) = (d.at.x, *d);
-            }
-            *x1 = (*x1).max(d.at.x);
-        }
-        benches
-            .into_iter()
-            .enumerate()
-            .filter_map(|(id, (x0, x1, first))| {
-                let mut sitters = agents.iter().filter(|a| {
-                    ids.get(a.desk_index.single_floor_local().0)
-                        .is_some_and(|&b| usize::from(b) == id)
-                });
-                let sitter = sitters.next()?;
-                // A sitter whose directory is unknown may be anyone's.
-                let root = (!sitter.unknown_cwd).then(|| project_root(&sitter.cwd))?;
-                if sitters.any(|a| a.unknown_cwd || project_root(&a.cwd) != root) {
-                    return None;
-                }
-                // The repository's own name, as its directory has it (a
-                // worktree is its repository's).
-                let repo = root.file_name()?.to_string_lossy().into_owned();
-                let plate = crate::badge::repo_hue(sitter, &hues)?;
-                Some(Self {
-                    // On the sitters' side of the screens: over a row facing
-                    // the viewer, under one facing the windows.
-                    at: Point {
-                        x: (x0 + x1 + crate::layout::DESK_W) / 2,
-                        y: match first.facing {
-                            crate::layout::Facing::North => {
-                                first.at.y + crate::layout::DESK_H + BENCH_PLATE_DROP
-                            }
-                            _ => first.at.y.saturating_sub(BENCH_PLATE_LIFT),
-                        },
-                    },
-                    align: Align::Centre,
-                    spans: vec![TextSpan::new(
-                        repo,
-                        Rgb {
-                            r: 0x16,
-                            g: 0x18,
-                            b: 0x1d,
-                        },
-                    )],
-                    plate: Some(plate),
-                    strip: None,
-                    role: TextRole::BenchPlate,
-                })
-            })
-            .collect()
     }
 
     /// agent-office: a sign on each zone's north wall over its door, in the
@@ -563,11 +482,6 @@ impl TextRun {
     }
 }
 
-/// agent-office: rows a bench's plate stands over a row facing the viewer,
-/// and under a row facing the windows, past its sitters' chairs.
-const BENCH_PLATE_LIFT: u16 = 7;
-const BENCH_PLATE_DROP: u16 = 3;
-
 /// agent-office: rows a door sign stands above its wall's line, on the
 /// corridor side.
 const SIGN_LIFT: u16 = 3;
@@ -594,82 +508,6 @@ fn line_at(at: Point, align: Align, w: u16, map: CellMap) -> CellRect {
 
 #[cfg(test)]
 mod tests {
-
-    /// agent-office: each bench row with a sitter names the repository it
-    /// works in, on that repository's colour, so the benches read as
-    /// projects; an empty row has no plate.
-    #[test]
-    fn each_occupied_bench_names_its_repository() {
-        use crate::character::test_support::make_slot;
-        let l = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
-        let mut a = make_slot(
-            pixtuoid_core::AgentId::from_transcript_path("/p/a.jsonl"),
-            pixtuoid_core::state::ActivityState::Idle,
-        );
-        a.label = "cc·agent-office".into();
-        a.cwd = std::sync::Arc::from(std::path::Path::new("/w/agent-office"));
-        a.desk_index = pixtuoid_core::state::GlobalDeskIndex(0);
-        let agents = [a];
-        let plates = super::TextRun::bench_plates(&l, &agents);
-        assert_eq!(plates.len(), 1, "one occupied row, one plate");
-        let plate = &plates[0];
-        assert_eq!(plate.text(), "agent-office");
-        let hues = crate::badge::repo_hues(&agents);
-        assert_eq!(plate.plate, crate::badge::repo_hue(&agents[0], &hues));
-        let desk = l.home_desks[0];
-        assert!(
-            plate.at.x.abs_diff(desk.at.x) < 4 * (crate::layout::DESK_W + 4),
-            "over its own bench"
-        );
-    }
-
-    /// agent-office: a plate over a bench claims every sitter for its
-    /// repository, so a bench shared by two repositories, or with a sitter
-    /// whose directory is unknown, has none: naming the first sitter's put a
-    /// myclaw session under a toolhub-studio plate. A bench all of one
-    /// repository keeps its plate.
-    #[test]
-    fn only_a_bench_of_one_repository_is_named() {
-        use crate::character::test_support::make_slot;
-        let l = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
-        let ids = l.bench_ids();
-        let mate = (1..ids.len())
-            .find(|&i| ids[i] == ids[0])
-            .expect("a bench of two");
-        let sitter = |name: &str, cwd: &str, desk: usize| {
-            let mut a = make_slot(
-                pixtuoid_core::AgentId::from_transcript_path(name),
-                pixtuoid_core::state::ActivityState::Idle,
-            );
-            a.cwd = std::sync::Arc::from(std::path::Path::new(cwd));
-            a.desk_index = pixtuoid_core::state::GlobalDeskIndex(desk);
-            a
-        };
-        let plates = |agents: &[pixtuoid_core::AgentSlot]| {
-            super::TextRun::bench_plates(&l, agents)
-                .iter()
-                .map(|p| p.text())
-                .collect::<Vec<_>>()
-        };
-        let a = sitter("/p/a.jsonl", "/w/toolhub-studio", 0);
-        let b = sitter("/p/b.jsonl", "/w/myclaw", mate);
-        assert!(
-            plates(&[a.clone(), b]).is_empty(),
-            "two repositories, no plate"
-        );
-        let mut lost = sitter("/p/c.jsonl", "/", mate);
-        lost.unknown_cwd = true;
-        assert!(
-            plates(&[a.clone(), lost]).is_empty(),
-            "an unknown sitter, no plate"
-        );
-        let a2 = sitter("/p/a2.jsonl", "/w/toolhub-studio/.claude/worktrees/x", mate);
-        assert_eq!(
-            plates(&[a, a2]),
-            ["toolhub-studio"],
-            "one repository, its plate"
-        );
-    }
 
     /// agent-office: every zone is named by a sign over its door, in a colour
     /// of its own, so the plan reads at a glance; a zone the window has no

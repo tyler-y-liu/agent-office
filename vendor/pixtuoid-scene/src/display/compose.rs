@@ -176,7 +176,7 @@ pub(crate) fn compose_at<'a>(
     } = office;
     let ambient = crate::display::light::Ambient::of(&moment.look);
     let (mut collected, mut host_text) = collect_pieces(frame, office, moment, outside);
-    host_text.signs = TextRun::signs(board, office.layout, &frame.agents, floor, theme);
+    host_text.signs = TextRun::signs(board, office.layout, floor, theme);
     collected.extend(signs(office, &host_text.signs));
     let sorted = depth_sort(
         collected

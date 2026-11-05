@@ -90,8 +90,6 @@ const HANDS_SHUT: &[&str] = &["..y..", ".p.p.", ".ppp."];
 const BOSS: &[&str] = &[
     ".hhhhhh.", "hhhhhhhh", "hpppppph", "pkkpkkpp", "pppppppp", ".ppkkpp.", "sssttsss", "ssstttss",
 ];
-const STAR: &[&str] = &["..y..", ".yyy.", "yyyyy", ".yyy.", ".y.y."];
-const PLANT: &[&str] = &[".n.n.", "nNnnn", ".nNn.", "..b..", ".RRR.", ".RRR."];
 const LANTERN: &[&str] = &["..y..", ".rrr.", "rrorr", "rrorr", ".rrr.", "..y.."];
 const TREE: &[&str] = &[
     "...y...", "...n...", "..nnn..", "..nrn..", ".nnnnn.", ".nynnr.", "nnnnnnn", "...b...",
@@ -588,30 +586,6 @@ pub(super) fn replay(
     }
 }
 
-/// A repository's stars by its bench plate, and from the top tier a
-/// fortune tree on its other side.
-pub(super) fn bench_honours(canvas: &mut Canvas, s: Stage, sign: &DoorSign, tier: u8) {
-    let u = (s.u / 2).max(1);
-    let a = sign.area;
-    let sy = a.y + (i64::from(a.h) - 5 * u) / 2;
-    for i in 0..i64::from(tier) {
-        sprite(canvas, a.x + i64::from(a.w) + u + i * 6 * u, sy, u, STAR);
-    }
-    if tier >= 3 {
-        let ph = PLANT.len() as i64 * u;
-        sprite(
-            canvas,
-            a.x - sprite_w(PLANT) * u - u,
-            a.y + i64::from(a.h) - ph,
-            u,
-            PLANT,
-        );
-    }
-}
-
-/// The plate colour of a bench whose repository reached the gold tier.
-pub(super) const GOLD_PLATE: u32 = 0x00d4_a937;
-
 /// The office dressed for `festival`: lanterns, spring couplets and
 /// firecrackers, or Christmas lights and a tree.
 pub(super) fn festival(
@@ -662,7 +636,7 @@ pub(super) fn festival(
         }
         Festival::LunarNewYear => {
             // A 福 on red by every door, and firecrackers at the windows' ends.
-            for d in signs.iter().filter(|d| d.repo.is_none()) {
+            for d in signs {
                 let r = i64::from(d.area.h) * 3 / 4;
                 let (cx, cy) = (d.area.x - r - u, d.area.y + i64::from(d.area.h / 2));
                 for dy in -r..=r {

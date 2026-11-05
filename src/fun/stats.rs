@@ -64,17 +64,6 @@ impl Stats {
     }
 }
 
-/// A repository's standing, by turns finished there: each tier dresses its
-/// bench up a step.
-pub fn tier(turns: u32) -> u8 {
-    match turns {
-        200.. => 3,
-        50.. => 2,
-        10.. => 1,
-        _ => 0,
-    }
-}
-
 /// The name a repository's bench plate carries: its root directory's.
 pub fn repo_of(slot: &AgentSlot) -> Option<String> {
     project_root(&slot.cwd)
@@ -421,15 +410,6 @@ mod tests {
             w.observe_on("d", &scene, &stuck, now);
         }
         assert_eq!(w.stats.stuck, 1);
-    }
-
-    /// Each tier asks for real work: ten turns for the first star.
-    #[test]
-    fn a_bench_climbs_a_tier_at_ten_fifty_and_two_hundred_turns() {
-        assert_eq!(
-            [0, 9, 10, 49, 50, 199, 200].map(tier),
-            [0, 0, 1, 1, 2, 2, 3]
-        );
     }
 
     /// The replay's honours come from today's own record: who finished most,

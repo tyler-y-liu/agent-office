@@ -587,7 +587,7 @@ impl Win {
                 TEXT,
                 g.px,
             );
-        } else if let Some((tags, mut signs, speakers, rooms, boards)) = {
+        } else if let Some((tags, signs, speakers, rooms, boards)) = {
             let now = SystemTime::now();
             let board = frame
                 .clock
@@ -640,10 +640,9 @@ impl Win {
                 ms: lively::ms_of(now),
             };
             cat_hit =
-                self.paint_goings_on_under(&mut canvas, &frame, &tags, &mut signs, stage, now);
+                self.paint_goings_on_under(&mut canvas, &frame, &tags, &signs, stage, now);
             self.paint_rooms(&mut canvas, &frame, &tags, &signs, &rooms, stage);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
-            self.paint_honours(&mut canvas, &signs, stage);
             let stuck: Vec<AgentId> = frame
                 .scene
                 .agents
@@ -1054,8 +1053,7 @@ struct OfficeExtras {
 const CHITCHAT_TURN_MS: u64 = 4_000;
 
 impl Win {
-    /// What goes under the readable text: the gold of a top bench's plate,
-    /// the late-night dark, the festival's dress, and what stands by each
+    /// What goes under the readable text: the late-night dark, the festival's dress, and what stands by each
     /// figure (supper, a briefcase, its mood, the cat, confetti); where the
     /// cat sits, when it does.
     fn paint_goings_on_under(
@@ -1063,18 +1061,10 @@ impl Win {
         canvas: &mut Canvas,
         frame: &crate::core::Frame,
         tags: &[Tag],
-        signs: &mut [DoorSign],
+        signs: &[DoorSign],
         stage: lively::Stage,
         now: SystemTime,
     ) -> Option<Area> {
-        let repos = &self.core.watch.stats.repos;
-        for sign in signs.iter_mut() {
-            let turns = sign.repo.as_ref().and_then(|r| repos.get(r)).copied();
-            if crate::fun::stats::tier(turns.unwrap_or(0)) >= 2 {
-                sign.plate = lively::GOLD_PLATE;
-                sign.ink = 0x0020_2020;
-            }
-        }
         let clock = frame.clock;
         let overtime: Vec<AgentId> = frame
             .scene
@@ -1192,20 +1182,6 @@ impl Win {
                     rooms::sea_window(canvas, room, door, frame.clock.hour, stage.ms);
                 }
                 RoomStyle::Rooftop => {}
-            }
-        }
-    }
-
-    /// A repository's stars and fortune tree by its bench plate.
-    fn paint_honours(&self, canvas: &mut Canvas, signs: &[DoorSign], stage: lively::Stage) {
-        let repos = &self.core.watch.stats.repos;
-        for sign in signs {
-            let Some(turns) = sign.repo.as_ref().and_then(|r| repos.get(r)) else {
-                continue;
-            };
-            let tier = crate::fun::stats::tier(*turns);
-            if tier > 0 {
-                lively::bench_honours(canvas, stage, sign, tier);
             }
         }
     }
@@ -1738,17 +1714,15 @@ fn paint_world_text(
 /// than the art font: the zones' door signs, in Chinese, and the benches'
 /// repository plates, whose names may be.
 fn set_readable(role: TextRole) -> bool {
-    matches!(role, TextRole::DoorSign | TextRole::BenchPlate)
+    matches!(role, TextRole::DoorSign)
 }
 
-/// A door sign or a bench's plate as the window sets it, on its colour,
+/// A door sign as the window sets it, on its colour,
 /// centred where pixtuoid hangs it.
 pub(crate) struct DoorSign {
     /// Its plate, in window pixels.
     area: Area,
     text: String,
-    /// A bench plate's repository, as pixtuoid names it; `None` on a door.
-    repo: Option<String>,
     /// What its zone is for, shown when it is clicked.
     about: &'static str,
     plate: u32,
@@ -1792,10 +1766,6 @@ fn zone_about(text: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
-
-/// What a bench is for, its plate naming the repo.
-const DESK_ABOUT: &str =
-    "这张长桌坐这个仓库的会话，干活的坐在工位上。红圈加红「?」的是卡住了，去看看。";
 
 /// How long a sign's explanation stays up unless clicked away.
 const ABOUT_FOR: Duration = Duration::from_secs(10);
@@ -1876,10 +1846,7 @@ fn door_signs(
         .filter(|r| set_readable(r.role))
         .filter_map(|r| {
             let text: String = r.spans.iter().map(|s| s.text().to_owned()).collect();
-            let zh = match r.role {
-                TextRole::DoorSign => door_sign_zh(&text)?.to_owned(),
-                _ => truncate_cells(&text, PLATE_CELLS),
-            };
+            let zh = door_sign_zh(&text)?.to_owned();
             let cx = i64::from(u32::from(r.at.x) * d) * i64::from(u);
             let cy = (i64::from(u32::from(r.at.y) * d) + cell / 2) * i64::from(u);
             let w = Faces::cells(&zh) * faces.cell_w(px) + 2 * pad;
@@ -1891,12 +1858,8 @@ fn door_signs(
                     w,
                     h,
                 },
-                about: match r.role {
-                    TextRole::DoorSign => zone_about(&text)?,
-                    _ => DESK_ABOUT,
-                },
+                about: zone_about(&text)?,
                 text: zh,
-                repo: (r.role == TextRole::BenchPlate).then_some(text),
                 plate: r.plate.map_or(PANEL_BG, to_u32),
                 ink: r.spans.first().map_or(TEXT, |s| to_u32(s.ink)),
             })
@@ -1918,8 +1881,6 @@ fn paint_door_signs(canvas: &mut Canvas, faces: &mut Faces, signs: &[DoorSign], 
 
 /// Points a door sign is set in.
 const SIGN_PT: f64 = 9.0;
-/// Cells a bench's plate may take.
-const PLATE_CELLS: u16 = 16;
 
 /// Red for a stuck agent, the panel's stuck colour.
 const STUCK_RED: u32 = 0x00f7_768e;

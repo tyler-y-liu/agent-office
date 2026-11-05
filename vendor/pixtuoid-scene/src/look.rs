@@ -574,7 +574,6 @@ pub fn render(
             classic.signs = crate::display::TextRun::signs(
                 &board,
                 &stepped.layout,
-                &stepped.frame.agents,
                 world.floor,
                 theme,
             );
