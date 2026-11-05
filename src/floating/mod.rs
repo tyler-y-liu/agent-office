@@ -955,7 +955,13 @@ impl Win {
 /// What [`Win::render_office`] leaves for the window to set over the office:
 /// the badges, the signs, who is chatting, the south rooms, and the wall
 /// board's lines on the art grid.
-type Drawn = (Vec<Tag>, Vec<DoorSign>, Vec<AgentId>, Vec<rooms::Room>, Vec<Area>);
+type Drawn = (
+    Vec<Tag>,
+    Vec<DoorSign>,
+    Vec<AgentId>,
+    Vec<rooms::Room>,
+    Vec<Area>,
+);
 
 /// What the office is drawn with beyond the scene itself.
 struct OfficeExtras {
