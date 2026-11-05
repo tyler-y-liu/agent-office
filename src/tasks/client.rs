@@ -23,7 +23,8 @@ const SYSTEM: &str = "你给 AI 编程助手正在做的任务起一句话标题
 
 const OUTCOME_SYSTEM: &str = "你用一句话告诉开发者 AI 编程助手这一轮的结果。\
 根据它的任务和它最后的回复，用简体中文写一句短句，不超过20个汉字：\
-做完了就说做成了什么；没做成就说卡在哪；在等开发者回答或拿主意就以「问：」开头说问的是什么。\
+做完了就说做成了什么；没做成就说卡在哪；回复里明确向开发者提了问题、要他回答或拿主意才能继续，就以「问：」开头说问的是什么。\
+它在等自己的后台任务、子代理、CI 或部署，或只是顺带提议、留了待办，都不算问，照实说进展。\
 不加句号、引号或别的前缀，只输出这一句。";
 
 /// What a finished turn's outcome is read from.
@@ -116,7 +117,8 @@ impl Summarizer {
     }
 
     pub async fn summarize_outcome(&self, input: &OutcomeInput) -> Result<String> {
-        self.ask(OUTCOME_SYSTEM, outcome_message(input)).await
+        let line = self.ask(OUTCOME_SYSTEM, outcome_message(input)).await?;
+        Ok(unasked(line, &input.reply))
     }
 
     async fn ask(&self, system: &str, user: String) -> Result<String> {
@@ -190,6 +192,16 @@ fn outcome_message(input: &OutcomeInput) -> String {
     m
 }
 
+/// `line` without its 「问：」 when `reply` asks nothing: a 「问：」 lines the
+/// session up as waiting on you and banners it, and the model also reads one
+/// into a turn that ended waiting on its own background work.
+fn unasked(line: String, reply: &str) -> String {
+    match line.strip_prefix("问：") {
+        Some(rest) if !reply.contains(['？', '?']) => rest.trim().to_owned(),
+        _ => line,
+    }
+}
+
 /// The model's line as a label: one line, no quotes or closing stop, capped.
 fn clean(raw: &str) -> Option<String> {
     let line = one_line(raw.lines().find(|l| !l.trim().is_empty())?);
@@ -236,6 +248,24 @@ mod tests {
         assert!(m.contains("任务: 修登录页"));
         assert!(m.ends_with("结论：登录页已修好\n"));
         assert!(m.chars().count() < 1700);
+    }
+
+    /// A turn that ended waiting on its own subagent asks you nothing: it must
+    /// not be bannered as waiting on your reply. One that does ask keeps it.
+    #[test]
+    fn a_question_needs_one_in_the_reply() {
+        assert_eq!(
+            unasked(
+                "问：能否提供最新界面截图".into(),
+                "我在等代码梳理的结果。截图还是首个版本时拍的。"
+            ),
+            "能否提供最新界面截图"
+        );
+        assert_eq!(
+            unasked("问：要合并吗".into(), "测试都过了，要合并到 main 吗？"),
+            "问：要合并吗"
+        );
+        assert_eq!(unasked("登录页已修好".into(), "修好了"), "登录页已修好");
     }
 
     #[test]
