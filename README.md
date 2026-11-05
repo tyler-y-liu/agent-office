@@ -12,7 +12,7 @@ With several agent sessions running at once, it's hard to keep track of which on
 
 - **One-line summaries**: reads each session's latest prompt, todos and recent actions, and summarizes them in one short line through an OpenAI-compatible API you configure. When a turn ends it summarizes the result too: what got done, where it got stuck, or what it is asking you.
 - **Seats by state**: working sessions sit at their desks, finished ones go to the pantry, sessions waiting for approval or asking you a question queue in the waiting area, and stuck ones stay at their desk with a red "?". The side panel groups them as waiting → stuck → done, unread → working → idle.
-- **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes during long calls such as builds or subagents), marks a session as possibly stuck.
+- **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command or subagent is running), marks a session as possibly stuck.
 - **Notifications**: when the window is in the background and a session starts waiting for you, you get a system notification. The Dock badge always shows how many are waiting.
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
 - **Several agents**: Claude Code, Codex, Cursor (`cursor-agent`) and DeepSeek Harness (dsh).
@@ -43,7 +43,7 @@ AGENT_OFFICE_MODEL=your-model
 
 Requests go to `<base>/v1/chat/completions`; the base works with or without a trailing `/v1`. Pick a fast model without long reasoning.
 
-If something looks wrong, run `agent-office doctor`. It checks the session directories, hooks, socket and summary endpoint.
+If something looks wrong, run `agent-office doctor`. It checks the session directories, the hooks for each agent, the socket and the stuck thresholds, and makes one test call to the summary endpoint.
 
 It also works without hooks, from session transcripts alone, but then it can't tell when a session is waiting for your approval.
 
@@ -55,7 +55,7 @@ It also works without hooks, from session transcripts alone, but then it can't t
 | Cursor (`cursor-agent`) | `agent-office connect cursor` | Adds hooks to `hooks.json` in the Cursor config directory (default `~/.cursor`; backs it up first). Cursor's own transcripts have no tool calls, so the hook keeps a task log in `~/.config/agent-office/cursor/transcripts/` |
 | DeepSeek Harness (dsh) | `agent-office connect dsh` | Writes a plugin to `$DSH_HOME` (default `~/.dsh`) and adds it to `cordis.patch.yml`. The plugin keeps a task log in `$DSH_HOME/agent-office/transcripts/` |
 
-Task logs hold only your prompts, the agent's replies, todos, and the path or command of each tool call. They contain no file contents or tool output.
+Task logs hold only your prompts, the agent's replies, todos, and the path or command of each tool call. They contain no file contents or tool output. A log untouched for 30 days is deleted.
 
 Setup applies to sessions started afterwards. `agent-office disconnect [codex|cursor|dsh]` removes it and keeps the logs. Hooks point at wherever the binary was when you ran `connect`, so run `connect` again after moving or reinstalling it.
 
@@ -71,9 +71,9 @@ A row of four-person desks runs under the north windows, with a corridor in the 
 | Meeting rooms | A session whose subagent has run for 15 seconds goes there with it |
 | Waiting area | Waiting for approval for over 20 seconds, or finished and asking you a question. Approval waits go first; the first in line takes the visitor chair in your office |
 | Pantry | Finished, waiting for you to look |
-| Rooftop | You've looked at it, or it has been idle for 15 minutes |
+| Rooftop | You've opened it since it finished, or it finished over 15 minutes ago |
 
-When the desks fill up, a new floor opens; switch with `[` and `]`.
+The rooftop appears only when the office is at least 200 columns wide. When the desks fill up, a new floor opens; switch with `[` and `]`.
 
 ### Keys
 
@@ -81,22 +81,23 @@ When the desks fill up, a new floor opens; switch with `[` and `]`.
 |---|---|
 | `↑` `↓` (or `k` `j`) | Select |
 | `Enter` | Expand: full prompt + last 5 actions |
+| `Esc` | Collapse, then deselect |
 | `o` / double-click | Open the session |
-| `w` | List sessions waiting for you |
-| `n` | Handle the next one (the one in the visitor chair) |
+| `n` / click "你的办公室" (your office) sign | Open the next one (the one in the visitor chair) |
+| `w` / click the panel title | Open the Claude desktop app's list of sessions waiting for input |
 | `r` | Summarize again |
 | `b` | Toggle the labels over heads |
-| `[` `]` | Change floor |
+| `[` `]` (or `PageUp` `PageDown`) | Change floor |
 | `t` | Toggle always-on-top |
-| `q` | Quit |
+| `q` twice | Quit |
 
-Click a card or worker to select it; scroll the panel with the mouse wheel. Clicking the Dock icon brings the window back and selects the first session waiting for you.
+Click a card or worker to select it; scroll the panel with the mouse wheel. After a notification, coming back to the window selects the first session waiting for you, so `o` goes straight to it.
 
 `agent-office --shot out.png` runs for 20 seconds, saves the frame as a PNG and exits.
 
 ## Configuration
 
-All settings are environment variables. The three summary variables are also read from `~/.config/agent-office/env` (one `KEY=value` per line) when they aren't set.
+All settings are environment variables. The three summary variables and `AGENT_OFFICE_WEATHER` are also read from `~/.config/agent-office/env` (one `KEY=value` per line) when they aren't set.
 
 | Variable | Effect |
 |---|---|
@@ -105,10 +106,10 @@ All settings are environment variables. The three summary variables are also rea
 | `AGENT_OFFICE_NOTIFY=off` | No system notifications or Dock bounce; the badge still shows |
 | `AGENT_OFFICE_SOUND=on` | Sound effects (off by default): a ding when a session starts waiting for approval, a pop with confetti |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | Stuck thresholds: failures in a row (default 3), quiet minutes while working (default 5), quiet minutes during long calls (default 20). `doctor` shows the current values |
-| `AGENT_OFFICE_THEME` | Theme: `harbour` (default), `paper`, or one of pixtuoid's built-in themes |
+| `AGENT_OFFICE_THEME` | Theme: `harbour` (default) or `paper`, plus pixtuoid's `normal`, `cyberpunk`, `dracula`, `tokyo-night`, `catppuccin` and `gruvbox` |
 | `AGENT_OFFICE_UTC_OFFSET` | Time zone for the sky, lunch, overtime and holidays, in seconds (default `28800`, Hong Kong) |
 | `AGENT_OFFICE_WEATHER=hko` | Weather and typhoon signals from the Hong Kong Observatory's open data (one request every 10 minutes; sends nothing of yours) |
-| `AGENT_OFFICE_SOCKET` | Hook socket path (default under the temp directory, in `agent-office-$USER/`) |
+| `AGENT_OFFICE_SOCKET` | Hook socket path (default `/tmp/agent-office-<uid>/agent-office.sock`) |
 | `AGENT_OFFICE_DEBUG=<file>` | Append every summary result to this file |
 
 ## Privacy
@@ -122,7 +123,6 @@ Daily stats are stored locally in `~/.config/agent-office/stats.json`.
 - Only used on macOS.
 - Jumping: sessions in the Claude desktop app open directly. For sessions in a terminal, the terminal comes to the front; iTerm2 and Terminal.app also switch to the right tab (macOS asks once for permission to control the terminal). Other terminals can't be taken to a specific tab.
 - Sessions in tmux switch to their pane, but only on tmux's default socket (sessions started with `-L` / `-S` can't be found).
-- A Cursor session can be jumped to only after it has made one tool call.
 - Notifications go through `osascript`, so they appear as "Script Editor" in Notification Center and clicking one doesn't jump to the session; use the Dock icon or the window.
 - It can run alongside pixtuoid; each uses its own socket and hooks.
 
@@ -135,7 +135,7 @@ Daily stats are stored locally in `~/.config/agent-office/stats.json`.
 - **Celebrations**: tests going green, `git push`, opening a PR, or finally passing after failures throws confetti, and coworkers clap.
 - **Overtime**: after 30 minutes in one turn, or past 10 pm, a cup noodle and milk tea appear on the desk; at night only the overtime desks stay lit.
 - **Stuck**: sweat for repeated failures, "…" for silence, a rain cloud when it lasts too long; the shop cat goes to sit at the feet of the worst-off worker.
-- **Cantonese chatter**: meeting and pantry small talk is in Cantonese; on weekdays 12:30–13:30 idle workers head down to the cha chaan teng. Click an idle worker and it talks back.
+- **Cantonese chatter**: meeting and pantry small talk is in Cantonese; on weekdays 12:30–13:30 idle workers head down to the cha chaan teng. Click an idle worker and it stretches or talks back.
 - **Today's stats**: after 6 pm a neon board shows turns finished, stuck counts and tokens; click it for a 10-second replay of the day and an award ceremony.
 - **Holidays**: Lunar New Year, Mid-Autumn and Christmas decorations.
 - **Typhoons**: with `AGENT_OFFICE_WEATHER=hko`, signal No. 8 or above stops the ferry, closes the rooftop, and sends everyone packing.
@@ -148,7 +148,7 @@ Daily stats are stored locally in `~/.config/agent-office/stats.json`.
 cargo test --release
 ```
 
-`vendor/` holds modified copies of pixtuoid's `pixtuoid-core` / `pixtuoid-scene` 0.21.0 and of softbuffer, wired in through `[patch.crates-io]` in `Cargo.toml`. Every change is marked `agent-office`. Read a crate's `AGENTS.md` before changing it.
+`vendor/` holds modified copies of pixtuoid's `pixtuoid-core` / `pixtuoid-scene` 0.21.0 and of softbuffer, wired in through `[patch.crates-io]` in `Cargo.toml`. Every change is marked `agent-office`. Read the pixtuoid crate's `AGENTS.md` before changing it.
 
 The art scripts are in `tools/`: `people.py` draws the chibi workers and hairstyles, `hk_art.py` the cha chaan teng, plants and furniture colours. They read the upstream sprites from the cargo registry (if they aren't there, comment out `[patch.crates-io]` and run `cargo fetch` once), so they can be re-run. After changing art, run `SNAPSHOTS=overwrite cargo test --release` in `vendor/pixtuoid-scene` to update the pixel snapshots.
 

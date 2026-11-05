@@ -12,7 +12,7 @@
 
 - **一句话摘要**：读每个会话的最新指令、todo 和最近动作，用你配置的 OpenAI 兼容接口总结成不超过 20 字的一句话。一轮结束后再总结一句结果：做成了什么、卡在哪，或者它在问你什么。
 - **按状态排座位**：干活的坐工位，做完的去茶水间，等你批准或在问你问题的去等候区排队，卡住的留在工位、头顶红「?」。侧栏按「等你 → 卡住 → 做完待看 → 干活 → 闲着」分组。
-- **卡点检测**：连续失败 3 次，或者在干活却 5 分钟没新动静（构建、子 agent 这类长调用放宽到 20 分钟），标红为「可能卡住」。
+- **卡点检测**：连续失败 3 次，或者在干活却 5 分钟没新动静（在跑命令行或子 agent 时放宽到 20 分钟），标红为「可能卡住」。
 - **提醒**：窗口不在前面时，有会话开始等你，就弹一条系统通知；Dock 角标一直显示有几个在等你。
 - **一键跳回**：双击小人或卡片，在 Claude 桌面 app 里打开那个会话，或者把它所在的终端切到前台。
 - **多种 agent**：Claude Code、Codex、Cursor（`cursor-agent`）和 DeepSeek Harness（dsh）。
@@ -43,7 +43,7 @@ AGENT_OFFICE_MODEL=your-model
 
 请求发到 `<base>/v1/chat/completions`，base 末尾带不带 `/v1` 都行。挑一个回得快、不带长推理的模型。
 
-有问题先跑 `agent-office doctor`，它会检查会话目录、hooks、socket 和摘要接口。
+有问题先跑 `agent-office doctor`，它会检查会话目录、各 agent 的 hooks、socket 和卡点门槛，并试调一次摘要接口。
 
 不接 hooks 也能用，只靠会话记录，但看不到「等你确认」。
 
@@ -55,7 +55,7 @@ AGENT_OFFICE_MODEL=your-model
 | Cursor（`cursor-agent`） | `agent-office connect cursor` | 往 Cursor 配置目录（默认 `~/.cursor`）的 `hooks.json` 加 hooks（会先备份）。Cursor 的会话记录里没有工具调用，所以 hook 在 `~/.config/agent-office/cursor/transcripts/` 另记一份任务日志 |
 | DeepSeek Harness（dsh） | `agent-office connect dsh` | 往 `$DSH_HOME`（默认 `~/.dsh`）写插件并挂进 `cordis.patch.yml`。插件在 `$DSH_HOME/agent-office/transcripts/` 记任务日志 |
 
-任务日志只记你的指令、它的回复、todo 和每次工具调用的路径或命令，不含文件内容和工具输出。
+任务日志只记你的指令、它的回复、todo 和每次工具调用的路径或命令，不含文件内容和工具输出。30 天没更新的日志会自动删除。
 
 接入后新开的会话才生效。`agent-office disconnect [codex|cursor|dsh]` 卸掉对应的接入，日志保留。hooks 指向 `connect` 时程序所在的位置，移动或重装到别处后要重新 `connect`。
 
@@ -71,9 +71,9 @@ AGENT_OFFICE_MODEL=your-model
 | 会议室 | 子 agent 跑满 15 秒后，和父会话一起去开会 |
 | 等候区 | 等你批准超过 20 秒，或做完了在问你问题。等批准的排前面，第一个坐你办公室的访客椅 |
 | 茶水间 | 做完了，等你去看 |
-| 天台 | 你看过了，或者闲了 15 分钟 |
+| 天台 | 做完后你打开看过，或者做完超过 15 分钟 |
 
-工位坐满时会开新楼层，用 `[` `]` 切换。
+办公室宽 200 列以上才有天台。工位坐满时会开新楼层，用 `[` `]` 切换。
 
 ### 按键
 
@@ -81,22 +81,23 @@ AGENT_OFFICE_MODEL=your-model
 |---|---|
 | `↑` `↓`（或 `k` `j`） | 选中 |
 | `Enter` | 展开：完整指令 + 最近 5 个动作 |
+| `Esc` | 收起，再按取消选中 |
 | `o` / 双击 | 打开会话 |
-| `w` | 列出等你的会话 |
-| `n` | 处理下一个（打开坐访客椅的那个） |
+| `n` / 点「你的办公室」门牌 | 处理下一个（打开坐访客椅的那个） |
+| `w` / 点任务栏标题 | 在 Claude 桌面 app 里打开「等你输入」的会话列表 |
 | `r` | 重新总结 |
 | `b` | 开关头顶标签 |
-| `[` `]` | 换楼层 |
+| `[` `]`（或 `PageUp` `PageDown`） | 换楼层 |
 | `t` | 切换置顶 |
-| `q` | 退出 |
+| `q` 按两次 | 退出 |
 
-鼠标点卡片或小人选中，滚轮在任务栏上滚动。点 Dock 图标回到窗口时，会自动选中排在最前面的那个等你的会话。
+鼠标点卡片或小人选中，滚轮在任务栏上滚动。弹过通知后回到窗口，会自动选中排在最前面的那个等你的会话，按 `o` 就过去。
 
 `agent-office --shot out.png` 跑 20 秒后把画面存成 PNG 并退出。
 
 ## 配置
 
-都是环境变量。摘要接口的三个变量没设时，也会从 `~/.config/agent-office/env`（每行一个 `KEY=value`）读。
+都是环境变量。摘要接口的三个变量和 `AGENT_OFFICE_WEATHER` 没设时，也会从 `~/.config/agent-office/env`（每行一个 `KEY=value`）读。
 
 | 变量 | 作用 |
 |---|---|
@@ -105,10 +106,10 @@ AGENT_OFFICE_MODEL=your-model
 | `AGENT_OFFICE_NOTIFY=off` | 不弹系统通知、Dock 图标不跳；角标照常显示 |
 | `AGENT_OFFICE_SOUND=on` | 打开音效（默认关）：有人开始等你批准时「叮」一声，撒彩纸时「啵」一声 |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | 「可能卡住」的门槛：连续失败次数（默认 3），干活时几分钟没动静（默认 5），长调用时几分钟（默认 20）。`doctor` 显示当前值 |
-| `AGENT_OFFICE_THEME` | 主题：默认 `harbour`，另有 `paper` 和 pixtuoid 自带的几套 |
+| `AGENT_OFFICE_THEME` | 主题：默认 `harbour`，另有 `paper`，以及 pixtuoid 自带的 `normal`、`cyberpunk`、`dracula`、`tokyo-night`、`catppuccin`、`gruvbox` |
 | `AGENT_OFFICE_UTC_OFFSET` | 天色、午饭、加班和节日用的时区，单位秒（默认 `28800`，香港） |
 | `AGENT_OFFICE_WEATHER=hko` | 窗外天气和风球跟香港天文台公开数据走（每 10 分钟请求一次，不发你的任何内容） |
-| `AGENT_OFFICE_SOCKET` | hook socket 路径（默认在临时目录下的 `agent-office-$USER/`） |
+| `AGENT_OFFICE_SOCKET` | hook socket 路径（默认 `/tmp/agent-office-<uid>/agent-office.sock`） |
 | `AGENT_OFFICE_DEBUG=<file>` | 把每次摘要结果追加写到这个文件 |
 
 ## 隐私
@@ -122,7 +123,6 @@ AGENT_OFFICE_MODEL=your-model
 - 只在 macOS 上用过。
 - 跳转：Claude 桌面 app 里的会话直接打开；终端里的会话把终端切到前台，iTerm2 和 Terminal.app 还会切到对应标签页（第一次 macOS 会问是否允许控制该终端）。其他终端到不了具体标签页。
 - tmux 里的会话会切到它的窗格，但只认默认 socket（`-L` / `-S` 起的找不到）。
-- Cursor 会话要等它调用过一次工具才能跳。
 - 系统通知走 `osascript`，通知中心里显示为「脚本编辑器」，点通知不会跳到会话；点 Dock 图标或窗口回去。
 - 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
 
@@ -135,7 +135,7 @@ AGENT_OFFICE_MODEL=your-model
 - **庆祝**：测试跑绿、`git push`、开 PR、连续失败后终于过了，头上撒彩纸，同事鼓掌。
 - **加班**：一轮跑满 30 分钟或晚上 10 点后还在干活，桌上多一碗杯面和一杯奶茶；夜里只剩加班的工位亮着。
 - **卡住**：连续失败时冒汗，没动静时冒「…」，卡太久头顶一朵乌云；店猫会过去蹲在最惨那个的脚边。
-- **粤语闲聊**：开会和茶水间的对话是粤语；工作日 12:30–13:30 闲着的都下去茶餐厅。单击闲着的小人，它会回你一句。
+- **粤语闲聊**：开会和茶水间的对话是粤语；工作日 12:30–13:30 闲着的都下去茶餐厅。单击闲着的小人，它会伸个懒腰或回你一句。
 - **今日战绩**：晚上 6 点后墙上霓虹板显示完成轮数、卡住次数和 token，点它看 10 秒的当日回放和颁奖。
 - **节日**：农历新年挂挥春，中秋挂灯笼，圣诞挂彩灯。
 - **风球**：设 `AGENT_OFFICE_WEATHER=hko` 后，挂 8 号或以上风球时天星停航、天台关闭、所有人收拾公事包。
@@ -148,7 +148,7 @@ AGENT_OFFICE_MODEL=your-model
 cargo test --release
 ```
 
-`vendor/` 里是改过的 pixtuoid `pixtuoid-core` / `pixtuoid-scene` 0.21.0 和 softbuffer，通过 `Cargo.toml` 的 `[patch.crates-io]` 接入，改过的地方都标了 `agent-office`。改 vendor 前先读该 crate 的 `AGENTS.md`。
+`vendor/` 里是改过的 pixtuoid `pixtuoid-core` / `pixtuoid-scene` 0.21.0 和 softbuffer，通过 `Cargo.toml` 的 `[patch.crates-io]` 接入，改过的地方都标了 `agent-office`。改 pixtuoid 的两个 crate 前先读它的 `AGENTS.md`。
 
 美术脚本在 `tools/`：`people.py` 画 Q 版小人和发型，`hk_art.py` 画茶餐厅、植物和家具配色。它们读 cargo registry 里的上游原版 sprite（registry 里没有的话，临时注释掉 `[patch.crates-io]` 跑一次 `cargo fetch`），所以可以重复运行。改完美术后，在 `vendor/pixtuoid-scene` 里运行 `SNAPSHOTS=overwrite cargo test --release` 更新像素金样。
 
