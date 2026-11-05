@@ -4,6 +4,7 @@
 mod codex;
 mod core;
 mod cursor;
+mod desktop;
 mod doctor;
 mod dsh;
 mod floating;

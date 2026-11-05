@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 
 use crate::fun::{self, Clock, hko::Outlook, stats::Watch};
 use crate::panel::{self, PanelState};
-use crate::{jump, notify, pipeline, tasks};
+use crate::{desktop, jump, notify, pipeline, tasks};
 
 /// An office that has floors to move between.
 pub trait Floors {
@@ -63,6 +63,8 @@ pub struct Core {
     /// The day's tally, the repositories' records and the boss's comings.
     pub watch: Watch,
     outlook_rx: tokio::sync::watch::Receiver<Outlook>,
+    /// What the desktop app says you looked at.
+    desktop_rx: tokio::sync::watch::Receiver<desktop::Focus>,
     notifier: notify::Notifier,
     banners: bool,
 }
@@ -254,6 +256,7 @@ impl Core {
             force_tx,
             watch: Watch::load(),
             outlook_rx,
+            desktop_rx: desktop::spawn(),
             notifier: notify::Notifier::default(),
             banners: notify::banners_on(),
         }
@@ -326,6 +329,16 @@ impl Core {
     /// Run on its own clock, not per frame, since a covered window draws
     /// none and that is when word matters most.
     pub fn watch_waits(&mut self, focused: bool) {
+        // Here, not per frame: it runs on the main thread, as AppKit's
+        // front-app check needs, and while the window is covered too.
+        let live = self.pipe.scene_rx.borrow().clone();
+        desktop::mark_read(
+            &mut self.ui.seen,
+            &self.desktop_rx.borrow(),
+            |id| live.agents.contains_key(id),
+            desktop::app_in_front(),
+            SystemTime::now(),
+        );
         let views = self.views_rx.borrow().clone();
         let tick = self.notifier.tick(
             &self.scene(),

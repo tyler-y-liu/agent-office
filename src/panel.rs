@@ -30,8 +30,9 @@ const CHIP_INK: Color = Color::Rgb(0x16, 0x18, 0x1d);
 pub struct PanelState {
     pub selected: Option<AgentId>,
     pub expanded: bool,
-    /// When you last opened each session from here: what it had done by
-    /// then is read.
+    /// When you last opened each session from here, or looked at it in the
+    /// desktop app ([`crate::desktop::mark_read`]): what it had done by then
+    /// is read.
     pub seen: HashMap<AgentId, SystemTime>,
     /// The first row of cards shown: the wheel moves it, and a new
     /// selection moves it as far as it takes to show that card.
@@ -269,7 +270,8 @@ fn rgb(c: Rgb) -> Color {
     Color::Rgb(c.r, c.g, c.b)
 }
 
-fn status(slot: &AgentSlot, view: Option<&TaskView>) -> (String, Color) {
+/// `read` says it was opened since it went idle ([`read_since_idle`]).
+fn status(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> (String, Color) {
     if slot.exiting_at.is_some() {
         return ("离开中".into(), DIM);
     }
@@ -298,6 +300,11 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>) -> (String, Color) {
             format!("? {REPLY_WAIT} {}", ago(slot.state_started_at)),
             WAIT,
         ),
+        // Read, it is up on the rooftop however short its idle stretch: the
+        // card says why, or "空闲 7m" up there reads as a bug.
+        ActivityState::Idle if read => {
+            (format!("✓ 已看 · 空闲 {}", ago(slot.state_started_at)), DIM)
+        }
         ActivityState::Idle => (format!("· 空闲 {}", ago(slot.state_started_at)), DIM),
     }
 }
@@ -400,6 +407,7 @@ fn card(
     view: Option<&TaskView>,
     ink: Option<Rgb>,
     expanded: bool,
+    read: bool,
     w: u16,
 ) -> Vec<Line<'static>> {
     let nest = "  ".repeat(usize::from(depth.saturating_sub(1)));
@@ -416,7 +424,7 @@ fn card(
     let pad = pad.as_str();
     let body_w = w.saturating_sub(pad.len() as u16);
     let marker = ink.map_or(DIM, rgb);
-    let (st, st_color) = status(slot, view);
+    let (st, st_color) = status(slot, view, read);
     let name = match view.and_then(|v| v.agent_type.as_deref()) {
         Some(t) if depth > 0 && !slot.label.contains(t) => format!("{t} {}", &*slot.label),
         _ => slot.label.to_string(),
@@ -609,6 +617,7 @@ pub fn render(
                 views.get(id),
                 pixtuoid_scene::badge::repo_hue(slot, &hues).or_else(|| inks.get(id).copied()),
                 sel && state.expanded,
+                read_since_idle(slot, &state.seen),
                 inner.width,
             );
             // A header over each group's first card, a blank line before
@@ -738,10 +747,10 @@ mod tests {
         let slot = scene.agents.get_mut(&a).unwrap();
         slot.state = ActivityState::Running { item: None };
         assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_some());
-        assert_eq!(status(slot, Some(&view)).1, STUCK);
+        assert_eq!(status(slot, Some(&view), false).1, STUCK);
         slot.state = ActivityState::RequiresAction { reason: None };
         assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
-        assert_eq!(status(slot, Some(&view)).1, WAIT);
+        assert_eq!(status(slot, Some(&view), false).1, WAIT);
         slot.state = ActivityState::Idle;
         assert!(crate::tasks::stuck_at_work(slot, Some(&view)).is_none());
     }
@@ -992,7 +1001,7 @@ mod tests {
         fresh.agents.get_mut(&prompt).unwrap().state_started_at = now - Duration::from_secs(5);
         assert_eq!(next_waiting(&fresh, &views, now, &none), Some(asked));
         assert!(
-            status(&scene.agents[&asked], views.get(&asked))
+            status(&scene.agents[&asked], views.get(&asked), false)
                 .0
                 .contains("等你回复")
         );
@@ -1029,7 +1038,7 @@ mod tests {
         let slot = scene.agents.get_mut(&a).unwrap();
         slot.state = ActivityState::RequiresAction { reason: None };
         let ink = Rgb { r: 1, g: 2, b: 3 };
-        let lines = card(slot, 0, None, Some(ink), false, 40);
+        let lines = card(slot, 0, None, Some(ink), false, false, 40);
         let first = &lines[0].spans;
         let avatar = first
             .iter()
@@ -1064,6 +1073,10 @@ mod tests {
         assert_eq!(group(&HashMap::new()), Group::Done);
         let opened = HashMap::from([(a, now - Duration::from_secs(10))]);
         assert_eq!(group(&opened), Group::Idle, "read");
+        // Read a minute after it finished, it is up on the rooftop: the card
+        // must say it was read, or a 1-minute idle up there reads as a bug.
+        assert!(status(&slot, None, false).0.starts_with("· 空闲 "));
+        assert!(status(&slot, None, true).0.starts_with("✓ 已看 · 空闲 "));
         let while_working = HashMap::from([(a, now - Duration::from_secs(120))]);
         assert_eq!(
             group(&while_working),
@@ -1094,14 +1107,17 @@ mod tests {
                 kind: pixtuoid_core::state::ToolKind::Edit,
             }),
         };
-        assert_eq!(status(slot, Some(&view)).0, "▸ 写码 12m");
+        assert_eq!(status(slot, Some(&view), false).0, "▸ 写码 12m");
         slot.state = ActivityState::Running { item: None };
-        assert_eq!(status(slot, Some(&view)).0, "… 思考中 12m");
+        assert_eq!(status(slot, Some(&view), false).0, "… 思考中 12m");
         slot.state = ActivityState::RequiresAction { reason: None };
-        assert_eq!(status(slot, Some(&view)).0, "! 等你确认");
+        assert_eq!(status(slot, Some(&view), false).0, "! 等你确认");
         // No start known: the card says nothing rather than guess.
         slot.state = ActivityState::Running { item: None };
-        assert_eq!(status(slot, Some(&TaskView::default())).0, "… 思考中");
+        assert_eq!(
+            status(slot, Some(&TaskView::default()), false).0,
+            "… 思考中"
+        );
     }
 
     /// A finished card says what the turn came to, so you can tell which to
