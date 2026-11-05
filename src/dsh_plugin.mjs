@@ -3,7 +3,7 @@
 // No @deepseek-ai imports: everything arrives through `ctx`, so this single
 // file mounts from any absolute path.
 //
-// Two outputs, both best-effort:
+// Three outputs, all best-effort:
 // - The hook socket, through `agent-office hook --source dsh`: the payloads
 //   pixtuoid-core's dsh decoder reads (ids, cwd, tool names, approvals), which
 //   move the figures. Never prompts or tool arguments.
@@ -13,11 +13,15 @@
 //   each tool's target fields (path, command, pattern, url, todos), never file
 //   contents or tool output; the office sends it to the summary API only when
 //   one is configured.
+// - A file per host under VIEWING: the ids of the sessions a dsh client shows
+//   now, so the office can tell a reply you watched land from one unread.
+//   Per host, since the app and a CLI can share one DSH_HOME.
 const HOOK_EXE = __HOOK_EXE__
 const TRANSCRIPTS = __TRANSCRIPTS__
+const VIEWING = __VIEWING__
 
 import { spawn } from "node:child_process"
-import { appendFileSync, mkdirSync } from "node:fs"
+import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 export const name = "agent-office"
@@ -237,6 +241,66 @@ export function apply(ctx) {
         default:
       }
     } catch {}
+  })
+
+  // A dsh client follows (`session/follow`) the one session in its main
+  // view, and only that one: switching opens the new stream and closes the
+  // old. No event says so, so the controller's follow is wrapped to count
+  // the open streams per session. Not a listener: it yields what follow
+  // yields, untouched, and the counting never throws into it. A dsh without
+  // the controller, or with follow shaped otherwise, is left as it was.
+  ctx.inject(["sessionController"], (ctx) => {
+    const history = ctx.sessionController?.history
+    const follow = history?.follow
+    if (typeof follow !== "function") return
+    const open = new Map()
+    // Streams it wrapped can outlive it (a reload swaps the plugin under open
+    // streams); their ends must not rewrite the file the new one keeps.
+    let disposed = false
+    // Named by pid, which the office also checks is still running: a crash
+    // skips the cleanup below and must not leave a session viewed for good.
+    const file = join(VIEWING, `${process.pid}.json`)
+    const write = () => {
+      if (disposed) return
+      try {
+        mkdirSync(VIEWING, { recursive: true, mode: 0o700 })
+        const tmp = file + ".tmp"
+        writeFileSync(tmp, JSON.stringify({ pid: process.pid, sessions: [...open.keys()] }), { mode: 0o600 })
+        renameSync(tmp, file)
+      } catch {}
+    }
+    const track = (id, delta) => {
+      const n = (open.get(id) ?? 0) + delta
+      if (n > 0) open.set(id, n)
+      else open.delete(id)
+      write()
+    }
+    const wrapped = async function* (request, signal) {
+      let id
+      try {
+        const address = request?.address
+        const raw = address?.childSessionId ?? address?.sessionId
+        if (raw != null) {
+          id = String(raw)
+          track(id, 1)
+        }
+      } catch {}
+      try {
+        yield* follow.call(this, request, signal)
+      } finally {
+        if (id !== undefined) track(id, -1)
+      }
+    }
+    history.follow = wrapped
+    write()
+    ctx.effect(() => () => {
+      disposed = true
+      // Another plugin may have wrapped ours since: theirs stays.
+      if (history.follow === wrapped) history.follow = follow
+      try {
+        rmSync(file, { force: true })
+      } catch {}
+    })
   })
 
   // The plugin's fiber may unwind before the agent registry's, so

@@ -31,6 +31,12 @@ pub fn transcripts_dir() -> Option<PathBuf> {
     our_dir().map(|d| d.join("transcripts"))
 }
 
+/// Where the plugin keeps, a file per dsh host, the ids of the sessions a
+/// dsh client shows now.
+pub fn viewing_dir() -> Option<PathBuf> {
+    our_dir().map(|d| d.join("viewing"))
+}
+
 fn plugin_path(dir: &Path) -> PathBuf {
     dir.join("agent-office-dsh.mjs")
 }
@@ -39,12 +45,13 @@ fn patch_path(home: &Path) -> PathBuf {
     home.join("cordis.patch.yml")
 }
 
-fn plugin_source(exe: &Path, transcripts: &Path) -> Result<String> {
+fn plugin_source(exe: &Path, transcripts: &Path, viewing: &Path) -> Result<String> {
     // JSON string literals are valid JS string literals.
     let js = |p: &Path| serde_json::to_string(&p.display().to_string());
     Ok(TEMPLATE
         .replace("__HOOK_EXE__", &js(exe)?)
-        .replace("__TRANSCRIPTS__", &js(transcripts)?))
+        .replace("__TRANSCRIPTS__", &js(transcripts)?)
+        .replace("__VIEWING__", &js(viewing)?))
 }
 
 /// The patch file's top-level sequence items, each with the comment lines
@@ -157,11 +164,12 @@ pub fn connect() -> Result<()> {
     let home = home().context("找不到 dsh 目录（DSH_HOME 或 ~/.dsh）")?;
     let dir = our_dir().context("找不到 dsh 目录")?;
     let transcripts = transcripts_dir().context("找不到 dsh 目录")?;
+    let viewing = viewing_dir().context("找不到 dsh 目录")?;
     std::fs::create_dir_all(&transcripts)
         .with_context(|| format!("建 {} 失败", transcripts.display()))?;
     let exe = std::env::current_exe()?.canonicalize()?;
     let plugin = plugin_path(&dir);
-    std::fs::write(&plugin, plugin_source(&exe, &transcripts)?)
+    std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing)?)
         .with_context(|| format!("写 {} 失败", plugin.display()))?;
     let before = read_patch(&home)?;
     write_atomic(&patch_path(&home), &with_ours(&before, &plugin)?)?;
@@ -191,16 +199,23 @@ pub fn disconnect() -> Result<()> {
 /// Whether the patch mounts our plugin and the plugin file is there.
 /// Whether our plugin is mounted and forwards the turn's start: one written
 /// by an older build lacks it, and its figures leave their desks between calls.
+/// Nor does such a one say which session you are looking at, so a reply you
+/// watched land in the app would wait in the pantry to be read.
 pub fn installed() -> bool {
     let (Some(home), Some(dir)) = (home(), our_dir()) else {
         return false;
     };
-    std::fs::read_to_string(plugin_path(&dir)).is_ok_and(|t| forwards_turn_start(&t))
+    std::fs::read_to_string(plugin_path(&dir))
+        .is_ok_and(|t| forwards_turn_start(&t) && says_what_you_view(&t))
         && read_patch(&home).is_ok_and(|t| items(&t).iter().any(|i| is_ours(i)))
 }
 
 fn forwards_turn_start(plugin: &str) -> bool {
     plugin.contains("\"turn_start\"")
+}
+
+fn says_what_you_view(plugin: &str) -> bool {
+    plugin.contains("const VIEWING = ")
 }
 
 #[cfg(test)]
@@ -213,6 +228,11 @@ mod tests {
     fn a_plugin_without_the_turn_start_is_not_connected() {
         assert!(forwards_turn_start(TEMPLATE));
         assert!(!forwards_turn_start(&TEMPLATE.replace("\"turn_start\"", "\"x\"")));
+        // Nor one from before it said which session you view.
+        assert!(says_what_you_view(TEMPLATE));
+        assert!(!says_what_you_view(
+            &TEMPLATE.replace("const VIEWING = ", "const X = ")
+        ));
     }
 
     /// pixtuoid's row, the user's own rows and their comments must survive a
@@ -268,9 +288,16 @@ mod tests {
     /// Paths with quotes or backslashes must not break out of the JS string.
     #[test]
     fn the_plugin_embeds_paths_as_string_literals() {
-        let src = plugin_source(Path::new("/a \"b\"/agent-office"), Path::new("/t")).unwrap();
+        let src = plugin_source(
+            Path::new("/a \"b\"/agent-office"),
+            Path::new("/t"),
+            Path::new("/v"),
+        )
+        .unwrap();
         assert!(src.contains(r#"const HOOK_EXE = "/a \"b\"/agent-office""#));
         assert!(src.contains(r#"const TRANSCRIPTS = "/t""#));
+        assert!(src.contains(r#"const VIEWING = "/v""#));
         assert!(!src.contains("__HOOK_EXE__") && !src.contains("__TRANSCRIPTS__"));
+        assert!(!src.contains("__VIEWING__"));
     }
 }

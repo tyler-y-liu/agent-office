@@ -1,8 +1,13 @@
-//! What the Claude desktop app says you looked at. It keeps a metadata file
-//! per session it hosts, `lastFocusedAt` in it the last time you switched to
-//! that session: a result read there is as read as one opened from the office.
-//! The format is the app's own, not a published one, so a file that does not
-//! read as expected says nothing and the office keeps to its own opens.
+//! What the desktop apps say you looked at: a result read there is as read as
+//! one opened from the office.
+//!
+//! The Claude app keeps a metadata file per session it hosts, `lastFocusedAt`
+//! in it the last time you switched to that session. The format is the app's
+//! own, not a published one, so a file that does not read as expected says
+//! nothing and the office keeps to its own opens.
+//!
+//! DeepSeek Harness says nothing of the kind; agent-office's dsh plugin
+//! writes which sessions its clients show now ([`crate::dsh::viewing_dir`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,27 +19,51 @@ use tokio::sync::watch;
 /// How often the files are looked at: a switch in the app shows within this.
 const EVERY: Duration = Duration::from_secs(2);
 
-/// The desktop app's bundle identifier.
+/// The apps' bundle identifiers.
 #[cfg(target_os = "macos")]
-const APP_ID: &str = "com.anthropic.claudefordesktop";
+const CLAUDE_ID: &str = "com.anthropic.claudefordesktop";
+#[cfg(target_os = "macos")]
+const DSH_ID: &str = "com.deepseek.dsh";
 
-/// When you last switched to each session the app hosts.
+/// When you last switched to each session the Claude app hosts.
 pub type Focus = HashMap<AgentId, SystemTime>;
 
-/// Watch the app's session files; empty where there are none.
-pub fn spawn() -> watch::Receiver<Focus> {
-    let (tx, rx) = watch::channel(Focus::new());
-    let Some(root) = sessions_dir() else {
+/// What the apps say you look at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Looks {
+    pub claude: Focus,
+    /// The dsh sessions a DeepSeek Harness client shows now.
+    pub dsh: Vec<AgentId>,
+}
+
+/// The app in front, of the ones that say what you look at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Front {
+    Claude,
+    Dsh,
+    Other,
+}
+
+/// Watch what the apps write; empty where they write nothing.
+pub fn spawn() -> watch::Receiver<Looks> {
+    let (tx, rx) = watch::channel(Looks::default());
+    // Only read while DeepSeek Harness is in front, which needs macOS to tell.
+    let viewing = crate::dsh::viewing_dir().filter(|_| cfg!(target_os = "macos"));
+    let root = sessions_dir();
+    if root.is_none() && viewing.is_none() {
         return rx;
-    };
+    }
     // Plain file reads, kept off the runtime's workers.
     std::thread::spawn(move || {
         let mut reader = Reader::default();
         loop {
-            let focus = reader.read(&root);
+            let looks = Looks {
+                claude: root.as_deref().map(|r| reader.read(r)).unwrap_or_default(),
+                dsh: viewing.as_deref().map(read_viewing).unwrap_or_default(),
+            };
             tx.send_if_modified(|old| {
-                let changed = *old != focus;
-                *old = focus;
+                let changed = *old != looks;
+                *old = looks;
                 changed
             });
             if tx.is_closed() {
@@ -54,24 +83,34 @@ fn sessions_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Library/Application Support/Claude/claude-code-sessions"))
 }
 
-/// Mark `seen` with what the app says you looked at, for the sessions `live`
-/// holds. A switch stamps a session only when you switch to it, so one you
-/// stay on and watch finish would read unread: while the app is in front,
-/// the session switched to last is the one on screen, read as of `now`.
+/// Mark `seen` with what the apps say you looked at, for the sessions `live`
+/// holds. A switch stamps a Claude session only when you switch to it, so one
+/// you stay on and watch finish would read unread: while the app is in
+/// front, the session switched to last is the one on screen, read as of
+/// `now`. A dsh client shows its sessions whether or not you are looking, so
+/// they are read only while DeepSeek Harness is in front.
 pub fn mark_read(
     seen: &mut HashMap<AgentId, SystemTime>,
-    focus: &Focus,
+    looks: &Looks,
     live: impl Fn(&AgentId) -> bool,
-    app_in_front: bool,
+    front: Front,
     now: SystemTime,
 ) {
-    for (&id, &at) in focus.iter().filter(|(id, _)| live(id)) {
+    for (&id, &at) in looks.claude.iter().filter(|(id, _)| live(id)) {
         note_latest(seen, id, at);
     }
-    if app_in_front
-        && let Some((&id, _)) = focus.iter().max_by_key(|(_, at)| **at)
-        && live(&id)
-    {
+    let on_screen: Vec<AgentId> = match front {
+        Front::Claude => looks
+            .claude
+            .iter()
+            .max_by_key(|(_, at)| **at)
+            .map(|(&id, _)| id)
+            .into_iter()
+            .collect(),
+        Front::Dsh => looks.dsh.clone(),
+        Front::Other => Vec::new(),
+    };
+    for id in on_screen.into_iter().filter(|id| live(id)) {
         note_latest(seen, id, now);
     }
 }
@@ -81,22 +120,65 @@ fn note_latest(map: &mut HashMap<AgentId, SystemTime>, id: AgentId, at: SystemTi
     *e = (*e).max(at);
 }
 
-/// Whether the desktop app is the front app. AppKit's, so on the main thread.
+/// Which app is in front. AppKit's, so on the main thread.
 #[cfg(target_os = "macos")]
-pub fn app_in_front() -> bool {
+pub fn front() -> Front {
     use objc2_app_kit::NSWorkspace;
     // SAFETY: property reads on the shared workspace, on the main thread.
-    unsafe {
+    let id = unsafe {
         NSWorkspace::sharedWorkspace()
             .frontmostApplication()
             .and_then(|app| app.bundleIdentifier())
-            .is_some_and(|id| id.to_string() == APP_ID)
+            .map(|id| id.to_string())
+    };
+    match id.as_deref() {
+        Some(CLAUDE_ID) => Front::Claude,
+        Some(DSH_ID) => Front::Dsh,
+        _ => Front::Other,
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn app_in_front() -> bool {
-    false
+pub fn front() -> Front {
+    Front::Other
+}
+
+/// The dsh sessions the plugin's files say a client shows, every host's,
+/// keyed as the office keys dsh sessions. A file left by a host that has
+/// since gone (a crash skips the plugin's cleanup) says nothing: those
+/// streams are shut.
+fn read_viewing(dir: &Path) -> Vec<AgentId> {
+    let alive = |pid| pixtuoid_core::source::pid_start_marker(pid).is_some();
+    let mut ids: Vec<AgentId> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|t| viewing(&t, alive))
+        .flatten()
+        .collect();
+    // Sorted, so the same views read the same and wake no one.
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn viewing(text: &str, alive: impl Fn(i32) -> bool) -> Option<Vec<AgentId>> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let pid = i32::try_from(v.get("pid")?.as_i64()?).ok()?;
+    if !alive(pid) {
+        return None;
+    }
+    Some(
+        v.get("sessions")?
+            .as_array()?
+            .iter()
+            .filter_map(|s| s.as_str().filter(|s| !s.is_empty()))
+            .map(|s| AgentId::from_parts(crate::dsh::SOURCE, s))
+            .collect(),
+    )
 }
 
 /// The session a metadata file is for, keyed as the office keys Claude Code
@@ -213,7 +295,7 @@ mod tests {
         let focus = Focus::from([(cc("a"), at(100)), (cc("b"), at(50)), (cc("gone"), at(10))]);
         let mut seen = HashMap::from([(cc("b"), at(80))]);
         let live = |id: &AgentId| *id != cc("gone");
-        mark_read(&mut seen, &focus, live, false, at(200));
+        mark_read(&mut seen, &claude(focus), live, Front::Other, at(200));
         assert_eq!(seen[&cc("a")], at(100));
         assert_eq!(
             seen[&cc("b")],
@@ -228,14 +310,76 @@ mod tests {
     /// out of view, are not.
     #[test]
     fn the_session_on_screen_reads_as_read_while_the_app_is_in_front() {
-        let focus = Focus::from([(cc("on"), at(100)), (cc("off"), at(50))]);
+        let looks = claude(Focus::from([(cc("on"), at(100)), (cc("off"), at(50))]));
         let mut seen = HashMap::new();
-        mark_read(&mut seen, &focus, |_| true, true, at(200));
+        mark_read(&mut seen, &looks, |_| true, Front::Claude, at(200));
         assert_eq!(seen[&cc("on")], at(200));
         assert_eq!(seen[&cc("off")], at(50));
-        let mut away = HashMap::new();
-        mark_read(&mut away, &focus, |_| true, false, at(200));
-        assert_eq!(away[&cc("on")], at(100), "the app behind: only the switch");
+        for front in [Front::Other, Front::Dsh] {
+            let mut away = HashMap::new();
+            mark_read(&mut away, &looks, |_| true, front, at(200));
+            assert_eq!(away[&cc("on")], at(100), "the app behind: only the switch");
+        }
+    }
+
+    fn claude(focus: Focus) -> Looks {
+        Looks {
+            claude: focus,
+            dsh: Vec::new(),
+        }
+    }
+
+    fn dsh(id: &str) -> AgentId {
+        AgentId::from_parts(crate::dsh::SOURCE, id)
+    }
+
+    /// A dsh client keeps its session on screen with the app behind another,
+    /// so only with DeepSeek Harness in front is what it shows read: a reply
+    /// that lands while you are in another app still waits for you.
+    #[test]
+    fn a_dsh_session_on_screen_reads_as_read_only_with_the_app_in_front() {
+        let looks = Looks {
+            claude: Focus::new(),
+            dsh: vec![dsh("on"), dsh("gone")],
+        };
+        let live = |id: &AgentId| *id != dsh("gone");
+        let mut seen = HashMap::new();
+        mark_read(&mut seen, &looks, live, Front::Dsh, at(200));
+        assert_eq!(seen, HashMap::from([(dsh("on"), at(200))]));
+        for front in [Front::Other, Front::Claude] {
+            let mut away = HashMap::new();
+            mark_read(&mut away, &looks, live, front, at(200));
+            assert!(away.is_empty(), "DeepSeek Harness behind: {front:?}");
+        }
+    }
+
+    /// The plugin's file names sessions by dsh's own id, the one the office's
+    /// dsh figures go by. One left by a host that is gone says nothing, or a
+    /// crash would leave its last session read for good.
+    #[test]
+    fn the_viewing_file_counts_only_while_its_host_runs() {
+        let text = r#"{"pid":42,"sessions":["session-a","",7]}"#;
+        assert_eq!(viewing(text, |p| p == 42), Some(vec![dsh("session-a")]));
+        assert_eq!(viewing(text, |_| false), None, "its host is gone");
+        assert_eq!(viewing(r#"{"sessions":["session-a"]}"#, |_| true), None);
+        assert_eq!(viewing(r#"{"pid":42,"sess"#, |_| true), None);
+    }
+
+    /// The app and a CLI can share one DSH_HOME, each host with its own
+    /// file: one's views must not hide the other's.
+    #[test]
+    fn every_hosts_views_count() {
+        let dir = std::env::temp_dir().join(format!("ao-viewing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = std::process::id();
+        let host = |pid: u32, ids: &str| format!(r#"{{"pid":{pid},"sessions":[{ids}]}}"#);
+        std::fs::write(dir.join("a.json"), host(me, r#""s1","s2""#)).unwrap();
+        std::fs::write(dir.join("b.json"), host(me, r#""s2","s3""#)).unwrap();
+        std::fs::write(dir.join("b.json.tmp"), host(me, r#""half""#)).unwrap();
+        let mut want = vec![dsh("s1"), dsh("s2"), dsh("s3")];
+        want.sort_unstable();
+        assert_eq!(read_viewing(&dir), want);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A session's switch shows once its file is rewritten; a file caught

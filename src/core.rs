@@ -64,7 +64,7 @@ pub struct Core {
     pub watch: Watch,
     outlook_rx: tokio::sync::watch::Receiver<Outlook>,
     /// What the desktop app says you looked at.
-    desktop_rx: tokio::sync::watch::Receiver<desktop::Focus>,
+    desktop_rx: tokio::sync::watch::Receiver<desktop::Looks>,
     notifier: notify::Notifier,
     banners: bool,
 }
@@ -336,7 +336,7 @@ impl Core {
             &mut self.ui.seen,
             &self.desktop_rx.borrow(),
             |id| live.agents.contains_key(id),
-            desktop::app_in_front(),
+            desktop::front(),
             SystemTime::now(),
         );
         let views = self.views_rx.borrow().clone();
