@@ -74,6 +74,23 @@ pub fn run() -> Result<()> {
         None => println!("[✓] socket    {} 空闲", socket.display()),
     }
 
+    let (limits, bad) = crate::tasks::StuckLimits::from_env();
+    let minutes = |d: std::time::Duration| d.as_secs() / 60;
+    let line = format!(
+        "连续失败 {} 次，或 {} 分钟没动静（构建、子 agent 这类长调用 {} 分钟）算卡住",
+        limits.fails,
+        minutes(limits.quiet),
+        minutes(limits.quiet_long_call)
+    );
+    if bad.is_empty() {
+        println!("[✓] 卡点      {line}");
+    } else {
+        println!(
+            "[!] 卡点      {} 不是大于 0 的整数，用的默认值：{line}",
+            bad.join("、")
+        );
+    }
+
     match Summarizer::from_env() {
         None => println!(
             "[!] 摘要      关闭（没配 AGENT_OFFICE_API_BASE / _API_KEY / _MODEL，或 AGENT_OFFICE_SUMMARY=off）：显示原始指令"

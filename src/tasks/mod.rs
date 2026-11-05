@@ -70,11 +70,61 @@ impl Stuck {
     }
 }
 
-const FAILS_STUCK: u32 = 3;
-/// A working agent whose transcript is this quiet is likely stuck.
-const QUIET_STUCK: Duration = Duration::from_secs(5 * 60);
-/// The same while a call that may run long is out: a build, a subagent.
-const QUIET_STUCK_LONG_CALL: Duration = Duration::from_secs(20 * 60);
+/// When a working agent counts as stuck. A repository whose builds or tests
+/// keep quiet for longer than these would be flagged all day, so each can be
+/// raised from the environment ([`StuckLimits::from_env`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StuckLimits {
+    /// This many errors in a row.
+    pub fails: u32,
+    /// The transcript this quiet.
+    pub quiet: Duration,
+    /// The same while a call that may run long is out: a build, a subagent.
+    pub quiet_long_call: Duration,
+}
+
+impl StuckLimits {
+    pub const DEFAULT: Self = Self {
+        fails: 3,
+        quiet: Duration::from_secs(5 * 60),
+        quiet_long_call: Duration::from_secs(20 * 60),
+    };
+
+    /// The defaults, each overridden by `AGENT_OFFICE_STUCK_FAILS` (errors in
+    /// a row), `AGENT_OFFICE_STUCK_QUIET` and `AGENT_OFFICE_STUCK_QUIET_LONG`
+    /// (minutes) when set to a whole number above zero. The names of the
+    /// ones set but not taken are returned too, for `doctor` to point out.
+    pub fn from_env() -> (Self, Vec<&'static str>) {
+        Self::from_vars(|k| std::env::var(k).ok())
+    }
+
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> (Self, Vec<&'static str>) {
+        let mut bad = Vec::new();
+        let mut read = |k: &'static str| {
+            let v = var(k)?;
+            let n = v.trim().parse::<u32>().ok().filter(|n| *n > 0);
+            if n.is_none() {
+                bad.push(k);
+            }
+            n
+        };
+        let d = Self::DEFAULT;
+        let minutes = |m: u32| Duration::from_secs(u64::from(m) * 60);
+        let limits = Self {
+            fails: read("AGENT_OFFICE_STUCK_FAILS").unwrap_or(d.fails),
+            quiet: read("AGENT_OFFICE_STUCK_QUIET").map_or(d.quiet, minutes),
+            quiet_long_call: read("AGENT_OFFICE_STUCK_QUIET_LONG")
+                .map_or(d.quiet_long_call, minutes),
+        };
+        (limits, bad)
+    }
+}
+
+/// The limits this process runs with, read once.
+fn stuck_limits() -> &'static StuckLimits {
+    static LIMITS: std::sync::OnceLock<StuckLimits> = std::sync::OnceLock::new();
+    LIMITS.get_or_init(|| StuckLimits::from_env().0)
+}
 const LONG_CALLS: &[&str] = &[
     "Bash",
     "Task",
@@ -96,14 +146,14 @@ const LONG_CALLS: &[&str] = &[
     "shell",
 ];
 
-fn stuck(t: &Transcript, working: bool, quiet: Duration) -> Option<Stuck> {
-    if t.fail_streak >= FAILS_STUCK {
+fn stuck(t: &Transcript, working: bool, quiet: Duration, limits: &StuckLimits) -> Option<Stuck> {
+    if t.fail_streak >= limits.fails {
         return Some(Stuck::Failing(t.fail_streak));
     }
     let limit = if t.awaits_any(LONG_CALLS) {
-        QUIET_STUCK_LONG_CALL
+        limits.quiet_long_call
     } else {
-        QUIET_STUCK
+        limits.quiet
     };
     (working && quiet >= limit).then(|| Stuck::Quiet(quiet.as_secs() / 60))
 }
@@ -532,7 +582,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         recent_tools: t.recent_tools.iter().cloned().collect(),
         agent_type: e.sub.as_ref().and_then(|s| s.agent_type.clone()),
         phase: t.phase,
-        stuck: stuck(t, working, now.duration_since(e.grew_at)),
+        stuck: stuck(t, working, now.duration_since(e.grew_at), stuck_limits()),
         turn_started: t.turn_started,
         outcome: outcome.as_ref().map(|(o, _)| o.clone()),
         outcome_summarized: outcome.is_some_and(|(_, s)| s),
@@ -616,10 +666,10 @@ mod tests {
     fn a_quiet_agent_is_stuck_only_while_it_should_be_working() {
         let t = Transcript::default();
         let long = Duration::from_secs(6 * 60);
-        assert_eq!(stuck(&t, true, long), Some(Stuck::Quiet(6)));
+        assert_eq!(stuck(&t, true, long, &D), Some(Stuck::Quiet(6)));
         // Idle or waiting on the user: silence is expected.
-        assert_eq!(stuck(&t, false, long), None);
-        assert_eq!(stuck(&t, true, Duration::from_secs(60)), None);
+        assert_eq!(stuck(&t, false, long, &D), None);
+        assert_eq!(stuck(&t, true, Duration::from_secs(60), &D), None);
     }
 
     /// A build or a subagent can keep the transcript quiet for a long time
@@ -630,10 +680,65 @@ mod tests {
             outstanding: vec![("b".into(), "Bash".into())],
             ..Transcript::default()
         };
-        assert_eq!(stuck(&t, true, Duration::from_secs(6 * 60)), None);
+        assert_eq!(stuck(&t, true, Duration::from_secs(6 * 60), &D), None);
         assert_eq!(
-            stuck(&t, true, Duration::from_secs(21 * 60)),
+            stuck(&t, true, Duration::from_secs(21 * 60), &D),
             Some(Stuck::Quiet(21))
+        );
+    }
+
+    const D: StuckLimits = StuckLimits::DEFAULT;
+
+    /// A repository whose test suite runs half an hour must be able to say
+    /// so, or every run of it is flagged stuck.
+    #[test]
+    fn raised_limits_hold_off_the_stuck_flag() {
+        let vars = |k: &str| match k {
+            "AGENT_OFFICE_STUCK_QUIET" => Some("10".to_owned()),
+            "AGENT_OFFICE_STUCK_QUIET_LONG" => Some(" 45 ".to_owned()),
+            "AGENT_OFFICE_STUCK_FAILS" => Some("5".to_owned()),
+            _ => None,
+        };
+        let (limits, bad) = StuckLimits::from_vars(vars);
+        assert!(bad.is_empty());
+        let quiet = Transcript::default();
+        assert_eq!(
+            stuck(&quiet, true, Duration::from_secs(6 * 60), &limits),
+            None
+        );
+        let building = Transcript {
+            outstanding: vec![("b".into(), "Bash".into())],
+            ..Transcript::default()
+        };
+        assert_eq!(
+            stuck(&building, true, Duration::from_secs(30 * 60), &limits),
+            None
+        );
+        assert_eq!(
+            stuck(&building, true, Duration::from_secs(46 * 60), &limits),
+            Some(Stuck::Quiet(46))
+        );
+        let failing = Transcript {
+            fail_streak: 4,
+            ..Transcript::default()
+        };
+        assert_eq!(stuck(&failing, true, Duration::ZERO, &limits), None);
+    }
+
+    /// A typo must not silently turn the flag off (0) or leave the user
+    /// guessing: the default holds and the name is reported.
+    #[test]
+    fn a_limit_that_is_not_a_positive_number_keeps_the_default_and_is_reported() {
+        let vars = |k: &str| match k {
+            "AGENT_OFFICE_STUCK_QUIET" => Some("0".to_owned()),
+            "AGENT_OFFICE_STUCK_FAILS" => Some("three".to_owned()),
+            _ => None,
+        };
+        let (limits, bad) = StuckLimits::from_vars(vars);
+        assert_eq!(limits, D);
+        assert_eq!(
+            bad,
+            ["AGENT_OFFICE_STUCK_FAILS", "AGENT_OFFICE_STUCK_QUIET"]
         );
     }
 
@@ -643,7 +748,7 @@ mod tests {
             fail_streak: 3,
             ..Transcript::default()
         };
-        assert_eq!(stuck(&t, true, Duration::ZERO), Some(Stuck::Failing(3)));
+        assert_eq!(stuck(&t, true, Duration::ZERO, &D), Some(Stuck::Failing(3)));
     }
 
     fn entry() -> Entry {
