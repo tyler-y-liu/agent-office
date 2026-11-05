@@ -768,6 +768,7 @@ mod tests {
             name: String::new(),
             ink: 0,
             task: None,
+            full: true,
         };
         night_lights(&mut c, s, &[tag], &[id]);
         let at = |x: u32, y: u32| c.px[(y * c.w + x) as usize];

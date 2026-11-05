@@ -19,10 +19,17 @@ use crate::text::{one_line, truncate_cells};
 const DIM: Color = Color::Rgb(0x8a, 0x8f, 0x98);
 const TEXT: Color = Color::Rgb(0xe6, 0xe6, 0xe6);
 const TASK: Color = Color::Rgb(0xff, 0xe8, 0xa3);
-const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
+pub const WAIT: Color = Color::Rgb(0xff, 0x9e, 0x64);
 const WORK: Color = Color::Rgb(0x7d, 0xcf, 0xff);
 const STUCK: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);
+/// The panel's own background, which a faded card's colours sink toward.
+const PANEL_BG: Color = Color::Rgb(0x16, 0x18, 0x1d);
+/// A card waiting on you sits on a solid warm ground: it is the one to act on.
+const WAIT_BG: Color = Color::Rgb(0x4a, 0x30, 0x1e);
+const WAIT_SELECTED_BG: Color = Color::Rgb(0x5e, 0x3e, 0x28);
+/// How far an idle card's colours sink into the panel: it needs nothing.
+const IDLE_FADE: f32 = 0.55;
 /// Text on a coloured chip or avatar.
 const CHIP_INK: Color = Color::Rgb(0x16, 0x18, 0x1d);
 
@@ -392,6 +399,51 @@ fn wrap(text: &str, w: u16) -> Vec<String> {
 struct Card {
     id: AgentId,
     lines: Vec<Line<'static>>,
+    /// Its root's group, which sets how heavy the card looks.
+    group: Group,
+    /// Lines before the card's own: its group's header, a blank.
+    lead: usize,
+    /// The cell its avatar starts at on its first line.
+    avatar_x: u16,
+}
+
+/// Cells an avatar takes.
+pub const AVATAR_CELLS: u16 = 3;
+
+/// What a drawn panel holds beyond its cells, for the window to finish.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Drawn {
+    /// Which agent's card each drawn row belongs to, for a pointer to select by.
+    pub rows: Vec<(u16, AgentId)>,
+    /// Each drawn avatar: its row and first cell, whose head it shows, and
+    /// whether its card is faded.
+    pub avatars: Vec<(u16, u16, AgentId, bool)>,
+    /// The rows (first, last) of each card drawn in outline: done, waiting
+    /// for you to read it.
+    pub outlines: Vec<(u16, u16)>,
+}
+
+/// `c` sunk `t` of the way into the panel's background.
+fn fade(c: Color, t: f32) -> Color {
+    let (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) = (c, PANEL_BG) else {
+        return c;
+    };
+    let mix = |a: u8, z: u8| (f32::from(a) + (f32::from(z) - f32::from(a)) * t).round() as u8;
+    Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb))
+}
+
+/// `line` with every colour faded ([`fade`]).
+fn faded(line: Line<'static>) -> Line<'static> {
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|mut s| {
+            s.style.fg = Some(fade(s.style.fg.unwrap_or(TEXT), IDLE_FADE));
+            s.style.bg = s.style.bg.map(|b| fade(b, IDLE_FADE));
+            s
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
 }
 
 fn card(
@@ -534,8 +586,8 @@ fn card(
     lines
 }
 
-/// Draw the panel; which agent's card each drawn row belongs to, for a
-/// pointer to select by.
+/// Draw the panel: waiting cards on a warm ground, idle ones faded, and
+/// where the window draws the rest ([`Drawn`]).
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
@@ -543,7 +595,7 @@ pub fn render(
     views: &TaskViews,
     inks: &HashMap<AgentId, Rgb>,
     state: &mut PanelState,
-) -> Vec<(u16, AgentId)> {
+) -> Drawn {
     let now = SystemTime::now();
     let order = order(scene, views, now, &state.seen);
     let group_of = |s: &AgentSlot| {
@@ -594,8 +646,9 @@ pub fn render(
             )),
             inner.width,
         );
-        return Vec::new();
+        return Drawn::default();
     }
+    let mut root_group = Group::Working;
     let cards: Vec<Card> = order
         .iter()
         .filter_map(|(id, depth)| {
@@ -611,10 +664,26 @@ pub fn render(
                 sel && state.expanded,
                 inner.width,
             );
+            // A subagent's card goes with its root's.
+            if *depth == 0 {
+                root_group = group_of(slot);
+            }
+            let group = root_group;
+            if group == Group::Idle {
+                lines = lines.into_iter().map(faded).collect();
+            }
+            let avatar_x = if *depth == 0 {
+                0
+            } else {
+                crate::text::cells(&format!(
+                    "{}  └ ",
+                    "  ".repeat(usize::from(depth.saturating_sub(1)))
+                ))
+            };
+            let before = lines.len();
             // A header over each group's first card, a blank line before
             // every other root.
             if *depth == 0 {
-                let group = group_of(slot);
                 let first = order
                     .iter()
                     .take_while(|(o, _)| o != id)
@@ -642,7 +711,14 @@ pub fn render(
                     lines.insert(0, Line::raw(""));
                 }
             }
-            Some(Card { id: *id, lines })
+            let lead = lines.len() - before;
+            Some(Card {
+                id: *id,
+                lines,
+                group,
+                lead,
+                avatar_x,
+            })
         })
         .collect();
     let mut sel_range = None;
@@ -669,25 +745,46 @@ pub fn render(
     state.scroll = state.scroll.min(y.saturating_sub(h));
     let start = state.scroll;
     let mut row = 0usize;
-    let mut rows = Vec::new();
+    let mut drawn = Drawn::default();
     for c in &cards {
         let sel = state.selected == Some(c.id);
-        for line in &c.lines {
+        let mut shown: Option<(u16, u16)> = None;
+        for (i, line) in c.lines.iter().enumerate() {
             if row >= start && row - start < h {
                 let y = inner.y + (row - start) as u16;
-                rows.push((y, c.id));
-                if sel {
+                drawn.rows.push((y, c.id));
+                let own = i >= c.lead;
+                let bg = match (own && c.group == Group::Waiting, sel) {
+                    (true, true) => Some(WAIT_SELECTED_BG),
+                    (true, false) => Some(WAIT_BG),
+                    (false, true) => Some(SELECTED_BG),
+                    (false, false) => None,
+                };
+                if let Some(bg) = bg {
                     buf.set_style(
                         Rect::new(inner.x, y, inner.width, 1),
-                        Style::default().bg(SELECTED_BG),
+                        Style::default().bg(bg),
                     );
                 }
                 buf.set_line(inner.x, y, line, inner.width);
+                if i == c.lead {
+                    drawn
+                        .avatars
+                        .push((y, inner.x + c.avatar_x, c.id, c.group == Group::Idle));
+                }
+                if own {
+                    shown = Some(shown.map_or((y, y), |(top, _)| (top, y)));
+                }
             }
             row += 1;
         }
+        if c.group == Group::Done
+            && let Some(rows) = shown
+        {
+            drawn.outlines.push(rows);
+        }
     }
-    rows
+    drawn
 }
 
 #[cfg(test)]
@@ -823,6 +920,7 @@ mod tests {
             render(&mut buf, area, &scene, &views, &HashMap::new(), state)
         };
         let first_card = |rows: &[(u16, AgentId)]| rows.first().map(|(_, id)| *id);
+        let draw = |state: &mut PanelState| draw(state).rows;
         let top = draw(&mut state);
         let shown_first = first_card(&top);
         assert!(

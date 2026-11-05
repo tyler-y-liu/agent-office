@@ -1037,8 +1037,26 @@ fn push_desk(
             theme,
         ),
         props.scanline,
-        crate::lighting::screen_idle(facing, moment.look.darkness, frame.indoor_scale),
+        // agent-office: an empty desk's screen stays dark, as its lamp does.
+        if crate::lighting::seated_at(&frame.seated_agents, i.0) {
+            crate::lighting::screen_idle(facing, moment.look.darkness, frame.indoor_scale)
+        } else {
+            0.0
+        },
         theme,
+    )
+    // agent-office: the host's picture of its occupant's phase.
+    .with_show(
+        crate::sim::desk_occupant(&frame.agents, i)
+            .and_then(|a| crate::desk_show::desk_show(a.agent_id))
+            .map(|show| {
+                let ms = moment
+                    .timing
+                    .now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                (show, crate::desk_show::step_at(ms, d.x))
+            }),
     );
     let span = desk_span(pack, desk, d, scale).with_depth(depth);
     order.push((

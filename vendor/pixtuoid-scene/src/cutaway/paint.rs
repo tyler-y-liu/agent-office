@@ -66,7 +66,31 @@ impl Screen {
             Self::Standby(glass) => {
                 Some(art.recolored(&[(crate::pack::SCREEN_GLASS_KEY, Some(glass))]))
             }
-            Self::Lit { glow, scan } => Some(scanline(relight_screen(art, glow), art, glow, scan)),
+            // agent-office: a show takes the scanline's place on the glass.
+            Self::Lit {
+                glow,
+                scan,
+                show: Some((show, step)),
+            } => {
+                let lit = relight_screen(art, glow);
+                let bare = art.recolored(&[
+                    (crate::pack::SCREEN_GLASS_KEY, None),
+                    (crate::pack::SCREEN_TEXT_KEY, None),
+                ]);
+                let glass = |x, y| {
+                    lit.get(x, y).copied().flatten().is_some()
+                        && bare.get(x, y).copied().flatten().is_none()
+                };
+                Some(
+                    crate::desk_show::paint(&lit, &glass, show, step)
+                        .unwrap_or_else(|| scanline(lit.clone(), art, glow, scan)),
+                )
+            }
+            Self::Lit {
+                glow,
+                scan,
+                show: None,
+            } => Some(scanline(relight_screen(art, glow), art, glow, scan)),
         }
     }
 }
@@ -4190,9 +4214,13 @@ mod tests {
             let x0 = *glass.iter().min().expect("the art draws glass");
             let band = (glass.iter().max().expect("glass") - x0 + 1) / n;
             for scan in 0..n {
-                let lit = Screen::Lit { glow, scan }
-                    .on(desk.recolorable)
-                    .expect("a lit screen");
+                let lit = Screen::Lit {
+                    glow,
+                    scan,
+                    show: None,
+                }
+                .on(desk.recolorable)
+                .expect("a lit screen");
                 let lined: std::collections::BTreeSet<u16> = (0..lit.height())
                     .flat_map(|y| (0..lit.width()).map(move |x| (x, y)))
                     .filter(|&(x, y)| lit.get(x, y).copied().flatten() == Some(line))
@@ -5695,7 +5723,13 @@ mod tests {
         for s in [1, pack.max_density_variant().get()] {
             let scale = RenderScale::new(s).expect("nonzero");
             let pen = Pen::for_pack(scale, &pack);
-            let frame = empty_frame(&layout);
+            // agent-office: only a desk someone sits at lights its lamp.
+            let mut frame = empty_frame(&layout);
+            for i in 0..layout.home_desks.len() {
+                frame
+                    .seated_agents
+                    .insert(pixtuoid_core::state::FloorLocalDeskIndex(i), true);
+            }
             let list = list_at(
                 &frame,
                 Office {

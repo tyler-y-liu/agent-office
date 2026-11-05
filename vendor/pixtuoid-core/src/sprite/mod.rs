@@ -488,6 +488,11 @@ pub struct HeadMark {
 }
 
 impl HeadMark {
+    /// agent-office: the mark's row, for a host cropping a figure to its head.
+    pub fn y(&self) -> u16 {
+        self.y
+    }
+
     /// The head `mark` places, where it is a `head.<view>` mark.
     pub(crate) fn of(mark: &Mark) -> Option<Self> {
         let view = HeadView::from_name(mark.name().strip_prefix(HEAD_MARK)?)?;
@@ -496,13 +501,6 @@ impl HeadMark {
             x: mark.x,
             y: mark.y,
         })
-    }
-
-    /// agent-office: the mark's row, for what the office lays on a head
-    /// beyond a pack's hairstyles (an agent's accessory).
-    #[must_use]
-    pub fn y(&self) -> u16 {
-        self.y
     }
 }
 
