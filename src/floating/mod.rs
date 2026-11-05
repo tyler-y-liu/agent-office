@@ -319,6 +319,7 @@ impl ApplicationHandler for Floating<'_> {
                     Key::Character("[") => Action::PrevFloor,
                     Key::Character("o") => Action::Open,
                     Key::Character("w") => Action::OpenWaiting,
+                    Key::Character("n") => Action::OpenNext,
                     Key::Character("t") => {
                         win.on_top = !win.on_top;
                         win.window.set_window_level(if win.on_top {
@@ -635,6 +636,12 @@ impl Win {
             .filter(|_| x < last.panel_x)
             .find(|(r, _)| r.meets(&point))
         {
+            // Your office's sign opens whoever sits in its guest chair; with
+            // no one waiting it says what the room is for, like any sign.
+            if text == OFFICE_SIGN && self.core.next_waiting().is_some() {
+                self.core.act(Action::OpenNext, &mut self.office);
+                return;
+            }
             let again = shown.is_some_and(|(t, at)| &t == text && at.elapsed() < ABOUT_FOR);
             if !again {
                 self.about = Some((text.clone(), Instant::now()));
@@ -1053,11 +1060,14 @@ fn door_sign_zh(text: &str) -> Option<&'static str> {
         "MTG B" => "会议室 B",
         "PANTRY" => "茶水间",
         "WAIT" => "等候区",
-        "OFFICE" => "你的办公室",
+        "OFFICE" => OFFICE_SIGN,
         "ROOF" => "天台",
         _ => return None,
     })
 }
+
+/// Your office's door sign, which a click on opens the head of the line.
+const OFFICE_SIGN: &str = "你的办公室";
 
 /// What a zone pixtuoid signs in ASCII is for: who is in there, and what
 /// moves them on, so the office reads without the README.
@@ -1068,9 +1078,11 @@ fn zone_about(text: &str) -> Option<&'static str> {
             "刚做完、你还没看的会话在这儿等你看结果。双击打开看过，或者做完满 15 分钟，就上天台。"
         }
         "WAIT" => {
-            "等你批准或回复超过 20 秒的会话，按先后在这儿排队，排第一个的坐你办公室的访客椅。你处理完它就回工位。"
+            "等你批准超过 20 秒，或者做完了在问你问题的会话，在这儿排队：等你批准的排前面，同类按先后。排第一个的坐你办公室的访客椅。你处理完它就回工位。"
         }
-        "OFFICE" => "访客椅上坐的是等你最久的那个会话，先处理它。",
+        "OFFICE" => {
+            "访客椅上坐的是该先处理的会话：等你批准的优先，其次是在问你问题的，同类等得久的先。有人等你时，点这块门牌或按 n 直接打开它。"
+        }
         "ROOF" => {
             "闲着、不用你管的会话：做完超过 15 分钟，或者你已经打开看过。你给它发新消息它就回工位。"
         }

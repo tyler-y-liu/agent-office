@@ -236,6 +236,74 @@ mod tests {
         );
     }
 
+    /// A minute after its turn ends, Claude Code nudges the session with a
+    /// `Notification`. It must leave the session idle, done since its `Stop`:
+    /// read as a prompt it walked every finished session to your office and
+    /// out of the pantry. A real prompt still asks for you.
+    #[test]
+    fn the_idle_nudge_leaves_a_finished_session_done() {
+        use pixtuoid_core::source::decoder::decode_hook_payload;
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "5717f13f-3c42-4a73-bfa5-3cd14932f155";
+        let id = AgentId::from_parts(CC_SOURCE, sid);
+        let apply = |scene: &mut SceneState, r: &mut Reducer, extra: serde_json::Value, at| {
+            let mut v = json!({
+                "session_id": sid, "cwd": "/repo",
+                "transcript_path": format!("/h/.claude/projects/-repo/{sid}.jsonl"),
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            for ev in decode_hook_payload(v).expect("decodes") {
+                r.apply(scene, ev, at, Transport::Hook);
+            }
+        };
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        for (i, event) in ["SessionStart", "UserPromptSubmit", "Stop"]
+            .iter()
+            .enumerate()
+        {
+            let at = t0 + Duration::from_secs(i as u64);
+            apply(
+                &mut scene,
+                &mut r,
+                json!({"hook_event_name": event, "prompt": "fix it"}),
+                at,
+            );
+        }
+        let done_at = scene.agents[&id].state_started_at;
+        apply(
+            &mut scene,
+            &mut r,
+            json!({"hook_event_name": "Notification", "notification_type": "idle_prompt",
+                "message": "Claude is waiting for your input"}),
+            t0 + Duration::from_secs(62),
+        );
+        assert_eq!(scene.agents[&id].state, ActivityState::Idle);
+        assert_eq!(
+            scene.agents[&id].state_started_at, done_at,
+            "done since its Stop"
+        );
+
+        apply(
+            &mut scene,
+            &mut r,
+            json!({"hook_event_name": "Notification", "notification_type": "permission_prompt",
+                "message": "Claude needs your permission to use Bash"}),
+            t0 + Duration::from_secs(70),
+        );
+        assert!(matches!(
+            scene.agents[&id].state,
+            ActivityState::RequiresAction { .. }
+        ));
+    }
+
     use super::*;
 
     fn start(source: &str) -> AgentEvent {

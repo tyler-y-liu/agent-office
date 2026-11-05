@@ -38,7 +38,12 @@ pub enum Action {
     Open,
     /// Open the desktop app's list of sessions waiting on the user.
     OpenWaiting,
+    /// Open the session at the head of the waiting line.
+    OpenNext,
 }
+
+/// The footer's warning while Claude Code's hooks are out.
+const HOOKS_OUT: &str = "未接 hooks，看不到等你确认：agent-office connect";
 
 /// How long a note on what a key did stays in the footer.
 const NOTE_FOR: Duration = Duration::from_secs(5);
@@ -47,6 +52,9 @@ pub struct Core {
     pub ui: PanelState,
     pub head_labels: bool,
     pub summary_note: String,
+    /// Claude Code's hooks are in, as of the start: without them no prompt
+    /// is seen, and your office stays empty however many wait.
+    hooks: bool,
     /// What the last jump did, shown in place of `summary_note` a while.
     note: Option<(String, Instant)>,
     pub pipe: pipeline::Pipeline,
@@ -68,9 +76,12 @@ pub struct Frame {
 /// ([`panel::read_since_idle`]) has had its result read, so it idles as one
 /// past the pantry, out on the rooftop; its idle stretch is drawn as starting
 /// [`IDLE_ROOFTOP_MS`](pixtuoid_scene::pose::IDLE_ROOFTOP_MS) ago at least.
-/// The panel keeps the real start for its "空闲 Xm".
+/// The panel keeps the real start for its "空闲 Xm". A done session whose
+/// turn ended on a question to you waits on you as a prompt does, so it is
+/// drawn as one, lining up behind the prompts from when it asked.
 pub fn as_seen(
     scene: &Arc<SceneState>,
+    views: &tasks::TaskViews,
     seen: &HashMap<AgentId, SystemTime>,
     now: SystemTime,
 ) -> Arc<SceneState> {
@@ -80,7 +91,17 @@ pub fn as_seen(
         .filter(|s| panel::read_since_idle(s, seen))
         .map(|s| s.agent_id)
         .collect();
-    if read.is_empty() {
+    let asking: Vec<AgentId> = scene
+        .agents
+        .values()
+        .filter(|s| {
+            matches!(s.state, pixtuoid_core::ActivityState::Idle)
+                && panel::waits_on_you(s, views.get(&s.agent_id), panel::read_since_idle(s, seen))
+                    == Some(panel::Wait::Reply)
+        })
+        .map(|s| s.agent_id)
+        .collect();
+    if read.is_empty() && asking.is_empty() {
         return Arc::clone(scene);
     }
     let past_pantry = now
@@ -90,6 +111,13 @@ pub fn as_seen(
     for id in read {
         if let Some(s) = drawn.agents.get_mut(&id) {
             s.state_started_at = s.state_started_at.min(past_pantry);
+        }
+    }
+    for id in asking {
+        if let Some(s) = drawn.agents.get_mut(&id) {
+            s.state = pixtuoid_core::ActivityState::RequiresAction {
+                reason: Some(pixtuoid_scene::waiting::REPLY_REASON.into()),
+            };
         }
     }
     Arc::new(drawn)
@@ -113,6 +141,7 @@ impl Core {
             ui: PanelState::default(),
             head_labels: true,
             summary_note,
+            hooks: crate::hook::installed(),
             note: None,
             pipe,
             views_rx,
@@ -148,11 +177,17 @@ impl Core {
         };
         self.ui.seen.retain(|id, _| scene.agents.contains_key(id));
         Frame {
-            office: as_seen(&scene, &self.ui.seen, now),
+            office: as_seen(&scene, &views, &self.ui.seen, now),
             scene,
             views,
             labels,
         }
+    }
+
+    /// The session at the head of the waiting line, if any waits on you.
+    pub fn next_waiting(&self) -> Option<AgentId> {
+        let views = self.views_rx.borrow().clone();
+        panel::next_waiting(&self.scene(), &views, SystemTime::now(), &self.ui.seen)
     }
 
     /// Select `id` and show the floor it sits on.
@@ -204,6 +239,14 @@ impl Core {
                 let prev = floors.current_floor().saturating_sub(1);
                 floors.navigate(prev, SystemTime::now());
             }
+            Action::OpenNext => match self.next_waiting() {
+                Some(id) => {
+                    self.ui.selected = Some(id);
+                    self.follow(floors);
+                    return self.act(Action::Open, floors);
+                }
+                None => self.note_result(Err("现在没有会话等你".to_owned())),
+            },
             Action::Open => {
                 let scene = self.scene();
                 let done = match self.ui.selected {
@@ -234,11 +277,13 @@ impl Core {
         self.note = Some((text, Instant::now()));
     }
 
-    /// The footer's right-hand note: a fresh jump result, else the summary model.
-    fn status_note(&self) -> &str {
+    /// The footer's right-hand note: a fresh jump result, else the summary
+    /// model, after a warning while the hooks are out.
+    fn status_note(&self) -> String {
         match &self.note {
-            Some((text, at)) if at.elapsed() < NOTE_FOR => text,
-            _ => &self.summary_note,
+            Some((text, at)) if at.elapsed() < NOTE_FOR => text.clone(),
+            _ if !self.hooks => format!("{HOOKS_OUT} · {}", self.summary_note),
+            _ => self.summary_note.clone(),
         }
     }
 }
@@ -264,6 +309,7 @@ pub fn footer(
         ("Enter", "展开"),
         ("o", "打开会话"),
         ("w", "等你的"),
+        ("n", "处理下一个"),
         ("r", "重新总结"),
         ("b", labels),
         ("[ ]", "换楼层"),
@@ -332,9 +378,13 @@ mod tests {
             s.state_started_at = now - Duration::from_secs(60);
         }
         let scene = Arc::new(scene);
-        assert!(Arc::ptr_eq(&as_seen(&scene, &HashMap::new(), now), &scene));
+        let views = tasks::TaskViews::default();
+        assert!(Arc::ptr_eq(
+            &as_seen(&scene, &views, &HashMap::new(), now),
+            &scene
+        ));
         let seen = HashMap::from([(ids[0], now - Duration::from_secs(5))]);
-        let drawn = as_seen(&scene, &seen, now);
+        let drawn = as_seen(&scene, &views, &seen, now);
         let idle_for =
             |s: &SceneState, id| now.duration_since(s.agents[id].state_started_at).unwrap();
         assert!(
@@ -351,6 +401,34 @@ mod tests {
             idle_for(&scene, &ids[0]),
             Duration::from_secs(60),
             "the panel's scene untouched"
+        );
+
+        // A done session asking you a question lines up for your office as
+        // a reply, from when it asked: drawn idle it would sit in the pantry
+        // as though nothing needed you. Opened, its question was seen.
+        let asked = tasks::TaskView {
+            outcome: Some("问：要不要删旧接口".into()),
+            outcome_summarized: true,
+            ..tasks::TaskView::default()
+        };
+        let views: tasks::TaskViews = Arc::new([(ids[1], asked)].into_iter().collect());
+        let drawn = as_seen(&scene, &views, &seen, now);
+        assert_eq!(
+            drawn.agents[&ids[1]].state,
+            pixtuoid_core::ActivityState::RequiresAction {
+                reason: Some(pixtuoid_scene::waiting::REPLY_REASON.into())
+            }
+        );
+        assert_eq!(
+            idle_for(&drawn, &ids[1]),
+            Duration::from_secs(60),
+            "waits from when it asked"
+        );
+        let read = HashMap::from([(ids[1], now - Duration::from_secs(5))]);
+        let drawn = as_seen(&scene, &views, &read, now);
+        assert_eq!(
+            drawn.agents[&ids[1]].state,
+            pixtuoid_core::ActivityState::Idle
         );
     }
 }
