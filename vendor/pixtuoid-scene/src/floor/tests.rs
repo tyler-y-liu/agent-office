@@ -2731,3 +2731,60 @@ fn a_lifted_pet_rests_where_it_is_set_down() {
         "on the floor near the drop: {set_down:?} vs held {held:?}"
     );
 }
+
+/// A resize lays the floor out anew, every room somewhere else: an agent
+/// already sat in the pantry must sit in the new pantry, not stay at the old
+/// one's cells, which on the new floor can be any room — your office, say,
+/// while the panel still lists it under the pantry.
+#[test]
+fn a_resize_reseats_the_lounging_in_the_new_layout() {
+    let scene = make_scene(3, 8);
+    let mut session = FloorSession::new(Arc::new(crate::pack::test_office()));
+    let step = |session: &mut FloorSession, size: Size, ms: u64| {
+        session
+            .step(
+                crate::floor::FloorInputs {
+                    scene: &scene,
+                    now: t0() + Duration::from_millis(ms),
+                    floor: FloorMeta::ground(),
+                    pets: crate::floor::PetInputs::default(),
+                },
+                size,
+            )
+            .expect("a layoutable size steps")
+    };
+    let in_pantry = |session: &FloorSession, layout: &crate::layout::SceneLayout| {
+        let pantry = layout.pantry.expect("a pantry").bounds;
+        scene.agents.keys().all(|id| {
+            let w = &session.floor().ctx.walks[id].wander;
+            let crate::walk::WanderKind::Named { wp_idx, .. } = w.target.kind else {
+                return false;
+            };
+            let Some(p) = layout.waypoints.get(wp_idx).map(|w| w.pos) else {
+                return false;
+            };
+            matches!(w.phase, crate::walk::WanderPhase::AtWaypoint(_))
+                && p.x >= pantry.x
+                && p.x < pantry.x + pantry.width
+                && p.y >= pantry.y
+                && p.y < pantry.y + pantry.height
+        })
+    };
+    let wide = Size { w: 300, h: 180 };
+    let narrow = Size { w: 200, h: 180 };
+    let mut ms = 0;
+    let mut stepped = step(&mut session, wide, ms);
+    while ms < 60_000 {
+        ms += 100;
+        stepped = step(&mut session, wide, ms);
+    }
+    assert!(in_pantry(&session, &stepped.layout), "settled in the pantry");
+    while ms < 120_000 {
+        ms += 100;
+        stepped = step(&mut session, narrow, ms);
+    }
+    assert!(
+        in_pantry(&session, &stepped.layout),
+        "re-seated in the resized floor's pantry"
+    );
+}

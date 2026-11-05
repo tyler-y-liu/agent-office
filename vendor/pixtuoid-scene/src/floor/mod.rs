@@ -232,6 +232,15 @@ impl FloorCtx {
                 let l = Arc::new(crate::layout::SceneLayout::compute_with_seed(
                     buf_w, buf_h, None, floor_seed,
                 )?);
+                // agent-office: every room stands somewhere else now, so a
+                // walk's seats and points name the old floor's places: an
+                // agent left at them sits in whatever room is there now (your
+                // office, say) while the panel lists it in the pantry. Start
+                // each walk over on the new floor.
+                if self.layout_memo.is_some() {
+                    self.walks.clear();
+                    self.history = PoseHistory::new();
+                }
                 self.layout_memo = Some((key, Arc::clone(&l)));
                 // agent-office: a new layout drops the cached paths even when
                 // its corridor stands where the old one did (it runs across
