@@ -198,12 +198,32 @@ fn status(slot: &AgentSlot, view: Option<&TaskView>) -> (String, Color) {
     }
     match &slot.state {
         ActivityState::RequiresAction { .. } => ("! 等你确认".into(), WAIT),
-        ActivityState::Running { item: Some(_) } => match view.and_then(|v| v.phase) {
-            Some(p) => (format!("▸ {}", p.label()), WORK),
-            None => ("▸ 工作中".into(), WORK),
-        },
-        ActivityState::Running { item: None } => ("… 思考中".into(), WORK),
+        ActivityState::Running { item } => {
+            let what = match (item, view.and_then(|v| v.phase)) {
+                (Some(_), Some(p)) => format!("▸ {}", p.label()),
+                (Some(_), None) => "▸ 工作中".to_owned(),
+                (None, _) => "… 思考中".to_owned(),
+            };
+            let took = view
+                .and_then(|v| v.turn_started)
+                .and_then(|t| turn_took(t, SystemTime::now()));
+            match took {
+                Some(took) => (format!("{what} {took}"), WORK),
+                None => (what, WORK),
+            }
+        }
         ActivityState::Idle => (format!("· 空闲 {}", ago(slot.state_started_at)), DIM),
+    }
+}
+
+/// How long a turn that began at `started` has run, from a minute on: under
+/// that every turn is short, and a ticking count would only be noise.
+fn turn_took(started: SystemTime, now: SystemTime) -> Option<String> {
+    let s = now.duration_since(started).ok()?.as_secs();
+    match s {
+        0..60 => None,
+        60..3600 => Some(format!("{}m", s / 60)),
+        _ => Some(format!("{}h{:02}m", s / 3600, s % 3600 / 60)),
     }
 }
 
@@ -783,6 +803,50 @@ mod tests {
             Group::Done,
             "finished after it was opened"
         );
+    }
+
+    /// A working card says how long its turn has run, so a session that has
+    /// gone on far longer than its task should stands out without opening it.
+    /// One waiting on you says what to do instead: its clock is yours.
+    #[test]
+    fn a_working_card_says_how_long_its_turn_has_run() {
+        let now = SystemTime::now();
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, now);
+        let view = TaskView {
+            phase: Some(crate::tasks::Phase::Code),
+            turn_started: Some(now - Duration::from_secs(12 * 60 + 30)),
+            ..TaskView::default()
+        };
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Running {
+            item: Some(ToolUse {
+                tool_use_id: None,
+                detail: None,
+                kind: pixtuoid_core::state::ToolKind::Edit,
+            }),
+        };
+        assert_eq!(status(slot, Some(&view)).0, "▸ 写码 12m");
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(status(slot, Some(&view)).0, "… 思考中 12m");
+        slot.state = ActivityState::RequiresAction { reason: None };
+        assert_eq!(status(slot, Some(&view)).0, "! 等你确认");
+        // No start known: the card says nothing rather than guess.
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(status(slot, Some(&TaskView::default())).0, "… 思考中");
+    }
+
+    #[test]
+    fn a_turn_counts_from_a_minute_and_in_hours_past_one() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let after = |s| turn_took(t0, t0 + Duration::from_secs(s));
+        assert_eq!(after(59), None);
+        assert_eq!(after(60).as_deref(), Some("1m"));
+        assert_eq!(after(3599).as_deref(), Some("59m"));
+        assert_eq!(after(3600 + 5 * 60).as_deref(), Some("1h05m"));
+        // A clock that went backwards is no turn length at all.
+        assert_eq!(turn_took(t0 + Duration::from_secs(5), t0), None);
     }
 
     #[test]

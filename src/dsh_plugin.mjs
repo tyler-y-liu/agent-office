@@ -140,7 +140,13 @@ export function apply(ctx) {
               .filter((b) => b?.type === "text" && typeof b.text === "string")
               .map((b) => b.text)
               .join(" ")
-            if (text.trim()) log(sid, { type: "user", message: { content: text.slice(0, 4000) } })
+            if (text.trim())
+              log(sid, {
+                type: "user",
+                // When the turn began, for the card's turn clock.
+                timestamp: new Date().toISOString(),
+                message: { content: text.slice(0, 4000) },
+              })
           }
           break
         case "tool/call":

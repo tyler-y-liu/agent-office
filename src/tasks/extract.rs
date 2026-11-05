@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
@@ -34,6 +35,9 @@ pub struct Transcript {
     pub fail_streak: u32,
     /// Each call whose result is not in yet, as `(tool_use id, tool)`.
     pub outstanding: Vec<(String, String)>,
+    /// When the human last spoke, which is when the current turn began;
+    /// `None` when that line carried no timestamp.
+    pub turn_started: Option<SystemTime>,
 }
 
 /// More calls than this out at once is results lost to a mid-file first read.
@@ -213,6 +217,11 @@ impl Transcript {
         // The human spoke: whatever went wrong before, the agent starts over.
         if human_prompt(&text).is_some() {
             self.fail_streak = 0;
+            // Set even when the words repeat the last prompt: it is a new turn.
+            self.turn_started = v
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_timestamp);
         }
         self.push_prompt(&text);
     }
@@ -257,6 +266,68 @@ fn human_prompt(text: &str) -> Option<String> {
         return None;
     }
     Some(one_line(t))
+}
+
+/// An RFC 3339 time as transcripts write it (`2026-11-05T09:30:15.937Z`, or
+/// with a `+08:00` offset); `None` for anything else.
+fn parse_timestamp(s: &str) -> Option<SystemTime> {
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let part = s.get(r)?;
+        if !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let b = s.as_bytes();
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let mut i = 19;
+    let mut nanos = 0u32;
+    if b[i] == b'.' {
+        let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let frac = &s[i + 1..i + 1 + digits.min(9)];
+        nanos = frac.parse::<u32>().ok()? * 10u32.pow(9 - frac.len() as u32);
+        i += 1 + digits;
+    }
+    let offset = match s.get(i..)? {
+        "Z" | "z" => 0,
+        tz if tz.len() == 6 && tz.as_bytes()[3] == b':' => {
+            let sign = match tz.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            sign * (num(i + 1..i + 3)? * 3600 + num(i + 4..i + 6)? * 60)
+        }
+        _ => return None,
+    };
+    // Days since 1970-01-01 in the proleptic Gregorian calendar (Hinnant's
+    // days_from_civil).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3600 + mi * 60 + sec - offset;
+    let secs = u64::try_from(secs).ok()?;
+    Some(SystemTime::UNIX_EPOCH + Duration::new(secs, nanos))
 }
 
 fn active_todo(input: &Value) -> Option<String> {
@@ -589,6 +660,60 @@ mod tests {
         assert!(t.awaits_any(&["Bash"]));
         t.feed(&result("b", false, "Finished"));
         assert!(!t.awaits_any(&["Bash"]));
+    }
+
+    /// The card counts the turn from when the human last spoke, so it must
+    /// restart on every prompt, repeated words included, and never count from
+    /// a tool result or a harness injection.
+    #[test]
+    fn the_turn_starts_when_the_human_last_spoke() {
+        let at = |ts: &str, content: Value| {
+            json!({"type":"user","timestamp":ts,"message":{"content":content}}).to_string()
+        };
+        let secs = |t: Option<SystemTime>| {
+            t.map(|t| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())
+        };
+        let mut t = Transcript::default();
+        t.feed(&at("2026-11-05T09:30:15.937Z", json!("修复登录页")));
+        assert_eq!(secs(t.turn_started), Some(1_793_871_015));
+        t.feed(&at(
+            "2026-11-05T09:40:00Z",
+            json!([{"type":"tool_result","tool_use_id":"x","content":"ok"}]),
+        ));
+        t.feed(&at(
+            "2026-11-05T09:41:00Z",
+            json!("<system-reminder>x</system-reminder>"),
+        ));
+        assert_eq!(secs(t.turn_started), Some(1_793_871_015), "not a new turn");
+        t.feed(&at("2026-11-05T17:50:00+08:00", json!("修复登录页")));
+        assert_eq!(
+            secs(t.turn_started),
+            Some(1_793_872_200),
+            "same words, new turn"
+        );
+        // A prompt with no time: an old start would overstate the turn.
+        t.feed(&user(json!("再加个测试")));
+        assert_eq!(t.turn_started, None);
+    }
+
+    #[test]
+    fn timestamps_that_are_not_rfc_3339_are_refused() {
+        for bad in [
+            "",
+            "2026-11-05",
+            "2026-11-05 09:30:15Z",
+            "2026-13-05T09:30:15Z",
+            "2026-11-05T09:30:15",
+            "2026-11-05T09:30:15.Z",
+            "2026-11-05T09:30:15+0800",
+            "1969-12-31T23:59:59Z",
+        ] {
+            assert_eq!(parse_timestamp(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            parse_timestamp("2000-02-29T00:00:00.5Z"),
+            Some(SystemTime::UNIX_EPOCH + Duration::new(951_782_400, 500_000_000))
+        );
     }
 
     #[test]
