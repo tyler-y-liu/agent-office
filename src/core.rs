@@ -279,7 +279,8 @@ impl Core {
         let summary_note = match &summarizer {
             // The model's name is long and `doctor` already shows it.
             Some(_) => "摘要 ✓".to_owned(),
-            None => "摘要关闭".to_owned(),
+            // Not switched off: no AGENT_OFFICE_API_* to summarize with.
+            None => "摘要未配置".to_owned(),
         };
         let socket = crate::hook::socket_path();
         let (pipe, views_rx, force_tx, outlook_rx) = rt.block_on(async {
@@ -613,9 +614,8 @@ pub fn footer(
     // Each key on a keycap, its action beside it.
     let cap = key.bg(Color::Rgb(0x3b, 0x40, 0x4c));
     let mut spans = Vec::new();
-    for (k, what, _) in &fit_hints(hints, room) {
-        spans.push(Span::styled(format!(" {k} "), cap));
-        spans.push(Span::styled(format!(" {what}  "), dim));
+    for (k, what, _) in fit_hints(hints, room) {
+        spans.extend(hint_spans(k, what, cap, dim));
     }
     set_hints_and_status(buf, area, &Line::from(spans), &status);
 }
@@ -633,11 +633,27 @@ fn quits(armed: &mut Option<Instant>, now: Instant) -> bool {
     false
 }
 
+/// One hint as drawn: the key on a keycap, its action beside it. A hint
+/// with no key is a pointer gesture told in words: on a keycap it read as
+/// a key to press.
+fn hint_spans(k: &str, what: &str, cap: Style, dim: Style) -> Vec<Span<'static>> {
+    if k.is_empty() {
+        return vec![Span::styled(format!("{what}  "), dim)];
+    }
+    vec![
+        Span::styled(format!(" {k} "), cap),
+        Span::styled(format!(" {what}  "), dim),
+    ]
+}
+
 /// The key hints (key, what it does, rank) that fit `room` cells, in their
 /// order: the highest rank, the least needed, left out first, each whole.
 fn fit_hints<'a>(mut hints: Vec<(&'a str, &'a str, u8)>, room: u16) -> Vec<(&'a str, &'a str, u8)> {
-    let width = |(k, what, _): &(&str, &str, u8)| {
-        crate::text::cells(&format!(" {k} ")) + crate::text::cells(&format!(" {what}  "))
+    let width = |&(k, what, _): &(&str, &str, u8)| {
+        hint_spans(k, what, Style::default(), Style::default())
+            .iter()
+            .map(|s| crate::text::cells(&s.content))
+            .sum::<u16>()
     };
     while hints.iter().map(width).sum::<u16>() > room {
         let Some(worst) = hints
@@ -717,6 +733,22 @@ mod tests {
         let few = fit_hints(hints, 52);
         let keys: Vec<&str> = few.iter().map(|h| h.0).collect();
         assert_eq!(keys, ["↑↓", "o", "n", "q"]);
+    }
+
+    /// "点门牌" sat on a keycap like `t` and `q` beside it, so it read as a key
+    /// to press, and pressing it did nothing. A hint with no key is plain
+    /// words, measured as drawn so the row still fits.
+    #[test]
+    fn a_pointer_hint_is_not_drawn_as_a_key() {
+        let cap = Style::default().bg(Color::Rgb(1, 2, 3));
+        let spans = hint_spans("", "点门牌看说明", cap, Style::default());
+        assert!(spans.iter().all(|s| s.style.bg != cap.bg), "no keycap");
+        assert_eq!(spans[0].content, "点门牌看说明  ");
+        let keyed = hint_spans("t", "置顶", cap, Style::default());
+        assert_eq!(keyed[0].style.bg, cap.bg, "a real key keeps its cap");
+        let w = crate::text::cells("点门牌看说明  ");
+        assert_eq!(fit_hints(vec![("", "点门牌看说明", 8)], w).len(), 1);
+        assert!(fit_hints(vec![("", "点门牌看说明", 8)], w - 1).is_empty());
     }
 
     /// One stray `q` closed a window kept up all day; it takes a second one

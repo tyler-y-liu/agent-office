@@ -762,7 +762,7 @@ impl Win {
         );
         canvas.fill(i64::from(panel_x), 0, w.get() - panel_x, h.get(), PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &cells, (panel_x, 0), g);
-        paint_outlines(&mut canvas, &drawn.outlines, (panel_x, cols), g, sf);
+        paint_done_bars(&mut canvas, &drawn.outlines, panel_x, g, sf);
         let at = Instant::now();
         self.portraits.retain(|id, (_, made)| {
             at.duration_since(*made) < PORTRAIT_FOR && frame.scene.agents.contains_key(id)
@@ -800,7 +800,7 @@ impl Win {
                         "置顶"
                     },
                 ),
-                ("点门牌", "看说明"),
+                ("", "点门牌看说明"),
             ],
         );
         canvas.fill(0, i64::from(oh), w.get(), h.get() - oh, PANEL_BG);
@@ -1430,32 +1430,22 @@ fn paint_cells(
     }
 }
 
-/// Ink of the outline round a card done and waiting to be read: the panel's
-/// colour for that group.
-const DONE_OUTLINE: u32 = 0x00ff_e8a3;
+/// Ink of the bar by a card done and waiting to be read: the panel's colour
+/// for that group.
+const DONE_BAR: u32 = 0x00ff_e8a3;
 
-/// An outline round each card in `outlines` (its first and last panel rows),
-/// across the panel of `cols` cells at `panel_x`.
-fn paint_outlines(
-    canvas: &mut Canvas,
-    outlines: &[(u16, u16)],
-    (panel_x, cols): (u32, u16),
-    g: Grid,
-    sf: f64,
-) {
+/// A bar down the left of each card in `outlines` (its first and last panel
+/// rows), in the gap between the panel's edge and its text. A box round
+/// each read as the card being selected, and two at once as two selected.
+fn paint_done_bars(canvas: &mut Canvas, outlines: &[(u16, u16)], panel_x: u32, g: Grid, sf: f64) {
     let t = (sf.round() as u32).max(1);
-    // Half a cell in from the panel's text on each side.
-    let x0 = i64::from(panel_x + g.cell_w * 3 / 2);
-    let x1 = i64::from(panel_x + u32::from(cols) * g.cell_w - g.cell_w / 2);
-    let w = u32::try_from(x1 - x0).unwrap_or(0);
+    let w = (2 * t).max(g.cell_w / 3);
+    // Centred in the cell before the text, clear of the panel's border.
+    let x = i64::from(panel_x + g.cell_w + (g.cell_w - w) / 2);
     for &(top, bottom) in outlines {
         let y0 = i64::from(u32::from(top) * g.row_h + t);
         let y1 = i64::from((u32::from(bottom) + 1) * g.row_h - t);
-        let h = u32::try_from(y1 - y0).unwrap_or(0);
-        canvas.fill(x0, y0, w, t, DONE_OUTLINE);
-        canvas.fill(x0, y1 - i64::from(t), w, t, DONE_OUTLINE);
-        canvas.fill(x0, y0, t, h, DONE_OUTLINE);
-        canvas.fill(x1 - i64::from(t), y0, t, h, DONE_OUTLINE);
+        canvas.fill(x, y0, w, u32::try_from(y1 - y0).unwrap_or(0), DONE_BAR);
     }
 }
 
@@ -2067,8 +2057,9 @@ const SIGN_PT: f64 = 9.0;
 const STUCK_RED: u32 = 0x00f7_768e;
 
 /// Mark each stuck agent in `stuck` where it sits: a red ring round its
-/// figure and a red "?" by its badge, so it stands out from the agents
-/// working normally around it. `u` is window pixels an art pixel.
+/// figure and the panel's stuck mark by its badge, so it stands out from the
+/// agents working normally around it. Not a "?": that read as a question for
+/// you, which is what waiting means. `u` is window pixels an art pixel.
 fn paint_stuck(
     canvas: &mut Canvas,
     faces: &mut Faces,
@@ -2096,7 +2087,14 @@ fn paint_stuck(
         let base = y + i64::from(pad) + i64::from(faces.ascent(name_px));
         // Dark on the red, as the panel's stuck chip is: white on it read
         // at 2:1.
-        faces.draw(canvas, x + i64::from(pad), base, "?", PANEL_BG, name_px);
+        faces.draw(
+            canvas,
+            x + i64::from(pad),
+            base,
+            crate::panel::STUCK_MARK,
+            PANEL_BG,
+            name_px,
+        );
     }
 }
 
@@ -2236,6 +2234,41 @@ fn paint_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A box round each unread done card read as the card being selected,
+    /// two at once as two selected. Its mark is a bar in the gap left of the
+    /// text: nothing across the card, nothing over the panel's border.
+    #[test]
+    fn an_unread_done_card_gets_a_side_bar_not_a_box() {
+        let g = Grid {
+            px: 13,
+            cell_w: 8,
+            row_h: 18,
+        };
+        let panel_x = 100;
+        let mut canvas = Canvas::new(400, 200, 0);
+        paint_done_bars(&mut canvas, &[(2, 4)], panel_x, g, 1.0);
+        let inked: Vec<(u32, u32)> = (0..canvas.h)
+            .flat_map(|y| (0..canvas.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.px[(y * canvas.w + x) as usize] == DONE_BAR)
+            .collect();
+        assert!(!inked.is_empty(), "the card is marked");
+        let (x0, x1) = (panel_x + g.cell_w, panel_x + 2 * g.cell_w);
+        assert!(
+            inked.iter().all(|&(x, _)| (x0..x1).contains(&x)),
+            "only in the cell before the text"
+        );
+        let (top, bottom) = (2 * g.row_h, 5 * g.row_h);
+        assert!(inked.iter().all(|&(_, y)| (top..bottom).contains(&y)));
+        assert!(
+            inked.iter().any(|&(_, y)| y < top + g.row_h),
+            "from its first row"
+        );
+        assert!(
+            inked.iter().any(|&(_, y)| y >= bottom - g.row_h),
+            "to its last"
+        );
+    }
 
     /// A badge past the crowd's cut keeps a short name, not a dot: a dot
     /// told no one which session sat there. Its namesake number stays, or
