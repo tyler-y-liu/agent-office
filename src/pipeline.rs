@@ -129,6 +129,106 @@ pub fn store_caps(caps: &FloorCaps, buf_w: u16, buf_h: u16) {
 
 #[cfg(test)]
 mod tests {
+    /// The figure sits at its desk for its whole turn. Between
+    /// two calls the model is still working, so only the turn's end (`Stop`,
+    /// or Esc's interrupt marker, which fires no `Stop`) lets it go idle;
+    /// without the bracket it left its desk after every call.
+    #[test]
+    fn a_turn_keeps_its_session_working_between_calls_until_it_ends() {
+        use pixtuoid_core::source::claude_code::{SOURCE_NAME, decode_cc_line};
+        use pixtuoid_core::source::decoder::decode_hook_payload;
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentEvent, AgentId, Reducer, SceneState, Transport};
+        use serde_json::{Value, json};
+        use std::time::{Duration, SystemTime};
+
+        let sid = "5717f13f-3c42-4a73-bfa5-3cd14932f155";
+        let path = format!("/h/.claude/projects/-repo/{sid}.jsonl");
+        let id = AgentId::from_parts(SOURCE_NAME, sid);
+        let hook = |event: &str| {
+            decode_hook_payload(json!({
+                "hook_event_name": event, "session_id": sid, "cwd": "/repo",
+                "transcript_path": path, "prompt": "fix it",
+                "tool_name": "Read", "tool_use_id": "toolu_1",
+                "tool_input": {"file_path": "/repo/a.rs"},
+            }))
+            .expect("decodes")
+            .into_iter()
+            .map(|e| (Transport::Hook, e))
+            .collect::<Vec<_>>()
+        };
+        let line = |v: Value| {
+            decode_cc_line(&path, SOURCE_NAME, v)
+                .into_iter()
+                .map(|e| (Transport::Jsonl, e))
+                .collect::<Vec<_>>()
+        };
+        let user_text = |text: &str| {
+            line(json!({"type": "user", "message": {"role": "user",
+                "content": [{"type": "text", "text": text}]}}))
+        };
+        let tool_result = line(json!({"type": "user", "message": {"role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}}));
+
+        let run = |steps: Vec<Vec<(Transport, AgentEvent)>>| {
+            let mut scene = SceneState::uniform(4);
+            let mut r = Reducer::new();
+            let mut now = SystemTime::UNIX_EPOCH;
+            let mut states = Vec::new();
+            for step in steps {
+                for (from, ev) in step {
+                    r.apply(&mut scene, ev, now, from);
+                }
+                now += Duration::from_secs(1);
+                states.push(scene.agents[&id].state.clone());
+            }
+            states
+        };
+        let between_calls = ActivityState::Running { item: None };
+
+        let stopped = run(vec![
+            hook("SessionStart"),
+            hook("UserPromptSubmit"),
+            user_text("fix it"),
+            hook("PreToolUse"),
+            hook("PostToolUse"),
+            hook("Stop"),
+        ]);
+        assert_eq!(
+            stopped[2], between_calls,
+            "the prompt's own line ends nothing"
+        );
+        assert_eq!(stopped[4], between_calls, "a call's end is not the turn's");
+        assert_eq!(stopped[5], ActivityState::Idle);
+
+        let interrupted = run(vec![
+            hook("SessionStart"),
+            hook("UserPromptSubmit"),
+            hook("PreToolUse"),
+            tool_result,
+            user_text("[Request interrupted by user for tool use]"),
+        ]);
+        assert_eq!(interrupted[3], between_calls);
+        assert_eq!(
+            interrupted[4],
+            ActivityState::Idle,
+            "Esc fires no Stop; the transcript's marker ends the turn"
+        );
+
+        let failed = run(vec![
+            hook("SessionStart"),
+            hook("UserPromptSubmit"),
+            line(json!({"type": "assistant", "isApiErrorMessage": true,
+                "message": {"role": "assistant", "model": "<synthetic>",
+                "content": [{"type": "text", "text": "rate limited"}]}})),
+        ]);
+        assert_eq!(
+            failed[2],
+            ActivityState::Idle,
+            "a failed request ends the turn; the figure must not type forever"
+        );
+    }
+
     use super::*;
 
     fn start(source: &str) -> AgentEvent {

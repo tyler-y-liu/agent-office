@@ -62,7 +62,12 @@ pub(crate) const DESCRIPTOR: SourceDescriptor = SourceDescriptor {
             // returns `async_launched` at launch (hooks.md).
             child_end_inference: ChildEndInference::None,
             child_hooks_unnamed: false,
-            brackets_turns: false,
+            // agent-office: `UserPromptSubmit` opens a turn and `Stop`, or the
+            // transcript's interrupt or API-error line, closes it, so the
+            // figure stays at its desk while the model thinks between calls.
+            // A turn whose end is lost anyway closes at the next prompt.
+            // CC's hermetic profile records none of these exits yet.
+            brackets_turns: true,
         },
         focus: FocusChannel::TranscriptProbe,
     },
@@ -108,7 +113,22 @@ pub(crate) fn decode_cc_hook_custom(obj: &HookObject) -> Result<Option<Vec<Agent
         .and_then(|s| s.as_str())
         .unwrap_or("");
     if event != "SubagentStart" && event != "SubagentStop" {
-        return crate::source::decoder::subagent_fired(obj, SOURCE_NAME, subagent_session);
+        let fired = crate::source::decoder::subagent_fired(obj, SOURCE_NAME, subagent_session)?;
+        if fired.is_some() || event != "UserPromptSubmit" {
+            return Ok(fired);
+        }
+        // agent-office: a prompt opens the session's turn.
+        let desc = crate::source::registry::descriptor_for(SOURCE_NAME);
+        let mut evs = crate::source::decoder::shared_hook_arms(obj, SOURCE_NAME, desc)?;
+        let opened = evs.iter().find_map(|e| match e {
+            AgentEvent::SessionStart { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        });
+        evs.extend(opened.map(|agent_id| AgentEvent::TurnStart {
+            agent_id,
+            turn: fresh_turn(),
+        }));
+        return Ok(Some(evs));
     }
     // Registry contract: claim our two events FULLY (Err on malformed), never
     // fall through — an empty id mints a phantom that never coalesces.
@@ -127,13 +147,21 @@ pub(crate) fn decode_cc_hook_custom(obj: &HookObject) -> Result<Option<Vec<Agent
     let prefixed = subagent_session(wire_agent_id);
     if event == "SubagentStart" {
         let cwd = obj.get("cwd").and_then(|s| s.as_str()).unwrap_or("").into();
-        Ok(Some(vec![AgentEvent::SessionStart {
-            agent_id: AgentId::from_parts(SOURCE_NAME, &prefixed),
-            source: SOURCE_NAME.to_string(),
-            session_id: prefixed,
-            cwd,
-            parent_id: Some(AgentId::from_parts(SOURCE_NAME, session_id)),
-        }]))
+        let agent_id = AgentId::from_parts(SOURCE_NAME, &prefixed);
+        Ok(Some(vec![
+            AgentEvent::SessionStart {
+                agent_id,
+                source: SOURCE_NAME.to_string(),
+                session_id: prefixed,
+                cwd,
+                parent_id: Some(AgentId::from_parts(SOURCE_NAME, session_id)),
+            },
+            // agent-office: a subagent's one turn lasts until its SubagentStop.
+            AgentEvent::TurnStart {
+                agent_id,
+                turn: fresh_turn(),
+            },
+        ]))
     } else {
         // `SubagentStop` also carries `agent_transcript_path`, whose stem is the
         // authoritative key — exact parity with the watcher's own deriver.
@@ -159,6 +187,31 @@ pub(crate) fn decode_cc_hook_custom(obj: &HookObject) -> Result<Option<Vec<Agent
             agent_id: AgentId::from_parts(SOURCE_NAME, &path_key.unwrap_or(prefixed)),
             as_child: true,
         }]))
+    }
+}
+
+/// agent-office: CC's hooks name no turn, so each prompt mints its own key;
+/// unique per run, so the ledger never takes a new turn for a closed one.
+fn fresh_turn() -> crate::state::TurnKey {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::state::TurnKey::Id(format!("cc-{n}").into())
+}
+
+/// The marker CC writes as a user text when Esc stops a turn, which fires no
+/// `Stop` hook; `… for tool use]` when it stops a call.
+const INTERRUPT_MARKER: &str = "[Request interrupted by user";
+
+/// agent-office: whether a user line is CC's interrupt marker.
+fn is_interrupt(content: Option<&Value>) -> bool {
+    let starts = |t: &str| t.starts_with(INTERRUPT_MARKER);
+    match content {
+        Some(Value::String(t)) => starts(t),
+        Some(Value::Array(blocks)) => blocks.iter().any(|b| {
+            b.get("type").and_then(Value::as_str) == Some("text")
+                && b.get("text").and_then(Value::as_str).is_some_and(starts)
+        }),
+        _ => false,
     }
 }
 
@@ -318,6 +371,11 @@ pub fn decode_cc_line(transcript_path: &str, source: &str, v: Value) -> Vec<Agen
         }
     }
     let content = message.get("content");
+    // agent-office: Esc and a failed request end the turn with no `Stop`
+    // seen; the line follows the stopped call's result, so the turn ends
+    // after the call does.
+    let interrupted = (ty == USER && is_interrupt(content))
+        || (ty == ASSISTANT && obj.get("isApiErrorMessage") == Some(&Value::Bool(true)));
     match (ty, content) {
         (ASSISTANT, Some(Value::Array(blocks))) => {
             for block in blocks {
@@ -363,6 +421,9 @@ pub fn decode_cc_line(transcript_path: &str, source: &str, v: Value) -> Vec<Agen
             }
         }
         _ => {}
+    }
+    if interrupted {
+        out.push(AgentEvent::turn_end(agent_id));
     }
     out
 }

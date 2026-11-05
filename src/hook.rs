@@ -11,10 +11,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-/// The events the reducer reads; the ones pixtuoid's plugin hooks.
-const EVENTS: [&str; 8] = [
+/// The events the reducer reads; the ones pixtuoid's plugin hooks, and the
+/// prompt and its end, which keep a figure at its desk for its whole turn.
+const EVENTS: [&str; 10] = [
     "SessionStart",
     "SessionEnd",
+    "UserPromptSubmit",
+    "Stop",
     "PreToolUse",
     "PostToolUse",
     "Notification",
@@ -179,11 +182,23 @@ fn add_ours(settings: &mut Value, command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether every event in [`EVENTS`] reaches us: a connect from an older
+/// build lacks the turn's own events, and its figures leave their desks
+/// between calls.
 pub fn installed() -> bool {
-    read_settings().is_ok_and(|(_, _, mut s)| {
-        let before = s.clone();
-        remove_ours(&mut s);
-        s != before
+    read_settings().is_ok_and(|(_, _, s)| has_every_event(&s))
+}
+
+fn has_every_event(settings: &Value) -> bool {
+    EVENTS.iter().all(|event| {
+        settings["hooks"][event].as_array().is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g["hooks"].as_array().is_some_and(|hs| {
+                    hs.iter()
+                        .any(|h| h["command"].as_str().is_some_and(is_ours))
+                })
+            })
+        })
     })
 }
 
@@ -244,7 +259,7 @@ mod tests {
         let theirs =
             json!({"matcher": "Bash", "hooks": [{"type": "command", "command": "guard.py"}]});
         let original =
-            json!({"model": "opus", "hooks": {"PreToolUse": [theirs.clone()], "Stop": []}});
+            json!({"model": "opus", "hooks": {"PreToolUse": [theirs.clone()], "PreCompact": []}});
         let mut s = original.clone();
         let cmd = "'/usr/local/bin/agent-office' hook";
         for _ in 0..2 {
@@ -256,6 +271,18 @@ mod tests {
         assert_eq!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"], cmd);
         remove_ours(&mut s);
         assert_eq!(s, original);
+    }
+
+    /// An install from before the turn's events must read as not connected,
+    /// so doctor sends the user back to `connect`.
+    #[test]
+    fn an_install_missing_an_event_is_not_connected() {
+        let cmd = "'/usr/local/bin/agent-office' hook";
+        let mut s = json!({});
+        add_ours(&mut s, cmd).unwrap();
+        assert!(has_every_event(&s));
+        s["hooks"].as_object_mut().unwrap().shift_remove("Stop");
+        assert!(!has_every_event(&s));
     }
 
     /// Payloads must reach the router as one line it can parse.
