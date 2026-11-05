@@ -6,8 +6,14 @@
 //! Any other session, in a terminal, is reached the way pixtuoid's
 //! `focus` module does it (MIT, pixtuoid authors): from the CLI's pid up to the
 //! first ancestor that is a GUI app, the terminal, which is brought to the
-//! front. The app only, not its tab. A session inside tmux misses: the tmux
-//! server is daemonized, so the walk ends at launchd.
+//! front. In iTerm2 and Terminal.app its tab is then picked by the session's
+//! tty, over AppleScript; other terminals come forward as they were.
+//!
+//! A session inside tmux has no terminal above it: the tmux server is
+//! daemonized, so the walk ends at launchd. Its pane is found among the
+//! default server's panes instead, by the pane's shell being one of the
+//! session's ancestors; tmux shows that pane, and the terminal raised is the
+//! one a client attached to it runs in.
 
 use std::path::Path;
 
@@ -48,8 +54,7 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
     if !cfg!(target_os = "macos") {
         return Err("只有 macOS 上能切到终端".to_owned());
     }
-    focus_terminal(&OsProcessTable, pid, activate_os)?;
-    Ok("已切到它所在的终端")
+    focus_terminal(&OsProcessTable, &OsTmux, pid, activate_os, select_tab_os)
 }
 
 const GONE: &str = "这个会话的进程已经不在了";
@@ -87,6 +92,37 @@ pub trait ProcessTable {
     fn ppid(&self, pid: i32) -> Option<i32>;
     /// Whether `pid` is an app with a window of its own, a terminal.
     fn focusable(&self, pid: i32) -> bool;
+    /// `pid`'s image name, without its directory.
+    fn name(&self, pid: i32) -> Option<String>;
+    /// The terminal `pid` reads from, as `/dev/ttys003`.
+    fn tty(&self, pid: i32) -> Option<String>;
+}
+
+/// A tmux pane: its shell's pid, its id (`%3`), its session's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    pub pid: i32,
+    pub id: String,
+    pub session: String,
+}
+
+/// A terminal attached to tmux: its tmux client's pid, its tty, the session
+/// it shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Client {
+    pub pid: i32,
+    pub tty: String,
+    pub session: String,
+}
+
+/// What the jump asks of tmux, so it can be tested without a server.
+pub trait Tmux {
+    /// Every pane of the default server; `None` with no server running.
+    fn panes(&self) -> Option<Vec<Pane>>;
+    fn clients(&self) -> Vec<Client>;
+    /// Show `pane`, on the client at `tty` when given (switching it to the
+    /// pane's session), else on the clients already showing its session.
+    fn show(&self, pane: &str, tty: Option<&str>) -> bool;
 }
 
 /// `pid` itself or its nearest ancestor that is focusable. Stops at launchd and
@@ -103,16 +139,232 @@ fn terminal_of(table: &impl ProcessTable, start: i32) -> Option<i32> {
     None
 }
 
+/// `start` and its ancestors up to launchd, bounded as [`terminal_of`] is.
+fn ancestors(table: &impl ProcessTable, start: i32) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut pid = start;
+    while pid > 1 && !out.contains(&pid) {
+        out.push(pid);
+        match table.ppid(pid) {
+            Some(p) => pid = p,
+            None => break,
+        }
+    }
+    out
+}
+
+/// Show `pid`'s tmux pane; the client it is shown on. A client already on
+/// the pane's session is used as it is, so no one's view of another session
+/// is pulled away; with none, the first client is switched over.
+fn show_tmux_pane(table: &impl ProcessTable, tmux: &impl Tmux, pid: i32) -> Result<Client, String> {
+    const NOT_IN_TMUX: &str = "找不到它所在的终端";
+    let up = ancestors(table, pid);
+    let pane = tmux
+        .panes()
+        .ok_or(NOT_IN_TMUX)?
+        .into_iter()
+        .find(|p| up.contains(&p.pid))
+        .ok_or(NOT_IN_TMUX)?;
+    let clients = tmux.clients();
+    let (client, tty) = match clients.iter().find(|c| c.session == pane.session) {
+        Some(c) => (c, None),
+        None => {
+            let c = clients
+                .first()
+                .ok_or("它在 tmux 里，但没有终端连着 tmux（先 tmux attach）")?;
+            (c, Some(c.tty.as_str()))
+        }
+    };
+    if !tmux.show(&pane.id, tty) {
+        return Err("tmux 没切过去".to_owned());
+    }
+    Ok(client.clone())
+}
+
+/// Raise the terminal `pid` runs in, then its tab; inside tmux, its pane
+/// first, and the terminal its client runs in. `Ok` is the footer's note.
 fn focus_terminal(
     table: &impl ProcessTable,
+    tmux: &impl Tmux,
     pid: i32,
     activate: impl FnOnce(i32) -> bool,
-) -> Result<(), String> {
-    let app = terminal_of(table, pid).ok_or("找不到它所在的终端（tmux 里的会话找不到）")?;
+    select_tab: impl FnOnce(Terminal, String),
+) -> Result<&'static str, String> {
+    let (app, tty, note) = match terminal_of(table, pid) {
+        Some(app) => (app, table.tty(pid), "已切到它所在的终端"),
+        None => {
+            let client = show_tmux_pane(table, tmux, pid)?;
+            let app = terminal_of(table, client.pid).ok_or("找不到连着 tmux 的那个终端")?;
+            (app, Some(client.tty), "已切到它所在的 tmux 窗格")
+        }
+    };
     if !activate(app) {
         return Err("macOS 没让终端切到前台".to_owned());
     }
-    Ok(())
+    if let (Some(term), Some(tty)) = (table.name(app).as_deref().and_then(Terminal::of), tty) {
+        select_tab(term, tty);
+    }
+    Ok(note)
+}
+
+/// A terminal whose tabs can be picked by tty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terminal {
+    ITerm,
+    Apple,
+}
+
+impl Terminal {
+    /// By the app's image name, as `ps` gives it.
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "iTerm2" => Some(Self::ITerm),
+            "Terminal" => Some(Self::Apple),
+            _ => None,
+        }
+    }
+
+    /// The AppleScript that brings the tab reading `item 1 of argv` forward.
+    fn script(self) -> &'static str {
+        match self {
+            Self::ITerm => {
+                r#"on run argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is (item 1 of argv) then
+            select w
+            select t
+            select s
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+end run"#
+            }
+            Self::Apple => {
+                r#"on run argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is (item 1 of argv) then
+          set selected of t to true
+          set index of w to 1
+          return
+        end if
+      end repeat
+    end repeat
+  end tell
+end run"#
+            }
+        }
+    }
+}
+
+/// Pick the tab on `tty` in `term`. An Apple Event, so macOS asks once
+/// whether agent-office may control the terminal; refused, the terminal is
+/// still in front, on whatever tab it was. Off the window's thread, as the
+/// ask blocks until answered.
+fn select_tab_os(term: Terminal, tty: String) {
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", term.script(), &tty])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
+/// `ps`'s tty column as a device path; `None` for a process with none (`??`).
+fn parse_tty(col: &str) -> Option<String> {
+    let col = col.trim();
+    let name = col.strip_prefix("/dev/").unwrap_or(col);
+    (name.starts_with("tty") && name.len() > 3).then(|| format!("/dev/{name}"))
+}
+
+/// `tmux list-panes -a -F '#{pane_pid}\t#{pane_id}\t#{session_name}'`.
+fn parse_panes(out: &str) -> Vec<Pane> {
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            Some(Pane {
+                pid: f.next()?.parse().ok()?,
+                id: f.next()?.to_owned(),
+                session: f.next()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// `tmux list-clients -F '#{client_pid}\t#{client_tty}\t#{client_session}'`.
+fn parse_clients(out: &str) -> Vec<Client> {
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            Some(Client {
+                pid: f.next()?.parse().ok()?,
+                tty: f.next()?.to_owned(),
+                session: f.next()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+struct OsTmux;
+
+impl OsTmux {
+    /// tmux's output for `args`, `None` when it fails. An app started from
+    /// the Dock has no Homebrew on its PATH, so Homebrew's places are tried
+    /// after the PATH's.
+    fn run(args: &[&str]) -> Option<String> {
+        ["tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+            .iter()
+            .find_map(|bin| {
+                std::process::Command::new(bin)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .ok()
+            })
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+impl Tmux for OsTmux {
+    fn panes(&self) -> Option<Vec<Pane>> {
+        Self::run(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_pid}\t#{pane_id}\t#{session_name}",
+        ])
+        .map(|out| parse_panes(&out))
+    }
+
+    fn clients(&self) -> Vec<Client> {
+        Self::run(&[
+            "list-clients",
+            "-F",
+            "#{client_pid}\t#{client_tty}\t#{client_session}",
+        ])
+        .map(|out| parse_clients(&out))
+        .unwrap_or_default()
+    }
+
+    fn show(&self, pane: &str, tty: Option<&str>) -> bool {
+        if let Some(tty) = tty
+            && Self::run(&["switch-client", "-c", tty, "-t", pane]).is_none()
+        {
+            return false;
+        }
+        Self::run(&["select-window", "-t", pane]).is_some()
+            && Self::run(&["select-pane", "-t", pane]).is_some()
+    }
 }
 
 /// `pid`'s parent and image name, from `ps`: it reads any pid, including the
@@ -157,6 +409,19 @@ impl ProcessTable for OsProcessTable {
     #[cfg(not(target_os = "macos"))]
     fn focusable(&self, _pid: i32) -> bool {
         false
+    }
+
+    fn name(&self, pid: i32) -> Option<String> {
+        ps_row(pid).map(|(_, name)| name)
+    }
+
+    fn tty(&self, pid: i32) -> Option<String> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "tty=", "-p", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        parse_tty(&String::from_utf8_lossy(&out.stdout))
     }
 }
 
@@ -262,6 +527,19 @@ mod tests {
     struct Table {
         parents: HashMap<i32, i32>,
         apps: Vec<i32>,
+        names: HashMap<i32, &'static str>,
+        ttys: HashMap<i32, &'static str>,
+    }
+
+    impl Table {
+        fn new(parents: &[(i32, i32)], apps: &[i32]) -> Self {
+            Self {
+                parents: parents.iter().copied().collect(),
+                apps: apps.to_vec(),
+                names: HashMap::new(),
+                ttys: HashMap::new(),
+            }
+        }
     }
 
     impl ProcessTable for Table {
@@ -271,54 +549,223 @@ mod tests {
         fn focusable(&self, pid: i32) -> bool {
             self.apps.contains(&pid)
         }
+        fn name(&self, pid: i32) -> Option<String> {
+            self.names.get(&pid).map(|n| (*n).to_owned())
+        }
+        fn tty(&self, pid: i32) -> Option<String> {
+            self.ttys.get(&pid).map(|t| (*t).to_owned())
+        }
+    }
+
+    /// A tmux server, recording what it was asked to show.
+    #[derive(Default)]
+    struct FakeTmux {
+        panes: Option<Vec<Pane>>,
+        clients: Vec<Client>,
+        shown: std::cell::RefCell<Vec<(String, Option<String>)>>,
+    }
+
+    impl Tmux for FakeTmux {
+        fn panes(&self) -> Option<Vec<Pane>> {
+            self.panes.clone()
+        }
+        fn clients(&self) -> Vec<Client> {
+            self.clients.clone()
+        }
+        fn show(&self, pane: &str, tty: Option<&str>) -> bool {
+            self.shown
+                .borrow_mut()
+                .push((pane.to_owned(), tty.map(str::to_owned)));
+            true
+        }
+    }
+
+    fn pane(pid: i32, id: &str, session: &str) -> Pane {
+        Pane {
+            pid,
+            id: id.into(),
+            session: session.into(),
+        }
+    }
+
+    fn client(pid: i32, tty: &str, session: &str) -> Client {
+        Client {
+            pid,
+            tty: tty.into(),
+            session: session.into(),
+        }
+    }
+
+    /// What one jump did: its note, the app raised and the tab picked.
+    type Jumped = (
+        Result<&'static str, String>,
+        Option<i32>,
+        Option<(Terminal, String)>,
+    );
+
+    fn jump(t: &Table, tmux: &FakeTmux, pid: i32) -> Jumped {
+        let mut raised = None;
+        let mut tab = None;
+        let done = focus_terminal(
+            t,
+            tmux,
+            pid,
+            |p| {
+                raised = Some(p);
+                true
+            },
+            |term, tty| tab = Some((term, tty)),
+        );
+        (done, raised, tab)
     }
 
     /// claude(300) → zsh(200) → login(150) → iTerm2(100) → launchd(1): the
     /// terminal is raised, not the shell or launchd.
     #[test]
     fn a_terminal_session_raises_the_app_it_runs_in() {
-        let t = Table {
-            parents: HashMap::from([(300, 200), (200, 150), (150, 100), (100, 1)]),
-            apps: vec![100],
-        };
-        let mut raised = None;
-        let done = focus_terminal(&t, 300, |p| {
-            raised = Some(p);
-            true
-        });
-        assert_eq!(done, Ok(()));
+        let t = Table::new(&[(300, 200), (200, 150), (150, 100), (100, 1)], &[100]);
+        let (done, raised, tab) = jump(&t, &FakeTmux::default(), 300);
+        assert!(done.is_ok());
         assert_eq!(raised, Some(100));
+        assert_eq!(tab, None, "a terminal not known to take a tab pick");
     }
 
-    /// Under tmux the chain ends at launchd with no app on it: the user is told
-    /// why, and nothing is raised.
+    /// With several tabs open, raising the app alone lands on whichever tab
+    /// was last used; in iTerm2 and Terminal.app the session's own is picked
+    /// by its tty.
+    #[test]
+    fn in_iterm_the_sessions_own_tab_is_picked_by_its_tty() {
+        let mut t = Table::new(&[(300, 200), (200, 100), (100, 1)], &[100]);
+        t.names.insert(100, "iTerm2");
+        t.ttys.insert(300, "/dev/ttys004");
+        let (_, _, tab) = jump(&t, &FakeTmux::default(), 300);
+        assert_eq!(tab, Some((Terminal::ITerm, "/dev/ttys004".to_owned())));
+        t.names.insert(100, "Terminal");
+        let (_, _, tab) = jump(&t, &FakeTmux::default(), 300);
+        assert_eq!(tab, Some((Terminal::Apple, "/dev/ttys004".to_owned())));
+    }
+
+    /// Under tmux the session's chain ends at launchd, under the tmux server.
+    /// Its pane is the one whose shell is among its ancestors; tmux shows it,
+    /// and the terminal raised is the attached client's, on the client's tab.
+    #[test]
+    fn a_session_in_tmux_shows_its_pane_and_raises_the_clients_terminal() {
+        // claude(300) → zsh(250, pane %7) → tmux server(240) → launchd;
+        // tmux client(520) → zsh(510) → iTerm2(100).
+        let mut t = Table::new(
+            &[
+                (300, 250),
+                (250, 240),
+                (240, 1),
+                (520, 510),
+                (510, 100),
+                (100, 1),
+            ],
+            &[100],
+        );
+        t.names.insert(100, "iTerm2");
+        let tmux = FakeTmux {
+            panes: Some(vec![pane(260, "%6", "work"), pane(250, "%7", "work")]),
+            clients: vec![client(520, "/dev/ttys009", "work")],
+            ..FakeTmux::default()
+        };
+        let (done, raised, tab) = jump(&t, &tmux, 300);
+        assert_eq!(done, Ok("已切到它所在的 tmux 窗格"));
+        assert_eq!(*tmux.shown.borrow(), [("%7".to_owned(), None)]);
+        assert_eq!(raised, Some(100));
+        assert_eq!(tab, Some((Terminal::ITerm, "/dev/ttys009".to_owned())));
+    }
+
+    /// No client shows the pane's session: one is switched to it, rather
+    /// than tmux showing a pane nobody can see.
+    #[test]
+    fn with_no_client_on_its_session_a_client_is_switched_over() {
+        let t = Table::new(
+            &[(300, 250), (250, 240), (240, 1), (520, 100), (100, 1)],
+            &[100],
+        );
+        let tmux = FakeTmux {
+            panes: Some(vec![pane(250, "%7", "side")]),
+            clients: vec![client(520, "/dev/ttys009", "main")],
+            ..FakeTmux::default()
+        };
+        assert!(jump(&t, &tmux, 300).0.is_ok());
+        assert_eq!(
+            *tmux.shown.borrow(),
+            [("%7".to_owned(), Some("/dev/ttys009".to_owned()))]
+        );
+    }
+
+    /// A detached tmux has no terminal to raise: the user is told to attach,
+    /// and nothing is raised.
+    #[test]
+    fn a_detached_tmux_session_says_to_attach() {
+        let t = Table::new(&[(300, 250), (250, 240), (240, 1)], &[]);
+        let tmux = FakeTmux {
+            panes: Some(vec![pane(250, "%7", "work")]),
+            ..FakeTmux::default()
+        };
+        let (done, raised, _) = jump(&t, &tmux, 300);
+        assert!(done.unwrap_err().contains("attach"));
+        assert_eq!(raised, None);
+    }
+
+    /// Neither under a terminal nor in a tmux pane (another multiplexer, a
+    /// tmux on its own socket): the user is told, and nothing is raised.
     #[test]
     fn a_session_with_no_terminal_above_it_raises_nothing() {
-        let t = Table {
-            parents: HashMap::from([(300, 200), (200, 1)]),
-            apps: vec![],
+        let t = Table::new(&[(300, 200), (200, 1)], &[]);
+        let tmux = FakeTmux {
+            panes: Some(vec![pane(999, "%1", "other")]),
+            ..FakeTmux::default()
         };
-        let done = focus_terminal(&t, 300, |_| panic!("nothing to raise"));
-        assert!(done.unwrap_err().contains("tmux"));
+        let (done, raised, _) = jump(&t, &tmux, 300);
+        assert!(done.is_err());
+        assert_eq!(raised, None);
+        assert!(tmux.shown.borrow().is_empty(), "no stranger's pane shown");
+        assert!(jump(&t, &FakeTmux::default(), 300).0.is_err(), "no server");
+    }
+
+    /// tmux's own output, as the format strings ask for it; a session name
+    /// may hold spaces.
+    #[test]
+    fn tmux_listings_are_read_by_their_tab_separated_fields() {
+        assert_eq!(
+            parse_panes("250\t%7\tmy work\nbad line\n"),
+            [pane(250, "%7", "my work")]
+        );
+        assert_eq!(
+            parse_clients("520\t/dev/ttys009\tmain\n"),
+            [client(520, "/dev/ttys009", "main")]
+        );
+    }
+
+    #[test]
+    fn a_ps_tty_is_a_device_path_and_none_has_no_tab() {
+        assert_eq!(parse_tty(" ttys003\n").as_deref(), Some("/dev/ttys003"));
+        assert_eq!(parse_tty("??"), None);
+        assert_eq!(parse_tty(""), None);
     }
 
     /// A racing table that loops must not hang the window's thread.
     #[test]
     fn a_parent_cycle_ends_the_walk() {
-        let t = Table {
-            parents: HashMap::from([(300, 200), (200, 300)]),
-            apps: vec![],
-        };
+        let t = Table::new(&[(300, 200), (200, 300)], &[]);
         assert_eq!(terminal_of(&t, 300), None);
+        assert_eq!(ancestors(&t, 300), [300, 200]);
     }
 
     #[test]
     fn macos_refusing_the_raise_is_reported() {
-        let t = Table {
-            parents: HashMap::new(),
-            apps: vec![300],
-        };
-        assert!(focus_terminal(&t, 300, |_| false).is_err());
+        let t = Table::new(&[], &[300]);
+        let done = focus_terminal(
+            &t,
+            &FakeTmux::default(),
+            300,
+            |_| false,
+            |_, _| panic!("no tab picked behind a refused raise"),
+        );
+        assert!(done.is_err());
     }
 
     fn slot_with(pid: Option<pixtuoid_core::source::PidIdentity>) -> AgentSlot {

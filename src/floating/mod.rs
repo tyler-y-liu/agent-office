@@ -43,6 +43,9 @@ use font::{Canvas, LINE_H, rgb};
 use vector::Faces;
 
 const FRAME: Duration = Duration::from_millis(50);
+/// How often the waits are checked for the Dock badge and banners: a
+/// second late is still in time, and a covered window wakes no more often.
+const WATCH_EVERY: Duration = Duration::from_secs(1);
 /// How long the window must keep its size before the office lays out for
 /// it: every few pixels of a drag is a new layout, its desks and agents
 /// reshuffled, so a drag redraws the office it started with.
@@ -133,6 +136,9 @@ struct Win {
     about: Option<(String, Instant)>,
     next_frame: Instant,
     occluded: bool,
+    focused: bool,
+    /// When the waits are next checked for the Dock and banners.
+    next_watch: Instant,
     /// The frame, and the office at art density before its upscale: kept
     /// between frames so a frame allocates nothing.
     canvas: Canvas,
@@ -291,6 +297,12 @@ impl ApplicationHandler for Floating<'_> {
                 }
             }
             WindowEvent::Occluded(hidden) => win.occluded = hidden,
+            WindowEvent::Focused(focused) => {
+                win.focused = focused;
+                if focused {
+                    win.core.focus_gained(&mut win.office);
+                }
+            }
             // Drawn now, not on the next tick: until a frame of the new size
             // is presented, macOS shows the old one pinned top-left.
             WindowEvent::Resized(_) => {
@@ -365,12 +377,23 @@ impl ApplicationHandler for Floating<'_> {
             el.exit();
             return;
         }
+        // A shot is for looking at the office, not for posting banners.
+        if now >= win.next_watch && self.shot.is_none() {
+            win.next_watch = now + WATCH_EVERY;
+            win.core.watch_waits(win.focused);
+        }
         // A hidden widget left running all day should cost nothing.
         if now >= win.next_frame && (!win.occluded || self.shot.is_some()) {
             win.next_frame = now + FRAME;
             win.window.request_redraw();
         }
-        el.set_control_flow(ControlFlow::WaitUntil(win.next_frame));
+        // Covered, the frame clock stands still, so the waits' clock wakes it.
+        let wake = if win.occluded && self.shot.is_none() {
+            win.next_watch
+        } else {
+            win.next_frame.min(win.next_watch)
+        };
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
 
@@ -416,6 +439,8 @@ impl Floating<'_> {
             about: None,
             next_frame: Instant::now(),
             occluded: false,
+            focused: true,
+            next_watch: Instant::now(),
             canvas: Canvas::new(0, 0, 0),
             art: Canvas::new(0, 0, 0),
             faces,

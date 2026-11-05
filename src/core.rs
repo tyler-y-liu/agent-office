@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 
 use crate::fun::{self, Clock, hko::Outlook, stats::Watch};
 use crate::panel::{self, PanelState};
-use crate::{jump, pipeline, tasks};
+use crate::{jump, notify, pipeline, tasks};
 
 /// An office that has floors to move between.
 pub trait Floors {
@@ -63,6 +63,8 @@ pub struct Core {
     /// The day's tally, the repositories' records and the boss's comings.
     pub watch: Watch,
     outlook_rx: tokio::sync::watch::Receiver<Outlook>,
+    notifier: notify::Notifier,
+    banners: bool,
 }
 
 /// One frame's worth of state.
@@ -183,6 +185,44 @@ pub fn idle_since_written(scene: &Arc<SceneState>, views: &tasks::TaskViews) -> 
     Arc::new(fixed)
 }
 
+/// How long a session idles before the office stops drawing it.
+const HIDE_IDLE_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// `scene` without the sessions idle [`HIDE_IDLE_AFTER`] or longer. The
+/// desktop app keeps every session it opened alive until it is archived, so
+/// the office would otherwise fill with ones you are done with. A hidden
+/// session comes back as soon as it gets a new turn; one still waiting on
+/// your reply stays, since hiding it would drop the question.
+pub fn without_long_idle(
+    scene: &Arc<SceneState>,
+    views: &tasks::TaskViews,
+    seen: &HashMap<AgentId, SystemTime>,
+    now: SystemTime,
+) -> Arc<SceneState> {
+    let gone: Vec<AgentId> = scene
+        .agents
+        .values()
+        .filter(|s| s.state == pixtuoid_core::ActivityState::Idle && s.exiting_at.is_none())
+        .filter(|s| {
+            now.duration_since(s.state_started_at)
+                .is_ok_and(|d| d >= HIDE_IDLE_AFTER)
+        })
+        .filter(|s| {
+            panel::waits_on_you(s, views.get(&s.agent_id), panel::read_since_idle(s, seen))
+                .is_none()
+        })
+        .map(|s| s.agent_id)
+        .collect();
+    if gone.is_empty() {
+        return Arc::clone(scene);
+    }
+    let mut kept = (**scene).clone();
+    for id in gone {
+        kept.agents.remove(&id);
+    }
+    Arc::new(kept)
+}
+
 /// How far short of the rooftop's an idle stretch held in the pantry is
 /// drawn: enough that a frame's lag never tips it over.
 const PANTRY_MARGIN: Duration = Duration::from_secs(60);
@@ -214,18 +254,28 @@ impl Core {
             force_tx,
             watch: Watch::load(),
             outlook_rx,
+            notifier: notify::Notifier::default(),
+            banners: notify::banners_on(),
         }
     }
 
+    /// Every live session, as the transcripts date their idle stretches.
+    fn live(&self, views: &tasks::TaskViews) -> Arc<SceneState> {
+        idle_since_written(&self.pipe.scene_rx.borrow().clone(), views)
+    }
+
+    /// The sessions the window shows: [`without_long_idle`] of the live ones.
     pub fn scene(&self) -> Arc<SceneState> {
-        self.pipe.scene_rx.borrow().clone()
+        let views = self.views_rx.borrow().clone();
+        without_long_idle(&self.live(&views), &views, &self.ui.seen, SystemTime::now())
     }
 
     /// The state to draw now; drops a selection whose agent left.
     pub fn frame(&mut self) -> Frame {
         let views = self.views_rx.borrow().clone();
-        let scene = idle_since_written(&self.scene(), &views);
+        let live = self.live(&views);
         let now = SystemTime::now();
+        let scene = without_long_idle(&live, &views, &self.ui.seen, now);
         let order = panel::order(&scene, &views, now, &self.ui.seen);
         if self
             .ui
@@ -243,7 +293,8 @@ impl Core {
         } else {
             HashMap::new()
         };
-        self.ui.seen.retain(|id, _| scene.agents.contains_key(id));
+        // A hidden session is still live: what you read and its tally carry over.
+        self.ui.seen.retain(|id, _| live.agents.contains_key(id));
         let waiting = scene
             .agents
             .values()
@@ -254,7 +305,7 @@ impl Core {
             .map(|s| s.agent_id)
             .collect();
         let first_waiting = panel::next_waiting(&scene, &views, now, &self.ui.seen);
-        self.watch.observe(&scene, &views, now);
+        self.watch.observe(&live, &views, now);
         let clock = Clock::now(now);
         let outlook = *self.outlook_rx.borrow();
         // A typhoon closes the rooftop; at lunch everyone is down for a meal.
@@ -268,6 +319,38 @@ impl Core {
             outlook,
             waiting,
             first_waiting,
+        }
+    }
+
+    /// Tell the OS who waits on you: a banner per new wait, the Dock's badge.
+    /// Run on its own clock, not per frame, since a covered window draws
+    /// none and that is when word matters most.
+    pub fn watch_waits(&mut self, focused: bool) {
+        let views = self.views_rx.borrow().clone();
+        let tick = self.notifier.tick(
+            &self.scene(),
+            &views,
+            &self.ui.seen,
+            SystemTime::now(),
+            focused,
+        );
+        if self.banners {
+            tick.alerts.iter().for_each(notify::post);
+        }
+        if let Some(n) = tick.badge {
+            notify::set_badge(n);
+        }
+    }
+
+    /// The window came back in front: after a banner, select who waits
+    /// first, so `o` or Enter goes straight to it.
+    pub fn focus_gained(&mut self, floors: &mut impl Floors) {
+        if std::mem::take(&mut self.notifier.unseen)
+            && let Some(id) = self.next_waiting()
+        {
+            self.ui.selected = Some(id);
+            self.ui.reveal = true;
+            self.follow(floors);
         }
     }
 
@@ -678,5 +761,86 @@ mod tests {
             &idle_since_written(&scene, &Arc::new(HashMap::new())),
             &scene
         ));
+    }
+
+    /// The desktop app keeps every session alive until it is archived, so
+    /// one you finished an hour ago must leave the office, and come back the
+    /// moment it gets new work. A long-idle session still waiting on your
+    /// reply stays: hiding it would hide the question.
+    #[test]
+    fn a_long_idle_session_is_hidden_until_it_works_again() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(5 * 3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = ["done", "recent", "asking", "busy"]
+            .iter()
+            .map(|sid| {
+                let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+                r.apply(
+                    &mut scene,
+                    AgentEvent::SessionStart {
+                        agent_id: id,
+                        source: pipeline::CC_SOURCE.into(),
+                        session_id: (*sid).into(),
+                        cwd: "/repo".into(),
+                        parent_id: None,
+                    },
+                    t0,
+                    Transport::Hook,
+                );
+                id
+            })
+            .collect();
+        let idle_for = [2 * 3600, 30 * 60, 2 * 3600];
+        for (id, secs) in ids.iter().zip(idle_for) {
+            let s = scene.agents.get_mut(id).unwrap();
+            s.state = pixtuoid_core::ActivityState::Idle;
+            s.state_started_at = now - Duration::from_secs(secs);
+        }
+        let busy = scene.agents.get_mut(&ids[3]).unwrap();
+        busy.state = pixtuoid_core::ActivityState::Running { item: None };
+        busy.state_started_at = now - Duration::from_secs(3 * 3600);
+        let views: tasks::TaskViews = Arc::new(HashMap::from([(
+            ids[2],
+            tasks::TaskView {
+                outcome: Some("问：要合并吗？".into()),
+                outcome_summarized: true,
+                ..Default::default()
+            },
+        )]));
+        let seen = HashMap::new();
+        let shown = without_long_idle(&Arc::new(scene.clone()), &views, &seen, now);
+        assert!(
+            !shown.agents.contains_key(&ids[0]),
+            "idle two hours: hidden"
+        );
+        assert!(
+            shown.agents.contains_key(&ids[1]),
+            "idle half an hour: still in"
+        );
+        assert!(
+            shown.agents.contains_key(&ids[2]),
+            "its question waits on you"
+        );
+        assert!(
+            shown.agents.contains_key(&ids[3]),
+            "a long turn is still work"
+        );
+
+        // Once you read its question, it is done with you and leaves too.
+        let read = HashMap::from([(ids[2], now)]);
+        let shown = without_long_idle(&Arc::new(scene.clone()), &views, &read, now);
+        assert!(!shown.agents.contains_key(&ids[2]), "read question: hidden");
+
+        // A new turn, as the reducer records one, brings it back.
+        let s = scene.agents.get_mut(&ids[0]).unwrap();
+        s.state = pixtuoid_core::ActivityState::Running { item: None };
+        s.state_started_at = now;
+        let shown = without_long_idle(&Arc::new(scene), &views, &seen, now);
+        assert!(
+            shown.agents.contains_key(&ids[0]),
+            "new work: back in the office"
+        );
     }
 }
