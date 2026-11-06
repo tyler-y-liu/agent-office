@@ -159,8 +159,7 @@ fn read_patch(home: &Path) -> Result<String> {
 /// dsh reads the patch at boot: a rename never shows it half written.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let tmp = path.with_extension("yml.agent-office.tmp");
-    std::fs::write(&tmp, text)
-        .and_then(|()| std::fs::rename(&tmp, path))
+    crate::atomic::write_keeping_mode(path, &tmp, text.as_bytes())
         .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))
 }
 

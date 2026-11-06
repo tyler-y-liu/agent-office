@@ -102,11 +102,10 @@ impl Memo {
             .filter_map(|k| Some((k, self.lines.get(k)?)))
             .collect();
         if let Ok(json) = serde_json::to_string(&pairs) {
-            // Through a temporary file, so a crash mid-write keeps the old memo.
+            // Through a temporary file, so a crash mid-write keeps the old
+            // memo; 0600 because it holds task titles and questions.
             let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, path);
-            }
+            let _ = crate::atomic::write_private(path, &tmp, json.as_bytes());
         }
     }
 }
@@ -114,6 +113,34 @@ impl Memo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The memo holds task titles and what sessions are asking you: other
+    /// users of the Mac must not read it, even where an older build left it
+    /// 0644.
+    #[cfg(unix)]
+    #[test]
+    fn the_saved_memo_is_readable_only_by_its_owner() {
+        use crate::atomic::tests::{mode, scratch};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("memo");
+        let path = dir.join("summaries.json");
+        let mut m = Memo {
+            path: Some(path.clone()),
+            ..Memo::default()
+        };
+        m.insert(key(&["task", "修登录页"]), "修复登录页".into());
+        m.save();
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        m.save();
+        assert_eq!(mode(&path), 0o600);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("修复登录页")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The same request finds its line again, a changed one does not: a
     /// stale line for a new prompt would be worse than asking.

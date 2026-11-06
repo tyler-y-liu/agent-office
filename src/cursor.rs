@@ -147,7 +147,8 @@ fn read_hooks(path: &Path) -> Result<(Option<String>, Value)> {
 fn write_hooks(path: &Path, before: Option<&str>, doc: &Value) -> Result<()> {
     if let Some(before) = before {
         let backup = path.with_extension("json.agent-office.bak");
-        std::fs::write(&backup, before).with_context(|| {
+        let tmp = path.with_extension("json.agent-office.bak.tmp");
+        crate::atomic::write_private(&backup, &tmp, before.as_bytes()).with_context(|| {
             crate::tr!(
                 "备份到 {} 失败",
                 "could not back up to {}",
@@ -168,9 +169,12 @@ fn write_hooks(path: &Path, before: Option<&str>, doc: &Value) -> Result<()> {
             .with_context(|| crate::tr!("建 {} 失败", "could not create {}", dir.display()))?;
     }
     let tmp = path.with_extension("json.agent-office.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(doc)? + "\n")
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
+    crate::atomic::write_keeping_mode(
+        path,
+        &tmp,
+        (serde_json::to_string_pretty(doc)? + "\n").as_bytes(),
+    )
+    .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
     println!("{}", crate::tr!("已更新 {}", "Updated {}", path.display()));
     Ok(())
 }
