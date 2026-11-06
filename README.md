@@ -17,7 +17,7 @@ With several agent sessions running at once, it's hard to keep track of which on
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
 - **Several agents**: Claude Code, Codex, Cursor (`cursor-agent`) and DeepSeek Harness (dsh).
 
-The UI comes in English and Simplified Chinese, following your macOS language; set `AGENT_OFFICE_LANG` to choose.
+The UI comes in English and Simplified Chinese, following your macOS language; press `l` in the window to switch (saved for the next start), or set `AGENT_OFFICE_LANG`.
 
 ## Requirements
 
@@ -92,6 +92,7 @@ The rooftop appears only when the office is at least 200 columns wide. When the 
 | `b` | Toggle the labels over heads |
 | `[` `]` (or `PageUp` `PageDown`) | Change floor |
 | `t` | Toggle always-on-top |
+| `l` | Switch between English and Chinese, saved to `~/.config/agent-office/env` |
 | `q` twice | Quit |
 
 Click a card or worker to select it; scroll the panel with the mouse wheel. After a notification, coming back to the window selects the first session waiting for you, so `o` goes straight to it.

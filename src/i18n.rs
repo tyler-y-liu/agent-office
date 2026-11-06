@@ -1,11 +1,12 @@
 //! The language the office speaks: Simplified Chinese or English.
 //!
-//! Picked once per process: `AGENT_OFFICE_LANG` (environment, else
+//! Picked at start: `AGENT_OFFICE_LANG` (environment, else
 //! `~/.config/agent-office/env`), else the macOS UI language, else the POSIX
 //! locale. Anything not Chinese gets English, which more people read.
+//! [`switch`] changes it while running and saves it for the next start.
 
 use std::cell::Cell;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -13,7 +14,15 @@ pub enum Lang {
     En,
 }
 
-static LANG: OnceLock<Lang> = OnceLock::new();
+/// 0 until picked, then [`code`] of the language.
+static LANG: AtomicU8 = AtomicU8::new(0);
+
+fn code(l: Lang) -> u8 {
+    match l {
+        Lang::Zh => 1,
+        Lang::En => 2,
+    }
+}
 
 thread_local! {
     /// A test's language, so tests of either language run side by side
@@ -30,7 +39,104 @@ pub fn lang() -> Lang {
     if cfg!(test) {
         return Lang::Zh;
     }
-    *LANG.get_or_init(detect)
+    match LANG.load(Ordering::Relaxed) {
+        1 => Lang::Zh,
+        2 => Lang::En,
+        _ => {
+            let l = detect();
+            LANG.store(code(l), Ordering::Relaxed);
+            l
+        }
+    }
+}
+
+/// Speak the other language from now on, and save it to the env file so
+/// the next start speaks it too. The switch holds even when saving fails.
+pub fn switch() -> (Lang, std::io::Result<()>) {
+    let next = match lang() {
+        Lang::Zh => Lang::En,
+        Lang::En => Lang::Zh,
+    };
+    LANG.store(code(next), Ordering::Relaxed);
+    (next, save(next))
+}
+
+/// `AGENT_OFFICE_LANG` in the environment, which wins over the env file at
+/// the next start.
+pub fn pinned_by_env() -> Option<Lang> {
+    env_lang().and_then(|v| parse(&v))
+}
+
+/// Set and not empty: an exported empty value must not hide the env file.
+fn env_lang() -> Option<String> {
+    std::env::var("AGENT_OFFICE_LANG")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+fn save(l: Lang) -> std::io::Result<()> {
+    let home = std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("HOME is not set"))?;
+    let path = std::path::PathBuf::from(home).join(crate::tasks::client::ENV_FILE);
+    // Through a symlink (a dotfiles repo, say) to the file it names, so the
+    // rename below replaces that file and not the link.
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let old = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let value = match l {
+        Lang::Zh => "zh",
+        Lang::En => "en",
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Written aside and renamed in: the file holds the summary API key, which
+    // a crash mid-write must not lose. A new file is 0600 so the key is not
+    // exposed; an existing one keeps the mode its owner gave it.
+    let tmp = path.with_extension("tmp");
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let mut f = o.open(&tmp)?;
+    if let Ok(m) = std::fs::metadata(&path) {
+        f.set_permissions(m.permissions())?;
+    }
+    std::io::Write::write_all(
+        &mut f,
+        with_var(&old, "AGENT_OFFICE_LANG", value).as_bytes(),
+    )?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// `file` with `key` set to `value`: its line rewritten where it has one,
+/// else one added, and every other line as it was.
+fn with_var(file: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let mut out: Vec<String> = file
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            let (export, rest) = match t.strip_prefix("export ") {
+                Some(r) => ("export ", r),
+                None => ("", t),
+            };
+            let ours =
+                !t.starts_with('#') && rest.split_once('=').is_some_and(|(k, _)| k.trim() == key);
+            if ours {
+                found = true;
+                format!("{export}{key}={value}")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(format!("{key}={value}"));
+    }
+    out.join("\n") + "\n"
 }
 
 pub fn is_zh() -> bool {
@@ -72,8 +178,7 @@ fn detect() -> Lang {
         .map(|h| std::path::PathBuf::from(h).join(crate::tasks::client::ENV_FILE))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
-    let chosen = std::env::var("AGENT_OFFICE_LANG")
-        .ok()
+    let chosen = env_lang()
         .or_else(|| crate::tasks::client::env_file_var(&file, "AGENT_OFFICE_LANG"))
         .and_then(|v| parse(&v));
     chosen
@@ -161,6 +266,28 @@ mod tests {
         for none in ["", "C", "C.UTF-8", "POSIX"] {
             assert_eq!(parse(none), None, "{none}");
         }
+    }
+
+    /// The language switch rewrites the env file that also holds the summary
+    /// API key: the key and comments must survive, and the next start must
+    /// read the new language, not a stale line left above it.
+    #[test]
+    fn saving_the_language_keeps_the_rest_of_the_env_file() {
+        let file = "# summary\nAGENT_OFFICE_API_KEY=sk-x\nexport AGENT_OFFICE_LANG=\"zh\"\n# AGENT_OFFICE_LANG=fr\n";
+        let out = with_var(file, "AGENT_OFFICE_LANG", "en");
+        assert_eq!(
+            out,
+            "# summary\nAGENT_OFFICE_API_KEY=sk-x\nexport AGENT_OFFICE_LANG=en\n# AGENT_OFFICE_LANG=fr\n"
+        );
+        let read = crate::tasks::client::env_file_var(&out, "AGENT_OFFICE_LANG");
+        assert_eq!(read.as_deref().and_then(parse), Some(Lang::En));
+
+        let added = with_var("AGENT_OFFICE_API_KEY=sk-x", "AGENT_OFFICE_LANG", "zh");
+        assert_eq!(added, "AGENT_OFFICE_API_KEY=sk-x\nAGENT_OFFICE_LANG=zh\n");
+        assert_eq!(
+            with_var("", "AGENT_OFFICE_LANG", "zh"),
+            "AGENT_OFFICE_LANG=zh\n"
+        );
     }
 
     /// A question is what lines a session up as waiting on you; one written

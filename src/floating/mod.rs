@@ -441,6 +441,7 @@ impl ApplicationHandler for Floating<'_> {
                     Key::Character("o") => Action::Open,
                     Key::Character("w") => Action::OpenWaiting,
                     Key::Character("n") => Action::OpenNext,
+                    Key::Character("l") => Action::SwitchLang,
                     Key::Character("p") => {
                         win.picker = win.core.plan_dispatch();
                         win.next_frame = Instant::now();
@@ -459,6 +460,9 @@ impl ApplicationHandler for Floating<'_> {
                 };
                 if win.core.act(action, &mut win.office) {
                     el.exit();
+                }
+                if action == Action::SwitchLang {
+                    win.relabel();
                 }
                 win.next_frame = Instant::now();
             }
@@ -562,7 +566,7 @@ impl Floating<'_> {
                 caps_size: None,
                 pets: vec![Pet {
                     kind: PetKind::Cat,
-                    name: crate::i18n::t("店长", "Manager").to_string(),
+                    name: cat_name().to_string(),
                 }],
             },
             on_top: false,
@@ -595,7 +599,22 @@ impl Floating<'_> {
     }
 }
 
+fn cat_name() -> &'static str {
+    crate::i18n::t("店长", "Manager")
+}
+
 impl Win {
+    /// After a language switch: words kept from before it are put in the
+    /// new language, or dropped where they come back by themselves.
+    fn relabel(&mut self) {
+        for p in &mut self.office.pets {
+            if p.kind == PetKind::Cat {
+                p.name = cat_name().to_string();
+            }
+        }
+        self.about = None;
+    }
+
     /// Draw a frame into [`Self::canvas`] and present it.
     fn redraw(&mut self, pack: &OfficeArt, theme: &'static Theme) -> Result<()> {
         let size = self.window.inner_size();
