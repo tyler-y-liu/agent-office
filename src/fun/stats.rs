@@ -37,6 +37,11 @@ pub struct Stats {
     /// Each worker's longest stuck spell today, in seconds.
     #[serde(default)]
     pub stuck_longest: BTreeMap<String, u64>,
+    /// How often each feature was used, ever, by a dotted name
+    /// (`picker.open`, `dispatch.relay.qa`): kept here, on this machine
+    /// only, to tell what is worth keeping.
+    #[serde(default)]
+    pub uses: BTreeMap<String, u32>,
 }
 
 /// The day's honours the replay hands out.
@@ -148,6 +153,7 @@ impl Watch {
             self.stats = Stats {
                 day: day.to_owned(),
                 repos: std::mem::take(&mut self.stats.repos),
+                uses: std::mem::take(&mut self.stats.uses),
                 ..Stats::default()
             };
             self.unsaved = true;
@@ -210,6 +216,12 @@ impl Watch {
             self.stats.tokens += spent;
             self.unsaved = true;
         }
+    }
+
+    /// Count one use of `what` ([`Stats::uses`]).
+    pub fn tally(&mut self, what: &str) {
+        *self.stats.uses.entry(what.to_owned()).or_default() += 1;
+        self.unsaved = true;
     }
 
     fn save(&mut self) {
@@ -304,6 +316,23 @@ mod tests {
     /// A turn counts when a working agent goes idle, to the day and to its
     /// repository's record; the agent already idle when first seen counts
     /// nothing, or every restart would pad the tally.
+    /// Feature counts are what tell a feature worth keeping from one
+    /// nobody uses: they build up across days, not reset at midnight.
+    #[test]
+    fn uses_add_up_across_days() {
+        let (scene, _) = scene_with(&[]);
+        let views = TaskViews::default();
+        let now = SystemTime::now();
+        let mut w = watch();
+        w.observe_on("2026-11-05", &scene, &views, now);
+        w.tally("picker.open.relay");
+        w.tally("picker.open.relay");
+        assert!(w.unsaved());
+        w.observe_on("2026-11-06", &scene, &views, now);
+        assert_eq!(w.stats.uses.get("picker.open.relay"), Some(&2));
+        assert_eq!(w.stats.turns, 0, "the day's tally still starts over");
+    }
+
     #[test]
     fn a_finished_turn_counts_for_the_day_and_the_repository() {
         let (mut scene, ids) = scene_with(&[("a", "/src/shop"), ("b", "/src/blog")]);

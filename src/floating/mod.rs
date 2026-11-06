@@ -393,7 +393,9 @@ impl ApplicationHandler for Floating<'_> {
             } => {
                 // A click is not a pick: the picker goes, so a digit typed
                 // later does not dispatch into whatever got selected.
-                win.picker = None;
+                if win.picker.take().is_some() {
+                    win.core.watch.tally("picker.cancel");
+                }
                 win.click();
                 win.next_frame = Instant::now();
             }
@@ -402,16 +404,25 @@ impl ApplicationHandler for Floating<'_> {
                 win.next_frame = Instant::now();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // Open, the picker takes the next key whatever it is: a
-                // digit picks, anything else closes it.
+                // Open, the picker takes the next key: a digit picks, Esc
+                // and `p` only close it, and any other key closes it and
+                // still does its own thing, so an `o` meant for the
+                // selection is not lost.
                 if let Some(plan) = win.picker.take() {
-                    if let Key::Character(c) = event.logical_key.as_ref()
-                        && let Some(role) = picked_role(c)
-                    {
-                        win.core.dispatch(&plan, role);
-                    }
                     win.next_frame = Instant::now();
-                    return;
+                    match event.logical_key.as_ref() {
+                        Key::Character(c) if picked_role(c).is_some() => {
+                            if let Some(role) = picked_role(c) {
+                                win.core.dispatch(&plan, role);
+                            }
+                            return;
+                        }
+                        Key::Named(NamedKey::Escape) | Key::Character("p") => {
+                            win.core.watch.tally("picker.cancel");
+                            return;
+                        }
+                        _ => win.core.watch.tally("picker.cancel"),
+                    }
                 }
                 let action = match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => Action::Back,

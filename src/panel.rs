@@ -199,7 +199,17 @@ impl Group {
 /// groups are listed, and the working and idle after. A group with no one in
 /// it is left out; with no one needing you it says so first, so a glance
 /// answers "do I have anything to do" without reading the cards.
-fn header_spans(roots: &[Group], waiting: usize) -> Vec<Span<'static>> {
+/// Within `room` cells: past it, the groups that need nothing from you go
+/// first, whole, rather than the last count being cut mid-word ("3 Worki").
+fn header_spans(roots: &[Group], waiting: usize, room: usize) -> Vec<Span<'static>> {
+    let full = header_spans_of(roots, waiting, true);
+    if full.iter().map(|s| crate::text::cells(&s.content) as usize).sum::<usize>() <= room {
+        return full;
+    }
+    header_spans_of(roots, waiting, false)
+}
+
+fn header_spans_of(roots: &[Group], waiting: usize, all: bool) -> Vec<Span<'static>> {
     let count = |g: Group| match g {
         // The footer's and the Dock's count, a subagent's prompt included.
         Group::Waiting => waiting,
@@ -214,7 +224,8 @@ fn header_spans(roots: &[Group], waiting: usize) -> Vec<Span<'static>> {
             bold(TEXT),
         ));
     }
-    for g in needs.into_iter().chain([Group::Working, Group::Idle]) {
+    let rest: &[Group] = if all { &[Group::Working, Group::Idle] } else { &[] };
+    for g in needs.into_iter().chain(rest.iter().copied()) {
         let n = count(g);
         if n == 0 {
             continue;
@@ -397,10 +408,12 @@ fn status(
         }
         // Opened or not, the question stays unanswered until you reply.
         ActivityState::Idle if waits_on_you(slot, view, false) == Some(Wait::Reply) => {
+            // Short on the chip: "Waiting for your reply" left the card's
+            // name two letters ("mobil…").
             let what = if view.is_some_and(|v| v.needs_task) {
-                needs_task()
+                crate::i18n::t("等你写任务", "needs task")
             } else {
-                reply_wait()
+                crate::i18n::t("等你回复", "your reply")
             };
             (format!("? {what} {}", ago(slot.state_started_at)), WAIT)
         }
@@ -907,7 +920,9 @@ pub fn render(
         .filter_map(|(id, _)| scene.agents.get(id))
         .map(|s| group_of(s))
         .collect();
-    let title = Line::from(header_spans(&roots, waiting));
+    // The scroll mark takes the title row's right end when cards overflow.
+    let room = usize::from(area.width).saturating_sub(1 + 4);
+    let title = Line::from(header_spans(&roots, waiting, room));
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(Color::Rgb(0x3b, 0x40, 0x4c)))
@@ -1134,15 +1149,18 @@ mod tests {
             Group::Done,
             Group::Idle,
         ];
-        let spans = header_spans(&roots, 1);
+        let spans = header_spans(&roots, 1, 80);
         assert_eq!(
             text(&spans).trim(),
             "1 等你 · 1 卡住 · 2 待看 · 1 干活 · 1 闲着"
         );
         let stuck = spans.iter().find(|s| s.content.contains("卡住")).unwrap();
         assert_eq!(stuck.style.fg, Some(STUCK));
-        let calm = header_spans(&[Group::Working, Group::Working], 0);
+        let calm = header_spans(&[Group::Working, Group::Working], 0, 80);
         assert_eq!(text(&calm).trim(), "暂时不用你 · 2 干活");
+        // A narrow panel keeps what needs you whole and drops the rest.
+        let narrow = header_spans(&roots, 1, 24);
+        assert_eq!(text(&narrow).trim(), "1 等你 · 1 卡住 · 2 待看");
     }
 
     fn start(

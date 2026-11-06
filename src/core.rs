@@ -636,6 +636,7 @@ impl Core {
                 .max_by_key(|s| s.state_started_at),
         };
         let Some(slot) = slot else {
+            self.watch.tally("dispatch.blocked.empty");
             self.note(
                 crate::i18n::t(
                     "办公室里还没人：在终端用 agent-office dispatch 派活",
@@ -646,6 +647,7 @@ impl Core {
             return None;
         };
         if slot.unknown_cwd {
+            self.watch.tally("dispatch.blocked.no_dir");
             self.note(
                 crate::i18n::t(
                     "不知道它在哪个目录，换一个小人",
@@ -691,6 +693,11 @@ impl Core {
         } else {
             pixtuoid_core::state::project_root(&slot.cwd).to_path_buf()
         };
+        self.watch.tally(if relay.is_some() {
+            "picker.open.relay"
+        } else {
+            "picker.open.fresh"
+        });
         Some(DispatchPlan { dir, relay })
     }
 
@@ -698,7 +705,13 @@ impl Core {
     /// session for you to give one.
     pub fn dispatch(&mut self, plan: &DispatchPlan, role: crate::roles::Role) {
         let task = plan.relay.as_ref().map_or("", |r| r.task.as_str());
-        match crate::roles::dispatch(role, &plan.dir, task, false) {
+        let done = crate::roles::dispatch(role, &plan.dir, task, false);
+        let kind = if plan.relay.is_some() { "relay" } else { "fresh" };
+        self.watch.tally(&match &done {
+            Ok(_) => format!("dispatch.{kind}.{}", role.post().id),
+            Err(_) => "dispatch.failed".to_owned(),
+        });
+        match done {
             Ok(_) if plan.relay.is_some() => self.note(
                 &crate::tr!(
                     "已在 Claude 开好「{}」接力会话，看一眼就发送",
