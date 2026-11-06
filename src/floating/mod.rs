@@ -309,27 +309,32 @@ fn office_px(w: u32, h: u32, g: Grid) -> (u32, u32) {
     )
 }
 
-/// Units tall the office may run at the scale it is shown at before a new
-/// scale is taken. The scale steps by the art's density (4, 8, 12...), so a
-/// step halves or doubles the office: without this band a window an edge
-/// away from a step flipped between two offices.
-const KEEP_SCALE_UNITS: std::ops::RangeInclusive<u16> = 110..=300;
+/// How far, as a share of the height, a window may sit past a scale step
+/// and keep the scale shown. The scale steps by the art's density (4, 8,
+/// 12...), so a step halves or doubles the office: without this band a
+/// window an edge away from a step flipped between two offices. Kept to the
+/// step's own neighbourhood, since a scale held further on draws the art
+/// at half its size in an office of empty rooms.
+const KEEP_SCALE_SHARE: f64 = 0.1;
 
 /// The fit of a `w`×`h` office, `shown` the one on screen: its scale while
-/// it still lays out within [`KEEP_SCALE_UNITS`], else this size's own.
+/// the height is within [`KEEP_SCALE_SHARE`] of one that takes it, else this
+/// size's own.
 fn fit_for(pack: &OfficeArt, w: u32, h: u32, shown: Option<PixelFit>) -> PixelFit {
     let px = Size {
         w: u16::try_from(w).unwrap_or(u16::MAX),
         h: u16::try_from(h).unwrap_or(u16::MAX),
     };
+    let density = pack.max_density_variant();
+    let own = |h: f64| PixelFit::at_least_density(office_scale(h as u32), density, px);
     let min = pixtuoid_scene::layout::min_layout_size();
+    let near =
+        [1.0 - KEEP_SCALE_SHARE, 1.0 + KEEP_SCALE_SHARE].map(|k| own(f64::from(h) * k).scale());
     let held = shown.map(|f| f.over(px)).filter(|f| {
         let l = f.logical();
-        l.w >= min.w && l.h >= min.h && KEEP_SCALE_UNITS.contains(&l.h)
+        l.w >= min.w && l.h >= min.h && near.contains(&f.scale())
     });
-    held.unwrap_or_else(|| {
-        PixelFit::at_least_density(office_scale(h), pack.max_density_variant(), px)
-    })
+    held.unwrap_or_else(|| own(f64::from(h)))
 }
 
 impl ApplicationHandler for Floating<'_> {
@@ -375,6 +380,10 @@ impl ApplicationHandler for Floating<'_> {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let g = grid(&mut win.faces, scale_factor, PANEL_PT);
                 set_min_size(&win.window, &self.pack, g);
+                // A new display scales the window's pixels by its ratio to the
+                // old, a whole step or more: the scale shown there would draw
+                // the art at half (or twice) its size here.
+                win.hold.shown = None;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 win.cursor = position;
@@ -2671,6 +2680,17 @@ mod tests {
         assert_eq!(
             scale(fit_for(&pack, 1300, 2400, Some(small))),
             scale(fit_for(&pack, 1300, 2400, None))
+        );
+        // A quarter past the next step up is no nudge: holding there drew
+        // the art half size in an office a third bigger than the window's own.
+        let next = (step..3000)
+            .find(|&h| scale(fit_for(&pack, 1300, h, None)) > scale(big))
+            .expect("a step above the big scale");
+        let past = next + next / 4;
+        assert_eq!(
+            scale(fit_for(&pack, 1300, past, Some(big))),
+            scale(fit_for(&pack, 1300, past, None)),
+            "{past} tall"
         );
         assert_eq!(
             scale(fit_for(&pack, 1300, 700, Some(big))),
