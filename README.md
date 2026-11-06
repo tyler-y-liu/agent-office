@@ -103,10 +103,11 @@ Click a card or worker to select it; scroll the panel with the mouse wheel. Afte
 
 `agent-office roles install` installs nine roles as Claude Code agents (`~/.claude/agents/office-*.md`): product, UX, architect, frontend, backend, QA, devops, reviewer and a PM that splits work among the others. `agent-office roles install --agent dsh` installs the same roles as DeepSeek Harness Agent Presets, which you can also choose directly in DSH's preset picker. Run `agent-office connect dsh` as well, then restart DSH. A session started in a role wears its chip on its badge and card; a PM's todo list shows as its plan on its card and on the meeting room's whiteboard. In DSH, the PM delegates with `subagent` and `agent_preset`.
 
-Press `p` to dispatch one. A digit picks the role; the host follows the worker you started from (or the latest one when none is selected). In Claude, the desktop app opens a new session with the prompt filled in, for you to send:
-
+Press `p` to dispatch one. A digit picks the role; the host follows the worker you started from (or the latest one when none is selected), and `h` switches it between Claude Code and DeepSeek Harness — `AGENT_OFFICE_DISPATCH_HOST` sets where it opens. In Claude, the desktop app opens a new session with the prompt filled in, for you to send:
 - On a finished or stuck card, it is a relay: the posts to hand on to come first, marked, and the task carries what the session was asked, what it came to and where its changes are.
 - Anywhere else it opens a fresh session in that worker's repository (with none selected, the latest one's) and asks you for its task; until you give one it waits in the waiting area.
+
+The panel keeps a row of posts at its foot: one click dispatches to that post, and `p` still opens the picker when you want another host or a relay’s suggestions.
 
 DSH dispatch goes through its running Host: a relay is created and submitted directly; a fresh dispatch creates a blank role session for you to open from DSH's session list and give a task. It does not focus the DSH window or support `--terminal`. Only an unclaimed request is retracted on timeout. Once a Host accepts it, the client keeps waiting for the eventual result and session id. If the Host exits mid-dispatch the outcome is unknown; check DSH's session list before retrying. A request already expired before a Host starts work is refused instead.
 
@@ -121,6 +122,7 @@ All settings are environment variables. The three summary variables and `AGENT_O
 | `AGENT_OFFICE_API_BASE` / `_API_KEY` / `_MODEL` | Summary endpoint. Summaries are on only when all three are set |
 | `AGENT_OFFICE_SUMMARY=off` | Send nothing out; the panel shows raw prompts |
 | `AGENT_OFFICE_LANG` | UI and summary language: `en` or `zh`. Default: the macOS UI language, else `LANG`; anything but Chinese gets English |
+| `AGENT_OFFICE_DISPATCH_HOST` | Where `p` dispatches by default: `claude`, `dsh`, or `follow` (default: the picked worker's host). A host that is not set up falls back to `follow` |
 | `AGENT_OFFICE_NOTIFY=off` | No system notifications or Dock bounce; the badge still shows |
 | `AGENT_OFFICE_SOUND=on` | Sound effects (off by default): a ding when a session starts waiting for approval, a pop with confetti |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | Stuck thresholds: failures in a row (default 3), quiet minutes while working (default 5), quiet minutes during long calls (default 20). `doctor` shows the current values |

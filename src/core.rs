@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use pixtuoid_core::{AgentId, SceneState};
+use pixtuoid_core::{AgentId, AgentSlot, SceneState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -51,6 +51,40 @@ pub struct DispatchPlan {
     pub dir: std::path::PathBuf,
     pub backend: crate::roles::Backend,
     pub relay: Option<Relay>,
+    /// Whether the picker could switch to the other host. Read once, when
+    /// the plan is made: the paint path draws every beat and the answer costs
+    /// a walk of the role files.
+    pub switchable: bool,
+}
+
+/// How long the role bar keeps its host: long enough that drawing it costs
+/// nothing, short enough that a session moving to the front shows up.
+const HOST_CACHE_FOR: Duration = Duration::from_secs(2);
+
+/// The session a dispatch goes from: the selected one, else the one that
+/// started its state last — the worker whose repository and work it carries.
+fn dispatch_worker<'a>(
+    scene: &'a SceneState,
+    selected: Option<AgentId>,
+) -> Option<&'a AgentSlot> {
+    let selected = selected.filter(|id| scene.agents.contains_key(id));
+    match selected {
+        Some(id) => scene.agents.get(&id),
+        None => scene
+            .agents
+            .values()
+            .filter(|s| !s.unknown_cwd && s.exiting_at.is_none())
+            .max_by_key(|s| s.state_started_at),
+    }
+}
+
+/// The host a session runs in, which a dispatch from it follows by default.
+fn host_of(slot: &AgentSlot) -> crate::roles::Backend {
+    if &*slot.source == crate::dsh::SOURCE {
+        crate::roles::Backend::Dsh
+    } else {
+        crate::roles::Backend::Claude
+    }
 }
 
 /// A dispatch that picks up a done or stuck session's work.
@@ -123,6 +157,9 @@ pub struct Core {
     jumps: Jumps,
     /// DSH dispatch waits for a Host without freezing the office's event loop.
     dispatches: Dispatches,
+    /// When the role bar's host was last worked out, and what it was: the
+    /// answer walks the role files, and the bar is drawn every beat.
+    host_at: Option<(Instant, Option<crate::roles::Backend>)>,
     /// When the empty office last looked again at what is set up.
     setup_checked: Option<Instant>,
 }
@@ -442,6 +479,7 @@ impl Core {
             banners: notify::banners_on(),
             jumps: Jumps::default(),
             dispatches: Dispatches::default(),
+            host_at: None,
         }
     }
 
@@ -759,15 +797,7 @@ impl Core {
         let now = SystemTime::now();
         // A selection whose session just left is no selection.
         let selected = self.ui.selected.filter(|id| scene.agents.contains_key(id));
-        let slot = match selected {
-            Some(id) => scene.agents.get(&id),
-            None => scene
-                .agents
-                .values()
-                .filter(|s| !s.unknown_cwd && s.exiting_at.is_none())
-                .max_by_key(|s| s.state_started_at),
-        };
-        let Some(slot) = slot else {
+        let Some(slot) = dispatch_worker(&scene, selected) else {
             self.watch.tally("dispatch.blocked.empty");
             self.note(
                 crate::i18n::t(
@@ -830,12 +860,57 @@ impl Core {
         } else {
             "picker.open.fresh"
         });
-        let backend = if &*slot.source == crate::dsh::SOURCE {
-            crate::roles::Backend::Dsh
-        } else {
-            crate::roles::Backend::Claude
-        };
-        Some(DispatchPlan { dir, backend, relay })
+        // The worker's own host unless AGENT_OFFICE_DISPATCH_HOST names one,
+        // and `h` in the picker can still switch it before a role is picked.
+        let following = host_of(slot);
+        let backend = crate::roles::dispatch_host(following);
+        let switchable = crate::roles::host_ready(backend.other());
+        Some(DispatchPlan {
+            dir,
+            backend,
+            relay,
+            switchable,
+        })
+    }
+
+    /// The host the role bar would dispatch into, when one could take it.
+    /// `None` hides the bar: a bar that only ever answers "not set up" would
+    /// be furniture. Cheap enough to ask each frame, unlike a whole plan —
+    /// it carries no relay text and touches no repository.
+    pub fn dispatch_target(&mut self) -> Option<crate::roles::Backend> {
+        if let Some((at, host)) = self.host_at
+            && at.elapsed() < HOST_CACHE_FOR
+        {
+            return host;
+        }
+        let host = self
+            .worker_host()
+            .map(crate::roles::dispatch_host)
+            .filter(|host| crate::roles::host_ready(*host));
+        self.host_at = Some((Instant::now(), host));
+        host
+    }
+
+    /// The host the dispatch's worker runs in, which the bar follows: the
+    /// selected one, else the one that moved last.
+    fn worker_host(&self) -> Option<crate::roles::Backend> {
+        let scene = self.scene();
+        dispatch_worker(&scene, self.ui.selected).map(host_of)
+    }
+
+    /// Switch the picker's host to the other one, when that host could take
+    /// the dispatch; otherwise say what it is missing, since `h` is the only
+    /// way to learn a host is not set up without losing the pick.
+    pub fn toggle_dispatch_host(&mut self, plan: &mut DispatchPlan) {
+        let other = plan.backend.other();
+        match crate::roles::host_missing(other) {
+            None => {
+                plan.backend = other;
+                plan.switchable = crate::roles::host_ready(other.other());
+                self.watch.tally("picker.host.switched");
+            }
+            Some(why) => self.note(&why, Tone::Failed),
+        }
     }
 
     /// Send `plan` to `role`: a relay with its task written, else a fresh

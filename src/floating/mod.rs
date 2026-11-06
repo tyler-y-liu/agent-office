@@ -232,6 +232,8 @@ struct Layout {
     board_hits: Vec<Area>,
     /// The cat sitting with a stuck worker, where it is drawn.
     cat_hit: Option<Area>,
+    /// Each chip of the panel's role bar, in window pixels.
+    role_hits: Vec<(Area, crate::roles::Role)>,
     /// Window pixels to a logical unit, which the scene's hits are in.
     unit: i64,
 }
@@ -434,6 +436,15 @@ impl ApplicationHandler for Floating<'_> {
                         }
                         Key::Named(NamedKey::Escape) | Key::Character("p") => {
                             win.core.watch.tally("picker.cancel");
+                            return;
+                        }
+                        // The host is part of what a pick sends, so it has to
+                        // be changeable before the digit: a worker's own host
+                        // is only where the last session happened to run.
+                        Key::Character("h") => {
+                            let mut plan = plan;
+                            win.core.toggle_dispatch_host(&mut plan);
+                            win.picker = Some(plan);
                             return;
                         }
                         _ => win.core.watch.tally("picker.cancel"),
@@ -843,6 +854,10 @@ impl Win {
         let rows = u16::try_from(oh / g.row_h).unwrap_or(0);
         let panel_area = Rect::new(0, 0, cols, rows);
         let mut cells = Buffer::empty(panel_area);
+        // The bar names the host a click would dispatch into, so it asks the
+        // same question a click will.
+        let bar_host = self.core.dispatch_target();
+        self.core.ui.dispatch_host = bar_host.map(crate::roles::Backend::label);
         let drawn = panel::render(
             &mut cells,
             panel_area,
@@ -853,6 +868,21 @@ impl Win {
         );
         canvas.fill(i64::from(panel_x), 0, w.get() - panel_x, h.get(), PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &cells, (panel_x, 0), g);
+        let role_hits = drawn
+            .roles
+            .iter()
+            .map(|&(row, col, w, role)| {
+                (
+                    Area {
+                        x: i64::from(panel_x) + i64::from(col) * i64::from(g.cell_w),
+                        y: i64::from(row) * i64::from(g.row_h),
+                        w: u32::from(w) * g.cell_w,
+                        h: g.row_h,
+                    },
+                    role,
+                )
+            })
+            .collect();
         paint_done_bars(&mut canvas, &drawn.outlines, panel_x, g, sf);
         let at = Instant::now();
         self.portraits.retain(|id, (_, made)| {
@@ -910,6 +940,7 @@ impl Win {
             sign_hits,
             board_hits,
             cat_hit,
+            role_hits,
             unit: i64::from(fit.scale().get()),
         });
         // The cards may have moved under a still pointer (the wheel, a
@@ -1170,6 +1201,17 @@ impl Win {
                     h: 1,
                 })
             });
+        // The role bar dispatches straight to a post: it is the same plan `p`
+        // would make, without the digit step.
+        if x >= last.panel_x
+            && let Some((_, role)) = last.role_hits.iter().find(|(r, _)| r.meets(&point))
+        {
+            let role = *role;
+            if let Some(plan) = self.core.plan_dispatch() {
+                self.core.dispatch(&plan, role);
+            }
+            return;
+        }
         let id = if let Some((_, id)) = on_tag {
             Some(*id)
         } else if x >= last.panel_x {
@@ -2347,6 +2389,54 @@ fn picker_rows(suggested: &[Role]) -> Vec<(char, Role)> {
     first.chain(rest).collect()
 }
 
+/// The picker's two lines above the roles: where it dispatches to, and what
+/// a pick will do there. The host is named, because the same keys send to
+/// either CLI and the guard names differ.
+fn picker_heading(plan: &crate::core::DispatchPlan, switchable: bool) -> (String, String) {
+    let repo = plan.repo();
+    let host = plan.backend.label();
+    let other = plan.backend.other().label();
+    // A host that is not set up cannot be switched to, so the hint would
+    // promise a key that only answers with an error.
+    let cancel = if switchable {
+        crate::tr!(
+            "（h 换成 {other}，其他键取消）",
+            "(h switches to {other}; any other key cancels)"
+        )
+    } else {
+        crate::tr!("（其他键取消）", "(any other key cancels)")
+    };
+    let head = match &plan.relay {
+        Some(r) => crate::tr!(
+            "接着「{}」派给（{host}）：",
+            "Hand on from {} to ({host}):",
+            r.name
+        ),
+        None => crate::tr!("派活到 {repo}（{host}）：", "Dispatch into {repo} ({host}):"),
+    };
+    let sub = match &plan.relay {
+        Some(_) => crate::tr!(
+            "派到 {repo}，任务带上它的活和结论{cancel}",
+            "into {repo}, carrying its task and result{cancel}"
+        ),
+        None => {
+            let body = if plan.backend == crate::roles::Backend::Dsh {
+                crate::i18n::t(
+                    "开一个新 DSH 会话，在会话列表打开后写任务",
+                    "a new DSH session; open it from the session list and write its task",
+                )
+            } else {
+                crate::i18n::t(
+                    "开一个新会话，任务在 Claude 里写",
+                    "a new session; write its task in Claude",
+                )
+            };
+            format!("{body}{cancel}")
+        }
+    };
+    (head, sub)
+}
+
 /// The role picker, centred over the office: where it dispatches to, then
 /// each role's key, its chip and its post. On a relay, the posts to hand
 /// on to lead, marked, and the head names whose work goes with it.
@@ -2360,31 +2450,7 @@ fn paint_picker(
     let px = pt_px(ABOUT_PT, scale_factor);
     let pad = 2 * tag_pad(scale_factor);
     let cell = faces.cell_w(px).max(1);
-    let repo = plan.repo();
-    let (head, sub) = match &plan.relay {
-        Some(r) => (
-            crate::tr!("接着「{}」派给：", "Hand on from {} to:", r.name),
-            crate::tr!(
-                "派到 {repo}，任务带上它的活和结论（其他键取消）",
-                "into {repo}, carrying its task and result (any other key cancels)"
-            ),
-        ),
-        None => (
-            crate::tr!("派活到 {repo}：", "Dispatch into {repo}:"),
-            if plan.backend == crate::roles::Backend::Dsh {
-                crate::i18n::t(
-                    "开一个新 DSH 会话，在会话列表打开后写任务（其他键取消）",
-                    "a new DSH session; open it from the session list and write its task (any other key cancels)",
-                )
-            } else {
-                crate::i18n::t(
-                    "开一个新会话，任务在 Claude 里写（其他键取消）",
-                    "a new session; write its task in Claude (any other key cancels)",
-                )
-            }
-            .to_owned(),
-        ),
-    };
+    let (head, sub) = picker_heading(plan, plan.switchable);
     let suggested = plan.relay.as_ref().map_or(&[][..], |r| &r.suggested[..]);
     let tag = crate::i18n::t(" 建议", " suggested");
     let rows: Vec<(char, Role, String, bool)> = picker_rows(suggested)
@@ -3595,5 +3661,47 @@ mod tests {
         for (key, role) in &rows {
             assert_eq!(picked_role(&key.to_string()), Some(*role));
         }
+    }
+
+    fn plan_into(backend: crate::roles::Backend) -> crate::core::DispatchPlan {
+        crate::core::DispatchPlan {
+            dir: std::path::PathBuf::from("/tmp/agent-office"),
+            backend,
+            relay: None,
+            switchable: false,
+        }
+    }
+
+    /// The same keys send to either CLI, so the picker has to say which one
+    /// it is about to open: a pick made while it reads "Claude Code" must
+    /// never land in DSH.
+    #[test]
+    fn the_picker_names_the_host_a_pick_would_open() {
+        use crate::i18n::{with, Lang};
+        with(Lang::Zh, || {
+            let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Dsh), false);
+            assert!(head.contains("agent-office"), "{head}");
+            assert!(head.contains("DeepSeek Harness"), "{head}");
+            assert!(sub.contains("DSH"), "{sub}");
+            let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Claude), false);
+            assert!(head.contains("Claude Code"), "{head}");
+            assert!(sub.contains("Claude"), "{sub}");
+        });
+    }
+
+    /// `h` is only worth printing when the other host can take the pick:
+    /// a hint that leads to an error note is worse than no hint.
+    #[test]
+    fn the_switch_hint_appears_only_when_the_other_host_can_take_it() {
+        use crate::i18n::{with, Lang};
+        with(Lang::Zh, || {
+            let plan = plan_into(crate::roles::Backend::Claude);
+            let (_, with_switch) = picker_heading(&plan, true);
+            assert!(with_switch.contains('h'), "{with_switch}");
+            assert!(with_switch.contains("DeepSeek Harness"), "{with_switch}");
+            let (_, without) = picker_heading(&plan, false);
+            assert!(!without.contains('h'), "{without}");
+            assert!(without.contains("取消"), "{without}");
+        });
     }
 }

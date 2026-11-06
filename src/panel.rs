@@ -67,6 +67,9 @@ pub struct PanelState {
     pub hooks: bool,
     /// The office's roles are installed as agents, as of the start.
     pub roles: bool,
+    /// The host the role bar dispatches into, when that host could take a
+    /// dispatch; `None` leaves the bar out.
+    pub dispatch_host: Option<&'static str>,
 }
 
 impl PanelState {
@@ -777,6 +780,9 @@ pub struct Drawn {
     /// The rows (first, last) of each card marked with a bar: done, waiting
     /// for you to read it.
     pub outlines: Vec<(u16, u16)>,
+    /// The role bar's chips: row, first cell, cells across, and the post a
+    /// click on it dispatches.
+    pub roles: Vec<(u16, u16, u16, crate::roles::Role)>,
 }
 
 /// `c` sunk `t` of the way into the panel's background.
@@ -1248,7 +1254,16 @@ pub fn render(
         }
         y += c.lines.len();
     }
-    let h = usize::from(inner.height);
+    // The role bar keeps the bottom rows, so cards scroll in the rest: a
+    // bar that came and went with the list would move under the pointer.
+    let labels = state
+        .dispatch_host
+        .filter(|_| inner.height > 6)
+        .and_then(|_| bar_labels(inner.width));
+    let bar_rows = labels
+        .as_ref()
+        .map_or(0, |rows| u16::try_from(rows.len() + 1).unwrap_or(u16::MAX));
+    let h = usize::from(inner.height).saturating_sub(usize::from(bar_rows));
     // A list that overflows may give its last row to the count of cards
     // below, so a card is revealed clear of it.
     let reveal_h = if y > h { h.saturating_sub(1) } else { h };
@@ -1350,7 +1365,78 @@ pub fn render(
         let x = inner.x + inner.width.saturating_sub(w);
         buf.set_string(x, area.y, more, Style::default().fg(TEXT).bg(SELECTED_BG));
     }
+    if let (Some(host), Some(labels)) = (state.dispatch_host, &labels) {
+        let top = inner.y + inner.height.saturating_sub(bar_rows);
+        drawn.roles = role_bar(inner.x, top, inner.width, host, labels, buf);
+    }
     drawn
+}
+
+/// Cells `text` takes in the panel: a CJK glyph is two wide here, unlike in
+/// the office's badge font where every glyph is one art cell.
+fn bar_cells(text: &str) -> u16 {
+    text.chars()
+        .map(|c| u16::try_from(unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)).unwrap_or(0))
+        .sum()
+}
+
+/// The roster's posts packed into rows that fit `width`, full names only: a
+/// glyph alone is not something to click without the picker's help. `None`
+/// when even two rows cannot hold them — no bar beats a cut-off one.
+fn bar_labels(width: u16) -> Option<Vec<Vec<(crate::roles::Role, &'static str)>>> {
+    let names: Vec<(crate::roles::Role, &'static str)> = crate::roles::ROSTER
+        .iter()
+        .map(|p| (p.role, p.role.name()))
+        .collect();
+    let span = |row: &[(crate::roles::Role, &'static str)]| {
+        row.iter()
+            .map(|(_, text)| bar_cells(text) + 1)
+            .sum::<u16>()
+    };
+    // Nine posts split 8/1 would read as one post that lost its neighbours,
+    // so the split is the one that leaves the fuller row shortest.
+    let mut best: Option<(u16, usize)> = None;
+    for k in 1..names.len() {
+        let widest = span(&names[..k]).max(span(&names[k..]));
+        if widest <= width && best.is_none_or(|(w, _)| widest < w) {
+            best = Some((widest, k));
+        }
+    }
+    let (_, k) = best?;
+    Some(vec![names[..k].to_vec(), names[k..].to_vec()])
+}
+
+/// Draw the role bar: the host a click dispatches into, then one chip per
+/// post. Returns each chip's row, first cell, cells across and post, so a
+/// click can be matched to it.
+fn role_bar(
+    x: u16,
+    y: u16,
+    width: u16,
+    host: &str,
+    labels: &[Vec<(crate::roles::Role, &'static str)>],
+    buf: &mut Buffer,
+) -> Vec<(u16, u16, u16, crate::roles::Role)> {
+    let head = crate::tr!("派活到 {host}：", "dispatch to {host}:");
+    buf.set_line(
+        x,
+        y,
+        &Line::from(Span::styled(head, Style::default().fg(DIM))),
+        width,
+    );
+    let mut hits = Vec::new();
+    for (i, row) in labels.iter().enumerate() {
+        let row_y = y + 1 + u16::try_from(i).unwrap_or(0);
+        let mut col = 0u16;
+        for &(role, text) in row {
+            let w = bar_cells(text);
+            let style = Style::default().fg(rgb(role.post().ink)).bg(rgb(crate::roles::CHIP_BG));
+            buf.set_string(x + col, row_y, text, style);
+            hits.push((row_y, x + col, w, role));
+            col += w + 1;
+        }
+    }
+    hits
 }
 
 /// `line` with its dim text lifted to read on a waiting card's ground.
@@ -2294,5 +2380,77 @@ mod tests {
     fn wrap_breaks_cjk_by_cells() {
         let lines = wrap("一二三四五六七", 6);
         assert_eq!(lines, vec!["一二三", "四五六", "七"]);
+    }
+
+    /// The bar is the one place a post is chosen without reading a menu, so
+    /// every chip has to be there in the roster's order, hit-testable, and
+    /// the row above has to name the host the click will open — the same
+    /// keys send to either CLI.
+    #[test]
+    fn the_role_bar_names_every_post_and_says_where_it_goes() {
+        let labels = bar_labels(46).expect("nine posts fit a 46-cell panel");
+        assert_eq!(labels.len(), 2, "four and five to a row, not eight and one");
+        assert!(labels[0].len().min(labels[1].len()) > 1, "no row of one");
+        let area = Rect::new(0, 0, 46, 3);
+        let mut buf = Buffer::empty(area);
+        let hits = role_bar(0, 0, area.width, "DeepSeek Harness", &labels, &mut buf);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("DeepSeek Harness"), "{text}");
+        let roster: Vec<_> = crate::roles::ROSTER.iter().map(|p| p.role).collect();
+        assert_eq!(hits.iter().map(|(_, _, _, r)| *r).collect::<Vec<_>>(), roster);
+        for &(row, col, w, role) in &hits {
+            assert!(row >= 1, "the host line keeps the first row");
+            // A wide glyph's second cell holds a space.
+            let drawn: String = (col..col + w)
+                .map(|i| buf[(i, row)].symbol())
+                .filter(|s| *s != " ")
+                .collect();
+            assert_eq!(drawn, role.name(), "the chip draws its own post");
+        }
+        for pair in hits.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                a.0 < b.0 || a.1 + a.2 <= b.1,
+                "chips do not overlap: {a:?} {b:?}"
+            );
+        }
+    }
+
+    /// A panel too narrow to hold the roster in two rows keeps the bar out:
+    /// half a roster you can still click is worse than the picker.
+    #[test]
+    fn a_panel_too_narrow_for_the_roster_has_no_bar() {
+        assert!(bar_labels(46).is_some());
+        assert!(bar_labels(18).is_none());
+    }
+
+    /// The bar keeps the panel's bottom rows: a bar that pushed cards under
+    /// itself would hide the session you dispatched from, and one that came
+    /// and went with the list would move under the pointer.
+    #[test]
+    fn the_role_bar_keeps_its_rows_and_cards_stay_above_them() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        for i in 0..8 {
+            start(&mut scene, &mut r, &format!("b{i}"), None, t0 + Duration::from_secs(i));
+        }
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 46, 16);
+        let mut state = PanelState::default();
+        let mut buf = Buffer::empty(area);
+        let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
+        assert!(drawn.roles.is_empty(), "no host to dispatch to, no bar");
+
+        state.dispatch_host = Some("DeepSeek Harness");
+        let mut buf = Buffer::empty(area);
+        let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
+        assert_eq!(drawn.roles.len(), crate::roles::ROSTER.len());
+        let bar_top = drawn.roles.iter().map(|(y, _, _, _)| *y).min().unwrap();
+        let bar_bottom = drawn.roles.iter().map(|(y, _, _, _)| *y).max().unwrap();
+        assert_eq!(bar_top, area.height - 2, "the host line sits right above");
+        assert_eq!(bar_bottom, area.height - 1, "and the chip rows end the panel");
+        let card_rows = drawn.rows.iter().map(|(y, _)| *y).max().unwrap();
+        assert!(card_rows < bar_top, "cards stop above the bar's host line");
     }
 }

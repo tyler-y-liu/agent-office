@@ -35,6 +35,31 @@ impl Backend {
             _ => None,
         }
     }
+
+    /// The other host: what a toggle in the picker offers.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Claude => Self::Dsh,
+            Self::Dsh => Self::Claude,
+        }
+    }
+
+    /// Its name as the picker and notes say it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Dsh => "DeepSeek Harness",
+        }
+    }
+}
+
+/// `AGENT_OFFICE_DISPATCH_HOST` as a host. `follow` (and anything unknown)
+/// means "whichever host the picked worker came from", which is the default.
+fn parse_host(value: &str) -> Option<Backend> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "follow" | "auto" | "" => None,
+        other => Backend::of_id(other),
+    }
 }
 
 pub struct Post {
@@ -767,18 +792,7 @@ pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String>
                 "DSH dispatch creates a session through a running Host; omit --terminal",
             ).into());
         }
-        if !crate::dsh::installed() {
-            return Some(crate::i18n::t(
-                "DSH 事件插件还没接好：先运行 agent-office connect dsh，再重启 DSH",
-                "DSH events are not connected: run agent-office connect dsh and restart DSH",
-            ).into());
-        }
-        return (!crate::dsh_roles::installed()).then(|| {
-            crate::i18n::t(
-                "DSH 角色还没装好：先运行 agent-office roles install --agent dsh，再重启 DSH",
-                "DSH roles are not installed: run agent-office roles install --agent dsh and restart DSH",
-            ).into()
-        });
+        return host_missing(Backend::Dsh);
     }
     let dir = agents_dir().ok()?;
     let states = status(&dir).ok()?;
@@ -803,6 +817,76 @@ pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String>
                 "roles not installed: run agent-office roles install first",
             )
             .to_owned()
+        })
+}
+
+/// Whether `host` could take a dispatch at all: its connector is up and at
+/// least one office role is installed for it. The picker only offers a host
+/// that passes, so `h` never lands on one that would only answer with an
+/// error once a role is picked.
+pub fn host_ready(host: Backend) -> bool {
+    host_missing(host).is_none()
+}
+
+/// Why `host` could take no dispatch at all, if it could not.
+pub fn host_missing(host: Backend) -> Option<String> {
+    match host {
+        Backend::Dsh => {
+            if !crate::dsh::installed() {
+                return Some(crate::i18n::t(
+                    "DSH 事件插件还没接好：先运行 agent-office connect dsh，再重启 DSH",
+                    "DSH events are not connected: run agent-office connect dsh and restart DSH",
+                ).into());
+            }
+            (!crate::dsh_roles::installed()).then(|| {
+                crate::i18n::t(
+                    "DSH 角色还没装好：先运行 agent-office roles install --agent dsh，再重启 DSH",
+                    "DSH roles are not installed: run agent-office roles install --agent dsh and restart DSH",
+                ).into()
+            })
+        }
+        Backend::Claude => {
+            let installed = agents_dir().and_then(|dir| status(&dir)).is_ok_and(|rows| {
+                rows.iter()
+                    .any(|(_, s)| !matches!(s, State::Missing | State::Foreign))
+            });
+            (!installed).then(|| {
+                crate::i18n::t(
+                    "Claude 角色还没装：先运行 agent-office roles install",
+                    "Claude roles are not installed: run agent-office roles install",
+                ).into()
+            })
+        }
+    }
+}
+
+/// The host a dispatch goes to: `AGENT_OFFICE_DISPATCH_HOST` when it names
+/// one that can take it, else the host `following` names.
+pub fn dispatch_host(following: Backend) -> Backend {
+    let var = host_var();
+    host_with(following, var.as_deref(), host_ready)
+}
+
+fn host_with(following: Backend, var: Option<&str>, ready: impl Fn(Backend) -> bool) -> Backend {
+    match var.and_then(parse_host) {
+        // A host asked for but not ready falls back to the worker's own,
+        // rather than failing every `p` on a machine that never set it up.
+        Some(host) if ready(host) => host,
+        _ => following,
+    }
+}
+
+/// `AGENT_OFFICE_DISPATCH_HOST` from the environment, else the env file: the
+/// same order every other setting reads.
+fn host_var() -> Option<String> {
+    std::env::var("AGENT_OFFICE_DISPATCH_HOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            let file = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(crate::tasks::client::ENV_FILE))
+                .and_then(|p| std::fs::read_to_string(p).ok())?;
+            crate::tasks::client::env_file_var(&file, "AGENT_OFFICE_DISPATCH_HOST")
         })
 }
 
@@ -1457,5 +1541,46 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(repo_root(&plain), plain);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `p` used to always follow the picked worker's host, so on a machine
+    /// full of Claude sessions there was no way to ask for DSH. The setting
+    /// is what makes "dispatch there, not here" expressible; a host it names
+    /// must still be installed, or every `p` would fail on a typo.
+    #[test]
+    fn a_configured_host_is_used_only_when_it_can_take_the_dispatch() {
+        let none = |_| false;
+        let only_dsh = |h| h == Backend::Dsh;
+        assert_eq!(host_with(Backend::Claude, Some("dsh"), only_dsh), Backend::Dsh);
+        assert_eq!(host_with(Backend::Dsh, Some("dsh"), only_dsh), Backend::Dsh);
+        // Named but not set up: the worker's own host is still tried.
+        assert_eq!(host_with(Backend::Claude, Some("dsh"), none), Backend::Claude);
+        assert_eq!(host_with(Backend::Claude, Some("claude"), none), Backend::Claude);
+    }
+
+    /// Follow-the-worker stays the default, and a value nobody meant to type
+    /// must not silently become a host: an unrecognised setting is the same
+    /// as no setting.
+    #[test]
+    fn following_the_worker_is_the_default_and_unknown_names_change_nothing() {
+        let any = |_| true;
+        for var in [None, Some(""), Some("  "), Some("follow"), Some("auto"), Some("deepseek")] {
+            assert_eq!(
+                host_with(Backend::Dsh, var, any),
+                Backend::Dsh,
+                "{var:?} should follow the worker"
+            );
+        }
+        assert_eq!(host_with(Backend::Claude, Some("DSH"), any), Backend::Dsh);
+    }
+
+    /// The picker's `h` offers exactly the other host, so one key is enough
+    /// and the label it prints names the host it will dispatch into.
+    #[test]
+    fn the_toggle_offers_the_other_host_by_name() {
+        assert_eq!(Backend::Claude.other(), Backend::Dsh);
+        assert_eq!(Backend::Dsh.other(), Backend::Claude);
+        assert_eq!(Backend::Dsh.label(), "DeepSeek Harness");
+        assert!(Backend::Claude.label().contains("Claude"));
     }
 }

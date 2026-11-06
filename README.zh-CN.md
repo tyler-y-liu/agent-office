@@ -103,10 +103,11 @@ AGENT_OFFICE_MODEL=your-model
 
 `agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。
 
-按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
-
+按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人；按 `h` 可以在 Claude Code 和 DeepSeek Harness 之间换，`AGENT_OFFICE_DISPATCH_HOST` 改的是打开时的默认值。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
 - 在完成或卡住的卡片上发起是接力：建议接手的角色排在前面，任务里带上一棒原来的任务、结论和改动目录。
 - 其他情况是开新会话：目录用这个小人的仓库，没选中时用最近活动小人的仓库；打开后等你给任务，没给前就在等候区。
+
+任务栏底部常驻一排角色，点一下就派给那个角色；要换宿主或看接力的建议，还是按 `p`。
 
 DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提交；新会话则创建空白的角色会话，由你从 DSH 会话列表打开后给任务。目前不会自动聚焦 DSH 窗口，也不支持 `--terminal`。只有还没被 Host 认领的请求才会在超时后撤回；已经认领的请求会继续等最终结果和会话 ID，不会把晚到的结果丢掉。Host 中途退出时结果未知，先检查 DSH 会话列表再决定是否重试。如果错误带会话 ID，先打开原会话继续。还没开始处理就已过期的请求会被拒绝，不会在下次启动时补跑。
 
@@ -121,6 +122,7 @@ DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提�
 | `AGENT_OFFICE_API_BASE` / `_API_KEY` / `_MODEL` | 摘要接口。三个都配了才开启摘要 |
 | `AGENT_OFFICE_SUMMARY=off` | 不发任何内容出去，任务栏显示原始指令 |
 | `AGENT_OFFICE_LANG` | 界面和摘要的语言：`zh` 或 `en`。默认看 macOS 的系统语言，其次看 `LANG`；不是中文就用英文 |
+| `AGENT_OFFICE_DISPATCH_HOST` | `p` 派活默认派给谁：`claude`、`dsh`，或 `follow`（默认，跟着选中的小人）。写的那家没装好时退回 `follow` |
 | `AGENT_OFFICE_NOTIFY=off` | 不弹系统通知、Dock 图标不跳；角标照常显示 |
 | `AGENT_OFFICE_SOUND=on` | 打开音效（默认关）：有人开始等你批准时「叮」一声，撒彩纸时「啵」一声 |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | 「可能卡住」的门槛：连续失败次数（默认 3），干活时几分钟没动静（默认 5），长调用时几分钟（默认 20）。`doctor` 显示当前值 |
