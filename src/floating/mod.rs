@@ -150,8 +150,9 @@ struct Win {
     cursor_in: bool,
     /// The sign clicked for what its zone is for, by its text, and when.
     about: Option<(String, Instant)>,
-    /// The role picker `p` opens is showing: the next key picks or closes.
-    picker: bool,
+    /// The role picker `p` opens, with what a pick dispatches: the next
+    /// key picks or closes it.
+    picker: Option<crate::core::DispatchPlan>,
     /// When the office opened: subagents already running then were handed
     /// their work before it, and get no ticket.
     opened: SystemTime,
@@ -392,7 +393,7 @@ impl ApplicationHandler for Floating<'_> {
             } => {
                 // A click is not a pick: the picker goes, so a digit typed
                 // later does not dispatch into whatever got selected.
-                win.picker = false;
+                win.picker = None;
                 win.click();
                 win.next_frame = Instant::now();
             }
@@ -403,11 +404,11 @@ impl ApplicationHandler for Floating<'_> {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // Open, the picker takes the next key whatever it is: a
                 // digit picks, anything else closes it.
-                if std::mem::take(&mut win.picker) {
+                if let Some(plan) = win.picker.take() {
                     if let Key::Character(c) = event.logical_key.as_ref()
                         && let Some(role) = picked_role(c)
                     {
-                        win.core.act(Action::Dispatch(role), &mut win.office);
+                        win.core.dispatch(&plan, role);
                     }
                     win.next_frame = Instant::now();
                     return;
@@ -430,7 +431,7 @@ impl ApplicationHandler for Floating<'_> {
                     Key::Character("w") => Action::OpenWaiting,
                     Key::Character("n") => Action::OpenNext,
                     Key::Character("p") => {
-                        win.picker = true;
+                        win.picker = win.core.plan_dispatch();
                         win.next_frame = Instant::now();
                         return;
                     }
@@ -562,7 +563,7 @@ impl Floating<'_> {
             pointer: false,
             cursor_in: false,
             about: None,
-            picker: false,
+            picker: None,
             opened: SystemTime::now(),
             reaction: None,
             pokes: HashMap::new(),
@@ -780,9 +781,8 @@ impl Win {
             }
             sign_hits = signs.iter().map(|s| (s.area, s.text.clone())).collect();
         }
-        if self.picker {
-            let selected = self.core.ui.selected.is_some();
-            paint_picker(&mut canvas, &mut self.faces, selected, (ow, oh), sf);
+        if let Some(plan) = &self.picker {
+            paint_picker(&mut canvas, &mut self.faces, plan, (ow, oh), sf);
         }
 
         // The cards and footer are laid out as cells, then set in the readable
@@ -2130,69 +2130,107 @@ fn picked_role(key: &str) -> Option<Role> {
     }
 }
 
-/// The picker's lines, as `(key, role)`, PM last.
-fn picker_rows() -> Vec<(char, Role)> {
-    ('1'..='9')
+/// The picker's lines, as `(key, role)`, PM last; a relay's suggested
+/// posts first, each still on its own key so the digits never move.
+fn picker_rows(suggested: &[Role]) -> Vec<(char, Role)> {
+    let all: Vec<(char, Role)> = ('1'..='9')
         .filter_map(|k| Some((k, picked_role(&k.to_string())?)))
         .chain([('0', Role::Pm)])
-        .collect()
+        .collect();
+    let first = suggested
+        .iter()
+        .filter_map(|r| all.iter().find(|(_, a)| a == r).copied());
+    let rest = all.iter().filter(|(_, r)| !suggested.contains(r)).copied();
+    first.chain(rest).collect()
 }
 
-/// The role picker, centred over the office: each role's key, its chip and
-/// its post, under what picking one does.
+/// The role picker, centred over the office: where it dispatches to, then
+/// each role's key, its chip and its post. On a relay, the posts to hand
+/// on to lead, marked, and the head names whose work goes with it.
 fn paint_picker(
     canvas: &mut Canvas,
     faces: &mut Faces,
-    selected: bool,
+    plan: &crate::core::DispatchPlan,
     bounds: (u32, u32),
     scale_factor: f64,
 ) {
     let px = pt_px(ABOUT_PT, scale_factor);
     let pad = 2 * tag_pad(scale_factor);
     let cell = faces.cell_w(px).max(1);
-    let head = if selected {
-        crate::i18n::t(
-            "派活：在选中小人的仓库开新会话（其他键取消）",
-            "Dispatch: a new session in the selected worker's repo (any other key cancels)",
-        )
-    } else {
-        crate::i18n::t(
-            "派活：先选中一个小人，新会话开在它的仓库里",
-            "Dispatch: select a worker first; the session opens in its repo",
-        )
+    let repo = plan.repo();
+    let (head, sub) = match &plan.relay {
+        Some(r) => (
+            crate::tr!("接着「{}」派给：", "Hand on from {} to:", r.name),
+            crate::tr!(
+                "派到 {repo}，任务带上它的活和结论（其他键取消）",
+                "into {repo}, carrying its task and result (any other key cancels)"
+            ),
+        ),
+        None => (
+            crate::tr!("派活到 {repo}：", "Dispatch into {repo}:"),
+            crate::i18n::t(
+                "开一个新会话，任务在 Claude 里写（其他键取消）",
+                "a new session; write its task in Claude (any other key cancels)",
+            )
+            .to_owned(),
+        ),
     };
-    let rows: Vec<(char, Role, String)> = picker_rows()
+    let suggested = plan.relay.as_ref().map_or(&[][..], |r| &r.suggested[..]);
+    let tag = crate::i18n::t(" 建议", " suggested");
+    let rows: Vec<(char, Role, String, bool)> = picker_rows(suggested)
         .into_iter()
         .map(|(k, r)| {
-            let post = r.post();
-            let what = if r == Role::Pm { "（自动分工）" } else { "" };
-            (k, r, format!("{} {}{what}", post.glyph, post.zh))
+            let what = if r == Role::Pm {
+                crate::i18n::t("（自动分工）", " (splits the work)")
+            } else {
+                ""
+            };
+            (k, r, format!("{} {}{what}", r.post().glyph, r.name()), suggested.contains(&r))
         })
         .collect();
     let line_h = px + px / 3;
     let widest = rows
         .iter()
-        .map(|(_, _, t)| 2 + Faces::cells(t))
-        .chain([Faces::cells(head)])
+        .map(|(_, _, t, s)| 2 + Faces::cells(t) + if *s { Faces::cells(tag) } else { 0 })
+        .chain([Faces::cells(&head), Faces::cells(&sub)])
         .max()
         .unwrap_or(0);
     let w = widest * cell + 2 * pad;
-    let h = u32::try_from(rows.len() + 1).unwrap_or(0) * line_h + 2 * pad;
+    let h = u32::try_from(rows.len() + 2).unwrap_or(0) * line_h + 2 * pad;
     let x = (i64::from(bounds.0) - i64::from(w)).max(0) / 2;
     let y = (i64::from(bounds.1) - i64::from(h)).max(0) / 2;
     canvas.fill(x - 1, y - 1, w + 2, h + 2, ABOUT_EDGE);
     canvas.fill(x, y, w, h, ABOUT_BG);
     let ascent = i64::from(faces.ascent(px));
     let top = |i: usize| y + i64::from(pad) + i64::try_from(i).unwrap_or(0) * i64::from(line_h);
-    faces.draw(canvas, x + i64::from(pad), top(0) + ascent, head, TASK, px);
-    for (i, (key, role, text)) in rows.iter().enumerate() {
-        let (tx, ty) = (x + i64::from(pad), top(i + 1));
+    faces.draw(canvas, x + i64::from(pad), top(0) + ascent, &head, TASK, px);
+    faces.draw(canvas, x + i64::from(pad), top(1) + ascent, &sub, PICKER_DIM, px);
+    for (i, (key, role, text, picked)) in rows.iter().enumerate() {
+        let (tx, ty) = (x + i64::from(pad), top(i + 2));
+        if *picked {
+            canvas.fill(x, ty - 1, w, line_h, PICKER_SUGGESTED_BG);
+        }
         faces.draw(canvas, tx, ty + ascent, &key.to_string(), TEXT, px);
         let chip_x = tx + i64::from(2 * cell);
         canvas.fill(chip_x - 1, ty, 2 * cell + 2, px + px / 6, to_u32(role.post().ink));
-        faces.draw(canvas, chip_x, ty + ascent, text, TEXT, px);
+        // Dark on the saturated chip, as the name badges are: light text
+        // on it fell short of a readable contrast.
+        let glyph = role.post().glyph;
+        faces.draw(canvas, chip_x, ty + ascent, glyph, PANEL_BG, px);
+        let rest = &text[glyph.len()..];
+        let rest_x = chip_x + i64::from(Faces::cells(glyph) * cell);
+        faces.draw(canvas, rest_x, ty + ascent, rest, TEXT, px);
+        if *picked {
+            let tag_x = rest_x + i64::from(Faces::cells(rest) * cell);
+            faces.draw(canvas, tag_x, ty + ascent, tag, PICKER_TAG, px);
+        }
     }
 }
+
+const PICKER_DIM: u32 = 0x008a_8f98;
+const PICKER_SUGGESTED_BG: u32 = 0x002f_3542;
+/// The office's working green: a suggestion is the way forward.
+const PICKER_TAG: u32 = 0x009e_ce6a;
 
 /// The door signs among `text`'s, at `d` art pixels a layout unit and `u`
 /// window pixels an art pixel.
@@ -2789,7 +2827,7 @@ mod tests {
     /// wrong session.
     #[test]
     fn picker_digits_follow_the_roster_and_0_is_the_pm() {
-        let rows = picker_rows();
+        let rows = picker_rows(&[]);
         assert_eq!(rows.len(), crate::roles::ROSTER.len());
         assert_eq!(rows.last(), Some(&('0', Role::Pm)));
         for (key, role) in &rows {
@@ -2798,5 +2836,18 @@ mod tests {
         assert_eq!(picked_role("1"), Some(crate::roles::ROSTER[0].role));
         assert_eq!(picked_role("9"), None, "only eight roles before the PM");
         assert_eq!(picked_role("x"), None);
+    }
+
+    /// A relay's suggestions lead the list, but each keeps its own digit:
+    /// the keys you learned still pick the same posts.
+    #[test]
+    fn suggested_posts_lead_and_keep_their_keys() {
+        let rows = picker_rows(&[Role::Reviewer, Role::Qa]);
+        assert_eq!(rows[0].1, Role::Reviewer);
+        assert_eq!(rows[1].1, Role::Qa);
+        assert_eq!(rows.len(), crate::roles::ROSTER.len());
+        for (key, role) in &rows {
+            assert_eq!(picked_role(&key.to_string()), Some(*role));
+        }
     }
 }

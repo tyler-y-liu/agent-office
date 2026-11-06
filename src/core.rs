@@ -40,8 +40,33 @@ pub enum Action {
     OpenWaiting,
     /// Open the session at the head of the waiting line.
     OpenNext,
-    /// Start a new session in this role, in the selected agent's repository.
-    Dispatch(crate::roles::Role),
+}
+
+/// What `p` dispatches: into which repository, and whose work it carries
+/// on, if any. Made when the picker opens, so the pick sends what it showed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchPlan {
+    pub dir: std::path::PathBuf,
+    pub relay: Option<Relay>,
+}
+
+/// A dispatch that picks up a done or stuck session's work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relay {
+    pub name: String,
+    pub after: crate::roles::After,
+    /// The posts to hand on to, best first.
+    pub suggested: Vec<crate::roles::Role>,
+    pub task: String,
+}
+
+impl DispatchPlan {
+    /// The repository's folder name, which the picker heads with.
+    pub fn repo(&self) -> String {
+        self.dir
+            .file_name()
+            .map_or_else(|| self.dir.display().to_string(), |n| n.to_string_lossy().into_owned())
+    }
 }
 
 /// The footer's warning while Claude Code's hooks are out: short, since it
@@ -519,46 +544,6 @@ impl Core {
                     Tone::Failed,
                 ),
             },
-            Action::Dispatch(role) => {
-                let scene = self.scene();
-                let slot = self.ui.selected.and_then(|id| scene.agents.get(&id));
-                match slot {
-                    None => self.note(
-                        crate::i18n::t(
-                            "先选中一个小人：新会话开在它的仓库里",
-                            "select a worker first: the new session opens in its repository",
-                        ),
-                        Tone::Failed,
-                    ),
-                    Some(s) if s.unknown_cwd => self.note(
-                        crate::i18n::t(
-                            "不知道它在哪个目录，换一个小人",
-                            "its folder is unknown: pick another worker",
-                        ),
-                        Tone::Failed,
-                    ),
-                    // The repository it is seated with, a worktree's included.
-                    Some(s) => match crate::roles::dispatch(
-                        role,
-                        pixtuoid_core::state::project_root(&s.cwd),
-                        "",
-                        false,
-                    ) {
-                        Ok(_) => self.note(
-                            &crate::tr!(
-                                "已在 Claude 开好「{}」的新会话，写上任务发送",
-                                "opened a new {} session in Claude: write the task and send",
-                                role.name()
-                            ),
-                            Tone::Ok,
-                        ),
-                        Err(e) => self.note(
-                            &crate::tr!("派活失败：{}", "dispatch failed: {}", e),
-                            Tone::Failed,
-                        ),
-                    },
-                }
-            }
             Action::OpenWaiting => self.note_result(
                 jump::open_url(jump::NEEDS_INPUT)
                     .map(|()| crate::i18n::t("已在 Claude 打开", "opened in Claude")),
@@ -592,6 +577,103 @@ impl Core {
             Ok(text) => self.note(text, Tone::Ok),
             Err(e) => self.note(
                 &crate::tr!("跳转失败：{e}", "could not jump: {e}"),
+                Tone::Failed,
+            ),
+        }
+    }
+
+    /// What `p` would dispatch now: into the selected session's repository,
+    /// carrying its work on when it is done or stuck; with none selected,
+    /// a fresh session where the latest activity was. `None`, with a note
+    /// saying why, when there is nowhere to send it.
+    pub fn plan_dispatch(&mut self) -> Option<DispatchPlan> {
+        let scene = self.scene();
+        let views = self.views_rx.borrow().clone();
+        let now = SystemTime::now();
+        let slot = match self.ui.selected {
+            Some(id) => scene.agents.get(&id),
+            None => scene
+                .agents
+                .values()
+                .filter(|s| !s.unknown_cwd && s.exiting_at.is_none())
+                .max_by_key(|s| s.state_started_at),
+        };
+        let Some(slot) = slot else {
+            self.note(
+                crate::i18n::t(
+                    "办公室里还没人：在终端用 agent-office dispatch 派活",
+                    "no one in the office yet: dispatch from a terminal with agent-office dispatch",
+                ),
+                Tone::Failed,
+            );
+            return None;
+        };
+        if slot.unknown_cwd {
+            self.note(
+                crate::i18n::t(
+                    "不知道它在哪个目录，换一个小人",
+                    "its folder is unknown: pick another worker",
+                ),
+                Tone::Failed,
+            );
+            return None;
+        }
+        // The repository it is seated with, a worktree's included.
+        let dir = pixtuoid_core::state::project_root(&slot.cwd).to_path_buf();
+        let relay = self.ui.selected.and_then(|_| {
+            let view = views.get(&slot.agent_id);
+            let read = panel::read_since_idle(slot, &self.ui.seen);
+            let after = match panel::Group::of(slot, view, now, read) {
+                panel::Group::Done => crate::roles::After::Done,
+                panel::Group::Stuck => crate::roles::After::Stuck,
+                _ => return None,
+            };
+            let name = pixtuoid_scene::badge::shown_names(scene.agents.values())
+                .remove(&slot.agent_id)
+                .unwrap_or_else(|| slot.label.to_string());
+            let v = view.cloned().unwrap_or_default();
+            let stuck = tasks::stuck_at_work(slot, view).map(tasks::Stuck::describe);
+            let task = crate::roles::relay_task(
+                &name,
+                after,
+                v.prompt.as_deref().or(v.line.as_deref()),
+                v.reply.as_deref().or(v.outcome.as_deref()),
+                stuck.as_deref(),
+                &slot.cwd,
+            );
+            Some(Relay {
+                suggested: crate::roles::next_posts(after, v.role),
+                name,
+                after,
+                task,
+            })
+        });
+        Some(DispatchPlan { dir, relay })
+    }
+
+    /// Send `plan` to `role`: a relay with its task written, else a fresh
+    /// session for you to give one.
+    pub fn dispatch(&mut self, plan: &DispatchPlan, role: crate::roles::Role) {
+        let task = plan.relay.as_ref().map_or("", |r| r.task.as_str());
+        match crate::roles::dispatch(role, &plan.dir, task, false) {
+            Ok(_) if plan.relay.is_some() => self.note(
+                &crate::tr!(
+                    "已在 Claude 开好「{}」接力会话，看一眼就发送",
+                    "opened a {} relay in Claude: check it and send",
+                    role.name()
+                ),
+                Tone::Ok,
+            ),
+            Ok(_) => self.note(
+                &crate::tr!(
+                    "已在 Claude 开好「{}」的新会话，写上任务发送",
+                    "opened a new {} session in Claude: write the task and send",
+                    role.name()
+                ),
+                Tone::Ok,
+            ),
+            Err(e) => self.note(
+                &crate::tr!("派活失败：{}", "dispatch failed: {}", e),
                 Tone::Failed,
             ),
         }
