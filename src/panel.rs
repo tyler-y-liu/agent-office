@@ -60,6 +60,10 @@ pub struct PanelState {
     pub hovered: Option<AgentId>,
     /// Task lines are summarized: a raw one is then marked as not yet.
     pub summaries: bool,
+    /// Claude Code's hooks are in, as of the start.
+    pub hooks: bool,
+    /// The office's roles are installed as agents, as of the start.
+    pub roles: bool,
 }
 
 impl PanelState {
@@ -816,6 +820,63 @@ fn card(
     lines
 }
 
+/// An empty office says how to fill it: each step ticked when it is done,
+/// the command to run when it is not. A bare "no sessions" left a first
+/// run with nowhere to go.
+fn empty_lines(state: &PanelState) -> Vec<Line<'static>> {
+    let step = |done: bool, todo: String, ok: &str| {
+        let (mark, text, color) = if done {
+            ("✓", ok.to_owned(), DIM)
+        } else {
+            ("·", todo, TEXT)
+        };
+        Line::from(vec![
+            Span::styled(format!("{mark} "), Style::default().fg(if done { WORK } else { DIM })),
+            Span::styled(text, Style::default().fg(color)),
+        ])
+    };
+    let dim = |t: &str| Line::from(Span::styled(t.to_owned(), Style::default().fg(DIM)));
+    vec![
+        dim(crate::i18n::t("还没有 agent 会话在运行", "No agent sessions running yet")),
+        Line::default(),
+        step(
+            state.hooks,
+            crate::i18n::t("接上 hooks：agent-office connect", "Connect hooks: agent-office connect")
+                .to_owned(),
+            crate::i18n::t("hooks 已接上", "Hooks connected"),
+        ),
+        step(
+            false,
+            crate::i18n::t(
+                "开一个 Claude Code 或 Codex 会话，小人会自己走进来",
+                "Start a Claude Code or Codex session; its worker walks in",
+            )
+            .to_owned(),
+            "",
+        ),
+        Line::default(),
+        dim(crate::i18n::t("可选：", "Optional:")),
+        step(
+            state.summaries,
+            crate::i18n::t(
+                "一句话摘要：在 ~/.config/agent-office/env 配 AGENT_OFFICE_API_*",
+                "One-line summaries: set AGENT_OFFICE_API_* in ~/.config/agent-office/env",
+            )
+            .to_owned(),
+            crate::i18n::t("摘要已配置", "Summaries set up"),
+        ),
+        step(
+            state.roles,
+            crate::i18n::t(
+                "角色派活：agent-office roles install",
+                "Roles to dispatch: agent-office roles install",
+            )
+            .to_owned(),
+            crate::i18n::t("角色已装好，按 p 派活", "Roles installed: p dispatches"),
+        ),
+    ]
+}
+
 /// Draw the panel: waiting cards on a warm ground, idle ones faded, and
 /// where the window draws the rest ([`Drawn`]).
 pub fn render(
@@ -860,15 +921,13 @@ pub fn render(
         height: inner.height.saturating_sub(1),
     };
     if order.is_empty() {
-        buf.set_line(
-            inner.x,
-            inner.y,
-            &Line::from(Span::styled(
-                crate::i18n::t("还没有 agent 会话在运行", "No agent sessions running yet"),
-                Style::default().fg(DIM),
-            )),
-            inner.width,
-        );
+        for (i, line) in empty_lines(state).into_iter().enumerate() {
+            let y = inner.y + u16::try_from(i).unwrap_or(u16::MAX);
+            if y >= inner.y + inner.height {
+                break;
+            }
+            buf.set_line(inner.x, y, &line, inner.width);
+        }
         return Drawn::default();
     }
     let mut root_group = Group::Working;
@@ -1735,6 +1794,31 @@ mod tests {
             doing(slot, Some(&view)),
             Some(("计划 1/4 · 前端▸ 后端▸".into(), TEXT))
         );
+    }
+
+    /// An empty office is where a first run lands: it must say the next
+    /// command to run, and stop saying it once that step is done.
+    #[test]
+    fn an_empty_office_lists_the_steps_still_to_take() {
+        let text = |st: &PanelState| {
+            empty_lines(st)
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let fresh = PanelState::default();
+        assert!(text(&fresh).contains("agent-office connect"));
+        assert!(text(&fresh).contains("agent-office roles install"));
+        let set = PanelState {
+            hooks: true,
+            roles: true,
+            summaries: true,
+            ..PanelState::default()
+        };
+        assert!(!text(&set).contains("agent-office connect"));
+        assert!(!text(&set).contains("roles install"));
+        assert!(text(&set).contains("会话"), "how to get a worker in stays");
     }
 
     #[test]

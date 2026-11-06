@@ -87,6 +87,7 @@ The rooftop appears only when the office is at least 200 columns wide. When the 
 | `o` / double-click | Open the session |
 | `n` / click the "Your office" sign | Open the next one (the one in the visitor chair) |
 | `w` / click the panel title | Open the Claude desktop app's list of sessions waiting for input |
+| `p` | Dispatch a role (see [Roles](#roles)) |
 | `r` | Summarize again |
 | `b` | Toggle the labels over heads |
 | `[` `]` (or `PageUp` `PageDown`) | Change floor |
@@ -96,6 +97,17 @@ The rooftop appears only when the office is at least 200 columns wide. When the 
 Click a card or worker to select it; scroll the panel with the mouse wheel. After a notification, coming back to the window selects the first session waiting for you, so `o` goes straight to it.
 
 `agent-office --shot out.png` runs for 20 seconds, saves the frame as a PNG and exits.
+
+### Roles
+
+`agent-office roles install` installs nine roles as Claude Code agents (`~/.claude/agents/office-*.md`): product, UX, architect, frontend, backend, QA, devops, reviewer and a PM that splits work among the others. A session started in a role wears its chip on its badge and card; a PM's todo list shows as its plan on its card and on the meeting room's whiteboard.
+
+Press `p` to dispatch one. A digit picks the role and the Claude desktop app opens a new session with the prompt filled in, for you to send:
+
+- On a finished or stuck card, it is a relay: the posts to hand on to come first, marked, and the task carries what the session was asked, what it came to and where its changes are.
+- Anywhere else it opens a fresh session in that worker's repository (with none selected, the latest one's) and asks you for its task; until you give one it waits in the waiting area.
+
+From a terminal: `agent-office dispatch --role qa "run the full test suite"` (`--dir`, `--terminal`, `--auto` for the PM). `agent-office roles remove` takes them out again.
 
 ## Configuration
 

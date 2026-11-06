@@ -356,6 +356,8 @@ impl Core {
         Self {
             ui: PanelState {
                 summaries: summarizer_on,
+                hooks: crate::hook::installed(),
+                roles: crate::roles::doctor_line().0,
                 ..PanelState::default()
             },
             head_labels: true,
@@ -745,6 +747,7 @@ pub fn footer(
     floors: &impl Floors,
     core: &Core,
     waiting: usize,
+    empty: bool,
     extra: &[(&str, &str)],
 ) {
     let dim = Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98));
@@ -767,10 +770,12 @@ pub fn footer(
     ];
     let floors_hint =
         (floors.n_floors() > 1).then_some(("[ ]", crate::i18n::t("换楼层", "floor"), 5));
+    // With no one in the office, the keys act on no one: only quitting.
     let hints: Vec<(&str, &str, u8)> = base
         .into_iter()
-        .chain(floors_hint)
-        .chain(extra.iter().map(|&(k, w)| (k, w, 8)))
+        .filter(|_| !empty)
+        .chain(floors_hint.filter(|_| !empty))
+        .chain(extra.iter().filter(|_| !empty).map(|&(k, w)| (k, w, 8)))
         .chain([("q", crate::i18n::t("退出", "quit"), 2)])
         .collect();
     let mut right = Vec::new();

@@ -831,6 +831,7 @@ impl Win {
             &self.office,
             &self.core,
             frame.waiting.len(),
+            frame.scene.agents.is_empty(),
             &[
                 (
                     "t",
