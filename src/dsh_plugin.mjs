@@ -404,7 +404,13 @@ export function apply(ctx) {
         ensureActive()
         const created = await ctx.sessionController.create(
           workspace ? { workspaceId: workspace.id, agentPreset } : { cwd: request.cwd, agentPreset },
-        )
+        ).catch((error) => {
+          // A Session made but not attached to its Workspace still exists:
+          // report it, or the user retries into a duplicate.
+          const made = error?.details?.sessionId
+          if (typeof made === "string" && made) createdIdentity = { sessionId: made, agentPreset }
+          throw error
+        })
         if (typeof created?.sessionId !== "string" || !created.sessionId) {
           throw new Error("DSH did not return a session id")
         }
