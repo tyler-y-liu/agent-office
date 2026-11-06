@@ -34,7 +34,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 use crate::core::{Action, Core, Floors};
@@ -153,6 +153,8 @@ struct Win {
     /// The role picker `p` opens, with what a pick dispatches: the next
     /// key picks or closes it.
     picker: Option<crate::core::DispatchPlan>,
+    /// The modifier keys held now, so Cmd+W is not taken for `w`.
+    mods: ModifiersState,
     /// When the office opened: subagents already running then were handed
     /// their work before it, and get no ticket.
     opened: SystemTime,
@@ -412,7 +414,11 @@ impl ApplicationHandler for Floating<'_> {
                 win.wheel(delta);
                 win.next_frame = Instant::now();
             }
+            WindowEvent::ModifiersChanged(m) => win.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if !takes_key(event.logical_key.as_ref(), event.repeat, win.mods) {
+                    return;
+                }
                 // Open, the picker takes the next key: a digit picks, Esc
                 // and `p` only close it, and any other key closes it and
                 // still does its own thing, so an `o` meant for the
@@ -588,6 +594,7 @@ impl Floating<'_> {
             cursor_in: false,
             about: None,
             picker: None,
+            mods: ModifiersState::empty(),
             opened: SystemTime::now(),
             reaction: None,
             pokes: HashMap::new(),
@@ -705,7 +712,7 @@ impl Win {
                 &frame.office,
                 fit,
                 theme,
-                &frame.labels,
+                &head_labels(&frame, &self.core.ui.seen, self.core.head_labels),
                 &shown_in_full(&frame, self.core.ui.selected),
                 sf,
                 OfficeExtras {
@@ -1765,6 +1772,30 @@ fn short_name(name: &str) -> String {
     }
 }
 
+/// Each head's label: what it waits on you for while it does (the question
+/// asked, the call to approve; [`panel::head_wait`]), else its task. Empty
+/// while labels are hidden.
+fn head_labels(
+    frame: &crate::core::Frame,
+    seen: &HashMap<AgentId, SystemTime>,
+    shown: bool,
+) -> HashMap<AgentId, String> {
+    let mut labels = frame.labels.clone();
+    if !shown {
+        return labels;
+    }
+    for id in &frame.waiting {
+        let Some(s) = frame.scene.agents.get(id) else {
+            continue;
+        };
+        let read = panel::read_since_idle(s, seen);
+        if let Some(w) = panel::head_wait(s, frame.views.get(id), read, LABEL_CELLS) {
+            labels.insert(*id, w);
+        }
+    }
+    labels
+}
+
 /// The agents whose badge and task read in full however many are in: the
 /// one selected, and the ones waiting on you or stuck, which you are to act
 /// on.
@@ -2162,6 +2193,24 @@ fn paint_about(
         let top = y + i64::from(pad) + i64::try_from(i).unwrap_or(0) * i64::from(line_h);
         faces.draw(canvas, x + i64::from(pad), top + ascent, line, TEXT, px);
     }
+}
+
+/// Whether a key press reaches the office's keys. A held key repeats only
+/// where repeating means more of the same (moving the selection, paging
+/// floors): a held `q` would pass the second-press quit check, and a held
+/// `l` flip the language back and forth, rewriting the env file each time.
+/// With Cmd or Ctrl down a letter belongs to the system (Cmd+W, Cmd+L).
+fn takes_key(key: Key<&str>, repeat: bool, mods: ModifiersState) -> bool {
+    if matches!(key, Key::Character(_)) && (mods.super_key() || mods.control_key()) {
+        return false;
+    }
+    !repeat
+        || matches!(
+            key,
+            Key::Named(
+                NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::PageUp | NamedKey::PageDown
+            ) | Key::Character("j" | "k" | "[" | "]")
+        )
 }
 
 /// The role a key picks in the picker: 1–8 the roster in order, 0 the PM,
@@ -2886,6 +2935,28 @@ mod tests {
             assert!(w.badge.w > p.badge.w, "the chip widens the badge");
         }
         assert!(!worn[0].badge.meets(&worn[1].badge), "neighbours step clear");
+    }
+
+    /// Quitting takes two presses of `q` so a stray one does not close the
+    /// office; a held `q` must not count as two. A held arrow still runs down
+    /// the list, and Cmd+W or Cmd+L is the system's, not `w` or `l`.
+    #[test]
+    fn held_and_system_keys_do_not_act() {
+        let none = ModifiersState::empty();
+        assert!(takes_key(Key::Character("q"), false, none));
+        assert!(!takes_key(Key::Character("q"), true, none));
+        assert!(!takes_key(Key::Character("l"), true, none));
+        assert!(!takes_key(Key::Named(NamedKey::Enter), true, none));
+        assert!(takes_key(Key::Named(NamedKey::ArrowDown), true, none));
+        assert!(takes_key(Key::Character("j"), true, none));
+        assert!(takes_key(Key::Named(NamedKey::PageUp), true, none));
+        for m in [ModifiersState::SUPER, ModifiersState::CONTROL] {
+            assert!(!takes_key(Key::Character("w"), false, m));
+            assert!(!takes_key(Key::Character("l"), false, m));
+            // Named keys are not letters the system binds here.
+            assert!(takes_key(Key::Named(NamedKey::ArrowUp), false, m));
+        }
+        assert!(takes_key(Key::Character("Q"), false, ModifiersState::SHIFT));
     }
 
     /// The keys follow the roster as the picker lists it, and 0 is the PM:

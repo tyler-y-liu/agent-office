@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use pixtuoid_core::sprite::Rgb;
-use pixtuoid_core::{ActivityState, AgentId, AgentSlot, SceneState, ToolUse};
+use pixtuoid_core::{ActivityState, AgentId, AgentSlot, SceneState, ToolKind, ToolUse};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -510,13 +510,46 @@ fn turn_took(started: SystemTime, now: SystemTime) -> Option<String> {
     }
 }
 
-fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
+/// What one of `parent`'s subagents is on, newest first: its task, after its
+/// post when it has one. The parent's own call says only that it handed
+/// work out, which its chip already does.
+pub fn delegated(scene: &SceneState, views: &TaskViews, parent: AgentId) -> Option<String> {
+    let kid = scene
+        .agents
+        .values()
+        .filter(|s| s.parent_id == Some(parent) && s.exiting_at.is_none())
+        .filter(|s| !matches!(s.state, ActivityState::Idle))
+        .filter(|s| views.get(&s.agent_id).is_some_and(|v| v.line.is_some()))
+        .max_by_key(|s| s.created_at)?;
+    let v = &views[&kid.agent_id];
+    let line = v.line.as_deref()?;
+    Some(match v.role {
+        Some(r) => format!("{} · {line}", r.name()),
+        None => line.to_owned(),
+    })
+}
+
+/// The card's second line. `delegated` is what its running subagent is on
+/// ([`delegated`]), shown while it hands work out.
+fn doing(
+    slot: &AgentSlot,
+    view: Option<&TaskView>,
+    delegated: Option<&str>,
+) -> Option<(String, Color)> {
     match &slot.state {
         ActivityState::Running { .. }
             if view.is_some_and(|v| v.role == Some(crate::roles::Role::Pm) && !v.todos.is_empty()) =>
         {
             view.map(|v| (plan_line(&v.todos), TEXT))
         }
+        // Its detail is pixtuoid's English "Delegating", saying again what
+        // the chip's 分派中 says.
+        ActivityState::Running {
+            item: Some(ToolUse {
+                kind: ToolKind::Task,
+                ..
+            }),
+        } => delegated.map(|d| (one_line(d), TEXT)),
         ActivityState::Running {
             item: Some(ToolUse {
                 detail: Some(d), ..
@@ -582,6 +615,52 @@ fn plan_line(todos: &[(crate::tasks::extract::TodoState, String)]) -> String {
 /// Dispatched in a role with no task: it waits for you to give it one.
 pub fn needs_task() -> &'static str {
     crate::i18n::t("等你写任务", "Needs a task")
+}
+
+/// What an agent's head says while it waits on you, fitted to `max` cells:
+/// the question it asked, or the call it needs approved, as its card says.
+/// `None` when it waits on nothing, and its task shows instead: the task
+/// over a head in the waiting room left you to open the panel to see why.
+pub fn head_wait(
+    slot: &AgentSlot,
+    view: Option<&TaskView>,
+    read: bool,
+    max: u16,
+) -> Option<String> {
+    let question = || {
+        view?
+            .outcome
+            .as_deref()
+            .map(|o| one_line(crate::i18n::strip_ask(o).unwrap_or(o)))
+    };
+    let text = match waits_on_you(slot, view, read)? {
+        Wait::Reply if view.is_some_and(|v| v.needs_task) => needs_task().to_owned(),
+        Wait::Reply => question()?,
+        Wait::Prompt => {
+            let ActivityState::RequiresAction { reason } = &slot.state else {
+                return None;
+            };
+            let last = view.and_then(|v| v.recent_tools.last()).map(String::as_str);
+            let wait = waiting_on(reason.as_deref(), last);
+            match last {
+                _ if wait == reply_wait() => question().unwrap_or(wait),
+                // The head has no room for 等你批准： (standing in the
+                // waiting room already says it waits), nor for a path: a
+                // file's name is what it holds.
+                Some(t) if wait.ends_with(t) => {
+                    let t = match t.split_once(": ") {
+                        Some((tool, path)) if path.contains('/') && !path.contains(' ') => {
+                            format!("{tool}: {}", path.rsplit('/').next().unwrap_or(path))
+                        }
+                        _ => t.to_owned(),
+                    };
+                    return Some(crate::text::fit_tool_line(&t, &slot.cwd, max));
+                }
+                _ => wait,
+            }
+        }
+    };
+    Some(truncate_cells(&text, max))
 }
 
 /// The agent finished its turn and waits on your answer.
@@ -721,6 +800,8 @@ struct CardLook<'a> {
     expanded: bool,
     read: bool,
     summaries: bool,
+    /// What its running subagent is on ([`delegated`]).
+    delegated: Option<String>,
 }
 
 fn card(
@@ -849,7 +930,7 @@ fn card(
         spans.push(Span::styled(" …", Style::default().fg(DIM)));
     }
     lines.push(Line::from(spans));
-    if let Some((d, c)) = doing(slot, view) {
+    if let Some((d, c)) = doing(slot, view, look.delegated.as_deref()) {
         lines.push(Line::from(vec![
             Span::raw(pad.to_owned()),
             Span::styled(
@@ -1067,6 +1148,7 @@ pub fn render(
                 expanded: sel && state.expanded,
                 read: read_since_idle(slot, &state.seen),
                 summaries: state.summaries,
+                delegated: delegated(scene, views, *id),
             };
             let mut lines = card(slot, *depth, views.get(id), &look, inner.width);
             // A subagent's card goes with its root's.
@@ -1156,13 +1238,16 @@ pub fn render(
         y += c.lines.len();
     }
     let h = usize::from(inner.height);
+    // A list that overflows may give its last row to the count of cards
+    // below, so a card is revealed clear of it.
+    let reveal_h = if y > h { h.saturating_sub(1) } else { h };
     // A newly selected card is brought wholly into view, its top kept in
     // view if it is taller than the panel.
     if std::mem::take(&mut state.reveal)
         && let Some((top, bottom)) = sel_range
     {
-        if bottom > state.scroll + h {
-            state.scroll = bottom.saturating_sub(h);
+        if bottom > state.scroll + reveal_h {
+            state.scroll = bottom.saturating_sub(reveal_h);
         }
         state.scroll = state.scroll.min(top);
     }
@@ -1170,13 +1255,29 @@ pub fn render(
     // blank and a shrinking list pulls its cards back into view.
     state.scroll = state.scroll.min(y.saturating_sub(h));
     let start = state.scroll;
+    // The cards wholly under the window are counted on its last row: a lone
+    // ▼ on the title row was all that said the list went on.
+    let below = if y > start + h && h > 1 {
+        let mut top = 0;
+        cards
+            .iter()
+            .filter(|c| {
+                let own = top + c.lead;
+                top += c.lines.len();
+                own >= start + h - 1
+            })
+            .count()
+    } else {
+        0
+    };
+    let card_h = if below > 0 { h - 1 } else { h };
     let mut row = 0usize;
     let mut drawn = Drawn::default();
     for c in &cards {
         let sel = state.selected == Some(c.id);
         let mut shown: Option<(u16, u16)> = None;
         for (i, line) in c.lines.iter().enumerate() {
-            if row >= start && row - start < h {
+            if row >= start && row - start < card_h {
                 let y = inner.y + (row - start) as u16;
                 let own = i >= c.lead;
                 // A group's header and the blank over it are no card's: a
@@ -1215,6 +1316,15 @@ pub fn render(
         {
             drawn.outlines.push(rows);
         }
+    }
+    if below > 0 {
+        let more = format!("  +{below} ▼");
+        buf.set_line(
+            inner.x,
+            inner.y + card_h as u16,
+            &Line::from(Span::styled(more, Style::default().fg(DIM))),
+            inner.width,
+        );
     }
     // Cards past either edge, marked on the title row, which holds no card:
     // without a mark a long list looked like it ended at the window.
@@ -1501,6 +1611,38 @@ mod tests {
         assert!(!draw(&mut state).iter().any(|(_, o)| *o == target));
     }
 
+    /// A list cut off at the window's bottom says how many cards are still
+    /// below on its last row; a lone ▼ on the title row went unseen. Scrolled
+    /// to the end, nothing is below and the row holds a card again.
+    #[test]
+    fn a_cut_off_list_counts_the_cards_below() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let ids: Vec<AgentId> = (0..8)
+            .map(|i| start(&mut scene, &mut r, &format!("s{i}"), None, t0 + Duration::from_secs(i)))
+            .collect();
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 40, 12);
+        let mut state = PanelState::default();
+        let mut buf = Buffer::empty(area);
+        let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
+        let row = |buf: &Buffer, y: u16| (0..area.width).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        let last = row(&buf, area.height - 1);
+        let shown: std::collections::HashSet<AgentId> = drawn.rows.iter().map(|(_, id)| *id).collect();
+        let below = ids.len() - shown.len();
+        assert!(below > 0, "the test needs more cards than the panel holds");
+        assert!(last.contains(&format!("+{below} ▼")), "{last:?}");
+        assert!(
+            !drawn.rows.iter().any(|(y, _)| *y == area.height - 1),
+            "the count's row is no card's to click"
+        );
+        state.scroll_by(1000);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
+        assert!(!row(&buf, area.height - 1).contains('+'));
+    }
+
     /// A group's header belongs to no card: clicking it selected the card
     /// under it, and a selected card's ground spread over the header and the
     /// blank above it, so the selection looked a row taller than its card.
@@ -1778,6 +1920,7 @@ mod tests {
             expanded: false,
             read: false,
             summaries: true,
+            delegated: None,
         };
         let lines = card(slot, 0, None, &look, 40);
         let first = &lines[0].spans;
@@ -1812,6 +1955,7 @@ mod tests {
             expanded: false,
             read: false,
             summaries: true,
+            delegated: None,
         };
         let qa = TaskView {
             role: Some(Role::Qa),
@@ -1939,27 +2083,112 @@ mod tests {
             ..TaskView::default()
         };
         assert_eq!(
-            doing(slot, Some(&done("登录页已修好", true))),
+            doing(slot, Some(&done("登录页已修好", true)), None),
             Some(("登录页已修好".into(), TEXT))
         );
         assert_eq!(
-            doing(slot, Some(&done("问：要不要删旧接口", true))).map(|d| d.1),
+            doing(slot, Some(&done("问：要不要删旧接口", true)), None).map(|d| d.1),
             Some(WAIT)
         );
         assert_eq!(
-            doing(slot, Some(&done("已修好，补了测试", false))).map(|d| d.1),
+            doing(slot, Some(&done("已修好，补了测试", false)), None).map(|d| d.1),
             Some(DIM)
         );
         slot.state = ActivityState::Running { item: None };
-        assert_eq!(doing(slot, Some(&done("登录页已修好", true))), None);
+        assert_eq!(doing(slot, Some(&done("登录页已修好", true)), None), None);
         // Claude's idle prompt moves it to 等你批; the question stays shown.
         slot.state = ActivityState::RequiresAction {
             reason: Some("Claude is waiting for your input".into()),
         };
         assert_eq!(
-            doing(slot, Some(&done("问：要不要删旧接口", true))).map(|d| d.0),
+            doing(slot, Some(&done("问：要不要删旧接口", true)), None).map(|d| d.0),
             Some("等你回复：问：要不要删旧接口".into())
         );
+    }
+
+    /// A parent handing work out has "Delegating" as its call, pixtuoid's
+    /// English, saying again what its 分派中 chip says. Its card says what
+    /// the subagent is on instead, or nothing while that is not known.
+    #[test]
+    fn a_delegating_card_says_what_its_subagent_is_on() {
+        use pixtuoid_core::ToolDetail;
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let p = start(&mut scene, &mut r, "p", None, t0);
+        r.apply(
+            &mut scene,
+            AgentEvent::ToolUseStart {
+                agent_id: p,
+                tool_use_id: Some("t1".into()),
+                detail: Some(ToolDetail::Task),
+            },
+            t0,
+            Transport::Hook,
+        );
+        assert!(matches!(
+            &scene.agents[&p].state,
+            ActivityState::Running { item: Some(ToolUse { kind: ToolKind::Task, .. }) }
+        ));
+        let mut views = HashMap::new();
+        assert_eq!(delegated(&scene, &std::sync::Arc::new(views.clone()), p), None);
+        assert_eq!(doing(&scene.agents[&p], None, None), None);
+        let kid = start(&mut scene, &mut r, "kid", Some(p), t0 + Duration::from_secs(1));
+        scene.agents.get_mut(&kid).unwrap().state = ActivityState::Running { item: None };
+        views.insert(
+            kid,
+            TaskView {
+                line: Some("结算页加优惠券输入框".into()),
+                role: Some(crate::roles::Role::Frontend),
+                ..TaskView::default()
+            },
+        );
+        let views = std::sync::Arc::new(views);
+        let on = delegated(&scene, &views, p);
+        assert_eq!(on.as_deref(), Some("前端 · 结算页加优惠券输入框"));
+        let (line, _) = doing(&scene.agents[&p], None, on.as_deref()).expect("a line");
+        assert!(!line.contains("Delegating"), "{line}");
+        // Done, it is no longer what the parent waits on.
+        scene.agents.get_mut(&kid).unwrap().state = ActivityState::Idle;
+        assert_eq!(delegated(&scene, &views, p), None);
+    }
+
+    /// Over a head in the waiting room the task said nothing of why it is
+    /// there: the head says the question asked, or the call to approve, with
+    /// its path made short enough to keep the file name.
+    #[test]
+    fn a_waiting_head_says_what_it_waits_on() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let slot = scene.agents.get_mut(&a).unwrap();
+        slot.state = ActivityState::Idle;
+        let asked = TaskView {
+            line: Some("修登录页".into()),
+            outcome: Some("问：要不要删旧接口".into()),
+            outcome_summarized: true,
+            ..TaskView::default()
+        };
+        assert_eq!(
+            head_wait(slot, Some(&asked), false, 40).as_deref(),
+            Some("要不要删旧接口")
+        );
+        // Opened, it is no longer waiting: the task shows again.
+        assert_eq!(head_wait(slot, Some(&asked), true, 40), None);
+        let tool = TaskView {
+            recent_tools: vec!["Bash: ls".into(), "Edit: /repo/src/very/deep/login.rs".into()],
+            ..TaskView::default()
+        };
+        slot.state = ActivityState::RequiresAction {
+            reason: Some("permission".into()),
+        };
+        let head = head_wait(slot, Some(&tool), false, 14).expect("a head line");
+        assert_eq!(head, "Edit: login.rs");
+        assert!(crate::text::cells(&head) <= 14, "{head}");
+        // Working, it waits on nothing.
+        slot.state = ActivityState::Running { item: None };
+        assert_eq!(head_wait(slot, Some(&tool), false, 14), None);
     }
 
     /// A PM's own calls are only the handing out; its card says how far
@@ -1985,7 +2214,7 @@ mod tests {
             ..TaskView::default()
         };
         assert_eq!(
-            doing(slot, Some(&view)),
+            doing(slot, Some(&view), None),
             Some(("计划 1/4 · 前端▸ 后端▸".into(), TEXT))
         );
     }
