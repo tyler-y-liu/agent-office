@@ -51,6 +51,20 @@ impl Backend {
             Self::Dsh => "DeepSeek Harness",
         }
     }
+
+    /// Its name where room is short: the panel's host row carries one chip
+    /// per host, so a third one has to fit beside the first two.
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Dsh => "DSH",
+        }
+    }
+
+    /// Every host a dispatch could go to, in the order the bar lists them.
+    /// A new host is added here and in [`Self::short`], and the bar picks it
+    /// up without another layout.
+    pub const ALL: &'static [Self] = &[Self::Claude, Self::Dsh];
 }
 
 /// `AGENT_OFFICE_DISPATCH_HOST` as a host. `follow` (and anything unknown)
@@ -890,6 +904,21 @@ fn host_var() -> Option<String> {
         })
 }
 
+/// The repository a session opened in, as the panel and the note name it.
+fn repo_name(dir: &Path) -> String {
+    let name = dir
+        .file_name()
+        .map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+    crate::text::truncate_cells(&name, 16)
+}
+
+/// A session id's first block: enough to tell two blank sessions apart in a
+/// list, short enough for a footer note.
+fn short_id(id: &str) -> &str {
+    let id = id.strip_prefix("session-").unwrap_or(id);
+    id.split('-').next().unwrap_or(id)
+}
+
 /// The arguments that start `claude` as `role` on `task`; the agent file
 /// brings the brief, so the prompt carries only the marker and the task.
 pub fn terminal_args(role: Role, task: &str) -> Vec<String> {
@@ -953,20 +982,21 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
         // The session is created behind the Harness window: without raising
         // it, a relay you cannot see is a relay you cannot check.
         crate::dsh::focus_app();
+        // Where it went, in the terms a user can act on: the repository's
+        // name picks the workspace in DSH, and the id's first block is what a
+        // list of blank sessions can be told apart by.
+        let (repo, id) = (repo_name(dir), short_id(&result.session_id));
         return Ok(if submit {
             crate::tr!(
-                "已在 DeepSeek Harness 创建并提交「{}」会话（{}，{}）",
-                "created and submitted a {} relay in DeepSeek Harness ({}, {})",
+                "已在 DeepSeek Harness 创建并提交「{}」（{repo} · {id}）",
+                "created and submitted a {} relay in DeepSeek Harness ({repo} · {id})",
                 role.name(),
-                dir.display(),
-                result.session_id,
             ).to_owned()
         } else {
             crate::tr!(
-                "已在 DeepSeek Harness 建好「{}」空白会话（{}），在会话列表最上面打开它写任务",
-                "created a blank {} session in DeepSeek Harness ({}); open it at the top of the session list and write its task",
+                "已在 DeepSeek Harness 建好「{}」空白会话（{repo} · {id}），去这个目录的 workspace 最上面找",
+                "created a blank {} session in DeepSeek Harness ({repo} · {id}); it is at the top of that directory's workspace",
                 role.name(),
-                result.session_id,
             ).to_owned()
         });
     }
@@ -1585,5 +1615,20 @@ mod tests {
         assert_eq!(Backend::Dsh.other(), Backend::Claude);
         assert_eq!(Backend::Dsh.label(), "DeepSeek Harness");
         assert!(Backend::Claude.label().contains("Claude"));
+    }
+
+    /// A dispatch note has to answer "where did it go" on its own: DSH picks
+    /// the workspace from the directory, and a list of blank sessions is told
+    /// apart by the id's first block, not by its whole uuid.
+    #[test]
+    fn a_note_names_the_repository_and_a_recognisable_id() {
+        assert_eq!(short_id("session-4a1aa69d-1343-4ceb-8662-716256890ad3"), "4a1aa69d");
+        assert_eq!(short_id("plain-id"), "plain");
+        assert_eq!(
+            repo_name(Path::new("/Users/x/code/work/toolhub-studio")),
+            "toolhub-studio"
+        );
+        let long = repo_name(Path::new("/a/a-very-long-repository-name-here"));
+        assert!(long.ends_with('…'), "a long name is cut, not printed whole: {long}");
     }
 }

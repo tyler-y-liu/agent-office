@@ -57,6 +57,18 @@ pub struct DispatchPlan {
     pub switchable: bool,
 }
 
+#[derive(Clone, Debug)]
+/// What the panel's role bar shows: where a click dispatches, in which
+/// repository, and every host it offers.
+pub struct DispatchBar {
+    pub active: crate::roles::Backend,
+    pub repo: String,
+    /// Each host with whether it could take a dispatch now, in the bar's own
+    /// order: one chip per entry, so a host added to [`crate::roles::Backend::ALL`]
+    /// appears without another layout.
+    pub hosts: Vec<(crate::roles::Backend, bool)>,
+}
+
 /// How long the role bar keeps its host: long enough that drawing it costs
 /// nothing, short enough that a session moving to the front shows up.
 const HOST_CACHE_FOR: Duration = Duration::from_secs(2);
@@ -159,7 +171,7 @@ pub struct Core {
     dispatches: Dispatches,
     /// When the role bar's host was last worked out, and what it was: the
     /// answer walks the role files, and the bar is drawn every beat.
-    host_at: Option<(Instant, Option<(crate::roles::Backend, bool)>)>,
+    host_at: Option<(Instant, Option<DispatchBar>)>,
     /// The host picked from the bar or the picker this run. It outranks the
     /// configured default, so a click does not have to be repeated for every
     /// dispatch: switching once is a decision, not one pick's footnote.
@@ -881,18 +893,36 @@ impl Core {
     /// the other one could take a dispatch too. `None` hides the bar: one
     /// that only ever answers "not set up" would be furniture. Cheap enough
     /// to ask each frame, unlike a whole plan — no relay text, no repository.
-    pub fn dispatch_bar(&mut self) -> Option<(crate::roles::Backend, bool)> {
-        if let Some((at, bar)) = self.host_at
+    pub fn dispatch_bar(&mut self) -> Option<DispatchBar> {
+        if let Some((at, bar)) = &self.host_at
             && at.elapsed() < HOST_CACHE_FOR
         {
-            return bar;
+            return bar.clone();
         }
         let bar = self
             .worker_host()
-            .map(|following| self.dispatch_backend(following))
-            .filter(|host| crate::roles::host_ready(*host))
-            .map(|host| (host, crate::roles::host_ready(host.other())));
-        self.host_at = Some((Instant::now(), bar));
+            .and_then(|(following, dir)| {
+                let host = self.dispatch_backend(following);
+                crate::roles::host_ready(host).then(|| {
+                    let repo = dir.file_name().map_or_else(
+                        || dir.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    DispatchBar {
+                        active: host,
+                        repo,
+                        // Every host the bar shows is asked whether it could
+                        // take a dispatch: an unready one is still listed, so
+                        // clicking it can say what it is missing.
+                        hosts: crate::roles::Backend::ALL
+                            .iter()
+                            .map(|host| (*host, crate::roles::host_ready(*host)))
+                            .collect(),
+                    }
+                })
+            })
+            .filter(|bar| !bar.hosts.is_empty());
+        self.host_at = Some((Instant::now(), bar.clone()));
         bar
     }
 
@@ -912,7 +942,7 @@ impl Core {
     pub fn choose_dispatch_host(&mut self, host: crate::roles::Backend) {
         let current = self
             .dispatch_bar()
-            .map_or(crate::roles::Backend::Claude, |(host, _)| host);
+            .map_or(crate::roles::Backend::Claude, |bar| bar.active);
         if host == current {
             return;
         }
@@ -927,11 +957,15 @@ impl Core {
         }
     }
 
-    /// The host the dispatch's worker runs in, which the bar follows: the
-    /// selected one, else the one that moved last.
-    fn worker_host(&self) -> Option<crate::roles::Backend> {
+    /// The dispatch's worker — the selected one, else the one that moved
+    /// last — with the host it runs in and the repository a fresh session
+    /// would open in. A relay goes to its own worktree, which the picker says
+    /// separately; the bar names the repository either way.
+    fn worker_host(&self) -> Option<(crate::roles::Backend, std::path::PathBuf)> {
         let scene = self.scene();
-        dispatch_worker(&scene, self.ui.selected).map(host_of)
+        let slot = dispatch_worker(&scene, self.ui.selected)?;
+        let dir = pixtuoid_core::state::project_root(&slot.cwd).to_path_buf();
+        Some((host_of(slot), dir))
     }
 
     /// Switch the picker's host to the other one, when that host could take
@@ -940,7 +974,8 @@ impl Core {
     pub fn toggle_dispatch_host(&mut self, plan: &mut DispatchPlan) {
         self.choose_dispatch_host(plan.backend.other());
         // A refused switch leaves the plan as it was.
-        if let Some((host, _)) = self.dispatch_bar() {
+        if let Some(bar) = self.dispatch_bar() {
+            let host = bar.active;
             plan.backend = host;
             plan.switchable = crate::roles::host_ready(host.other());
         }

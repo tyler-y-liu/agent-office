@@ -69,7 +69,9 @@ pub struct PanelState {
     pub roles: bool,
     /// The role bar's hosts: the one a click dispatches into, and whether the
     /// other one could take a dispatch too. `None` leaves the bar out.
-    pub bar: Option<(crate::roles::Backend, bool)>,
+    /// What the role bar shows: the hosts it offers, the one a click would
+    /// dispatch into, and the repository.
+    pub bar: Option<crate::core::DispatchBar>,
 }
 
 impl PanelState {
@@ -1258,8 +1260,8 @@ pub fn render(
     }
     // The role bar keeps the bottom rows, so cards scroll in the rest: a
     // bar that came and went with the list would move under the pointer.
-    let bar = state.bar.filter(|_| inner.height > 6);
-    let labels = bar.and_then(|_| bar_labels(inner.width));
+    let bar = state.bar.clone().filter(|_| inner.height > 6);
+    let labels = bar.as_ref().and_then(|_| bar_labels(inner.width));
     let bar_rows = labels
         .as_ref()
         .map_or(0, |rows| u16::try_from(rows.len() + 1).unwrap_or(u16::MAX));
@@ -1365,7 +1367,7 @@ pub fn render(
         let x = inner.x + inner.width.saturating_sub(w);
         buf.set_string(x, area.y, more, Style::default().fg(TEXT).bg(SELECTED_BG));
     }
-    if let (Some(bar), Some(labels)) = (bar, &labels) {
+    if let (Some(bar), Some(labels)) = (&bar, &labels) {
         let top = inner.y + inner.height.saturating_sub(bar_rows);
         role_bar(inner.x, top, inner.width, bar, labels, buf, &mut drawn);
     }
@@ -1406,44 +1408,48 @@ fn bar_labels(width: u16) -> Option<Vec<Vec<(crate::roles::Role, &'static str)>>
     Some(vec![names[..k].to_vec(), names[k..].to_vec()])
 }
 
-/// Draw the role bar: which host a click dispatches into, a `⇄` for the
-/// other one, then one chip per post. Fills in each chip's row, first cell,
-/// cells across and post, and the `⇄`'s, so a click can be matched to them.
+/// Draw the role bar: the repository, one chip per host with the active one
+/// lit, then one chip per post. Fills in each chip's row, first cell, cells
+/// across and host or post, so a click can be matched to them.
+///
+/// The hosts are a list, not "this one and the other": adding Cursor to
+/// [`crate::roles::Backend::ALL`] puts a third chip here with no new layout,
+/// which a `⇄` that names one alternative could never do.
 fn role_bar(
     x: u16,
     y: u16,
     width: u16,
-    bar: (crate::roles::Backend, bool),
+    bar: &crate::core::DispatchBar,
     labels: &[Vec<(crate::roles::Role, &'static str)>],
     buf: &mut Buffer,
     drawn: &mut Drawn,
 ) {
-    let (host, other_ready) = bar;
-    let other = host.other();
-    let (here, there) = (host.label(), other.label());
-    let head = crate::tr!("派活到 {here}", "dispatch to {here}");
+    // The repository leads: the directory comes from the worker rather than
+    // the window, and it is what decides where the session lands.
+    let head = truncate_cells(&format!("{} →", bar.repo), width / 3);
     buf.set_line(
         x,
         y,
         &Line::from(Span::styled(head.clone(), Style::default().fg(DIM))),
         width,
     );
-    // The switch sits on the host line because the host is what it changes:
-    // a second control row would cost the cards another row. A host that
-    // cannot take a dispatch is still offered, dim, so clicking it says why.
-    let switch = crate::tr!("⇄ {there}", "⇄ {there}");
-    // A narrow panel keeps the arrow alone rather than letting the two
-    // labels run into each other.
-    let switch = if bar_cells(&head) + 2 + bar_cells(&switch) <= width {
-        switch
-    } else {
-        "⇄".to_owned()
-    };
-    let w = bar_cells(&switch);
-    let col = width.saturating_sub(w);
-    let ink = if other_ready { TEXT } else { DIM };
-    buf.set_string(x + col, y, &switch, Style::default().fg(ink));
-    drawn.hosts.push((y, x + col, w, other));
+    let mut col = bar_cells(&head) + 1;
+    for &(host, ready) in &bar.hosts {
+        let chip = format!(" {} ", host.short());
+        let w = bar_cells(&chip);
+        if col + w > width {
+            break;
+        }
+        let style = match (host == bar.active, ready) {
+            (true, _) => Style::default().fg(TEXT).bg(rgb(crate::roles::CHIP_BG)),
+            // Listed but not set up: still clickable, and clicking says why.
+            (false, true) => Style::default().fg(DIM),
+            (false, false) => Style::default().fg(fade(DIM, 0.5)),
+        };
+        buf.set_string(x + col, y, &chip, style);
+        drawn.hosts.push((y, x + col, w, host));
+        col += w + 1;
+    }
 
     let mut hits = Vec::new();
     for (i, row) in labels.iter().enumerate() {
@@ -2416,10 +2422,20 @@ mod tests {
         let area = Rect::new(0, 0, 46, 3);
         let mut buf = Buffer::empty(area);
         let mut drawn = Drawn::default();
-        role_bar(0, 0, area.width, (Backend::Dsh, true), &labels, &mut buf, &mut drawn);
+        let bar = crate::core::DispatchBar {
+            active: Backend::Dsh,
+            repo: "shop".to_owned(),
+            hosts: crate::roles::Backend::ALL
+                .iter()
+                .map(|host| (*host, true))
+                .collect(),
+        };
+        role_bar(0, 0, area.width, &bar, &labels, &mut buf, &mut drawn);
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("DeepSeek Harness"), "the host it will open: {text}");
-        assert!(text.contains("Claude Code"), "and the one ⇄ switches to: {text}");
+        assert!(text.contains("shop →"), "the repository leads: {text}");
+        for host in crate::roles::Backend::ALL {
+            assert!(text.contains(host.short()), "every host has a chip: {text}");
+        }
         let roster: Vec<_> = crate::roles::ROSTER.iter().map(|p| p.role).collect();
         assert_eq!(
             drawn.roles.iter().map(|(_, _, _, r)| *r).collect::<Vec<_>>(),
@@ -2441,17 +2457,21 @@ mod tests {
                 "chips do not overlap: {a:?} {b:?}"
             );
         }
-        // The switch is one click away on the host row itself, and its hit
-        // does not reach into the chips below it.
-        let (row, col, w, host) = drawn.hosts[0];
-        assert_eq!(row, 0, "the switch sits on the host line");
-        assert_eq!(host, Backend::Claude);
-        assert!(col + w <= area.width);
-        let switch: String = (col..col + w)
-            .map(|i| buf[(i, 0)].symbol())
-            .filter(|s| *s != " ")
-            .collect();
-        assert!(switch.contains("Claude"), "{switch}");
+        // Every host is one click away on the host row, and no chip reaches
+        // into the posts below it.
+        assert_eq!(
+            drawn.hosts.iter().map(|(_, _, _, host)| *host).collect::<Vec<_>>(),
+            crate::roles::Backend::ALL.to_vec()
+        );
+        for &(row, col, w, host) in &drawn.hosts {
+            assert_eq!(row, 0, "the hosts share the row above the posts");
+            assert!(col + w <= area.width, "{host:?} fits in the panel");
+            let chip: String = (col..col + w)
+                .map(|i| buf[(i, 0)].symbol())
+                .filter(|s| *s != " ")
+                .collect();
+            assert_eq!(chip, host.short(), "the chip names its host");
+        }
     }
 
     /// A panel too narrow to hold the roster in two rows keeps the bar out:
@@ -2480,16 +2500,50 @@ mod tests {
         let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
         assert!(drawn.roles.is_empty(), "no host to dispatch to, no bar");
 
-        state.bar = Some((crate::roles::Backend::Claude, true));
+        state.bar = Some(crate::core::DispatchBar {
+            active: crate::roles::Backend::Claude,
+            repo: "shop".to_owned(),
+            hosts: crate::roles::Backend::ALL
+                .iter()
+                .map(|host| (*host, true))
+                .collect(),
+        });
         let mut buf = Buffer::empty(area);
         let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
         assert_eq!(drawn.roles.len(), crate::roles::ROSTER.len());
-        assert_eq!(drawn.hosts.len(), 1, "one switch, one other host");
+        assert_eq!(drawn.hosts.len(), crate::roles::Backend::ALL.len());
         let bar_top = drawn.roles.iter().map(|(y, _, _, _)| *y).min().unwrap();
         let bar_bottom = drawn.roles.iter().map(|(y, _, _, _)| *y).max().unwrap();
         assert_eq!(bar_top, area.height - 2, "the host line sits right above");
         assert_eq!(bar_bottom, area.height - 1, "and the chip rows end the panel");
         let card_rows = drawn.rows.iter().map(|(y, _)| *y).max().unwrap();
         assert!(card_rows < bar_top - 1, "cards stop above the bar's host line");
+    }
+
+    /// The host chips are the only way to switch, so a long repository name
+    /// gives way rather than pushing them off the row.
+    #[test]
+    fn a_long_repository_name_leaves_room_for_every_host() {
+        let area = Rect::new(0, 0, 46, 3);
+        let mut buf = Buffer::empty(area);
+        let mut drawn = Drawn::default();
+        let bar = crate::core::DispatchBar {
+            active: crate::roles::Backend::Claude,
+            repo: "deepseek-harness-integration-26040d-b03f2774".to_owned(),
+            hosts: crate::roles::Backend::ALL
+                .iter()
+                .map(|host| (*host, true))
+                .collect(),
+        };
+        let labels = bar_labels(46).unwrap();
+        role_bar(0, 0, area.width, &bar, &labels, &mut buf, &mut drawn);
+        assert_eq!(
+            drawn.hosts.len(),
+            crate::roles::Backend::ALL.len(),
+            "every host still has a chip"
+        );
+        for &(_, col, w, _) in &drawn.hosts {
+            assert!(col + w <= area.width, "and every chip is inside the panel");
+        }
     }
 }
