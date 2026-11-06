@@ -265,7 +265,9 @@ fn has_every_event(settings: &Value) -> bool {
 fn write_settings(path: &PathBuf, before: Option<&str>, settings: &Value) -> Result<()> {
     if let Some(before) = before {
         let backup = path.with_extension("json.agent-office.bak");
-        std::fs::write(&backup, before).with_context(|| {
+        // The original's env may hold an API key: the copy is ours, so 0600.
+        let tmp = path.with_extension("json.agent-office.bak.tmp");
+        crate::atomic::write_private(&backup, &tmp, before.as_bytes()).with_context(|| {
             crate::tr!(
                 "备份到 {} 失败",
                 "could not back up to {}",
@@ -290,7 +292,7 @@ fn write_settings(path: &PathBuf, before: Option<&str>, settings: &Value) -> Res
         std::fs::write(path, text)
     } else {
         let tmp = path.with_extension("json.agent-office.tmp");
-        std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path))
+        crate::atomic::write_keeping_mode(path, &tmp, text.as_bytes())
     };
     result.with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
     println!("{}", crate::tr!("已更新 {}", "Updated {}", path.display()));
@@ -386,6 +388,57 @@ mod tests {
         assert_eq!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"], cmd);
         remove_ours(&mut s);
         assert_eq!(s, original);
+    }
+
+    /// settings.json's env often holds an API key: connect and disconnect
+    /// must not leave it, or the backup of it, readable by other users of
+    /// the Mac, and a mode the owner widened on purpose (0640) stays theirs.
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_settings_keeps_its_mode_and_the_backup_is_private() {
+        use crate::atomic::tests::{mode, scratch};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("hook-settings");
+        let path = dir.join("settings.json");
+        let backup = dir.join("settings.json.agent-office.bak");
+        // An older build left a world-readable backup behind.
+        std::fs::write(&backup, "{}").unwrap();
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for want in [0o600, 0o640] {
+            let before = r#"{"env": {"ANTHROPIC_API_KEY": "sk-x"}}"#;
+            std::fs::write(&path, before).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(want)).unwrap();
+            write_settings(&path, Some(before), &json!({"model": "opus"})).unwrap();
+            assert_eq!(mode(&path), want);
+            assert_eq!(mode(&backup), 0o600);
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A settings.json linked from a dotfiles repo must stay a link, with
+    /// the change and the target's mode where the link points.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_settings_file_is_written_through_and_keeps_its_mode() {
+        use crate::atomic::tests::{mode, scratch};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("hook-link");
+        let target = dir.join("dotfiles.json");
+        let path = dir.join("settings.json");
+        std::fs::write(&target, "{}").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_settings(&path, Some("{}"), &json!({"model": "opus"})).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read_to_string(&target).unwrap().contains("opus"));
+        assert_eq!(mode(&target), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An install from before the turn's events must read as not connected,

@@ -1,6 +1,7 @@
 //! agent-office: pixtuoid's pixel office in an always-on-top window, with
 //! every agent's task in one line over its head and in a panel beside it.
 
+mod atomic;
 mod codex;
 mod core;
 mod cursor;

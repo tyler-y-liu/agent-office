@@ -76,7 +76,13 @@ fn env_lang() -> Option<String> {
 
 fn save(l: Lang) -> std::io::Result<()> {
     let home = std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("HOME is not set"))?;
-    let path = std::path::PathBuf::from(home).join(crate::tasks::client::ENV_FILE);
+    save_to(
+        std::path::PathBuf::from(home).join(crate::tasks::client::ENV_FILE),
+        l,
+    )
+}
+
+fn save_to(path: std::path::PathBuf, l: Lang) -> std::io::Result<()> {
     // Through a symlink (a dotfiles repo, say) to the file it names, so the
     // rename below replaces that file and not the link.
     let path = std::fs::canonicalize(&path).unwrap_or(path);
@@ -95,20 +101,11 @@ fn save(l: Lang) -> std::io::Result<()> {
     // Written aside and renamed in: the file holds the summary API key, which
     // a crash mid-write must not lose. A new file is 0600 so the key is not
     // exposed; an existing one keeps the mode its owner gave it.
-    let tmp = path.with_extension("tmp");
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    let mut f = o.open(&tmp)?;
-    if let Ok(m) = std::fs::metadata(&path) {
-        f.set_permissions(m.permissions())?;
-    }
-    std::io::Write::write_all(
-        &mut f,
+    crate::atomic::write_keeping_mode(
+        &path,
+        &path.with_extension("tmp"),
         with_var(&old, "AGENT_OFFICE_LANG", value).as_bytes(),
-    )?;
-    std::fs::rename(&tmp, &path)
+    )
 }
 
 /// `file` with `key` set to `value`: its line rewritten where it has one,
@@ -266,6 +263,51 @@ mod tests {
         for none in ["", "C", "C.UTF-8", "POSIX"] {
             assert_eq!(parse(none), None, "{none}");
         }
+    }
+
+    /// The env file holds the summary API key: pressing l must create it
+    /// 0600, keep the mode an existing one has, not take a wider mode from a
+    /// tmp a crash left behind, and write through a dotfiles link.
+    #[cfg(unix)]
+    #[test]
+    fn saving_the_language_never_widens_the_env_files_mode() {
+        use crate::atomic::tests::{mode, scratch};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("i18n-env");
+        let path = dir.join("env");
+        save_to(path.clone(), Lang::En).unwrap();
+        assert_eq!(mode(&path), 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        save_to(path.clone(), Lang::Zh).unwrap();
+        assert_eq!(mode(&path), 0o640);
+
+        std::fs::remove_file(&path).unwrap();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, "stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        save_to(path.clone(), Lang::En).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert!(!tmp.exists());
+
+        let target = dir.join("dotfiles-env");
+        let link = dir.join("env-link");
+        std::fs::write(&target, "AGENT_OFFICE_API_KEY=sk-x\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        save_to(link.clone(), Lang::Zh).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "AGENT_OFFICE_API_KEY=sk-x\nAGENT_OFFICE_LANG=zh\n"
+        );
+        assert_eq!(mode(&target), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The language switch rewrites the env file that also holds the summary

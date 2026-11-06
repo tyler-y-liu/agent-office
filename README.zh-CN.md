@@ -43,7 +43,7 @@ AGENT_OFFICE_API_KEY=sk-...
 AGENT_OFFICE_MODEL=your-model
 ```
 
-请求发到 `<base>/v1/chat/completions`，base 末尾带不带 `/v1` 都行。挑一个回得快、不带长推理的模型。
+请求发到 `<base>/v1/chat/completions`；base 里已经带版本段（`/v1`、`/api/v3`、`/v1beta/openai` 等）时发到 `<base>/chat/completions`。挑一个回得快、不带长推理的模型。
 
 有问题先跑 `agent-office doctor`，它会检查会话目录、各 agent 的 hooks、socket 和卡点门槛，并试调一次摘要接口。
 

@@ -676,10 +676,11 @@ pub(crate) fn make_tool_detail(source: &str, tool_name: &str, input: Option<&Val
 /// The format-agnostic Generic-tool fallback display, shared by every source's
 /// `*_tool_detail` so the cap policy can't drift between them. `tool` is capped
 /// at [`MAX_DECODED_FIELD_CHARS`], `target` at [`MAX_TOOL_TARGET_CHARS`] and
-/// rendered as a `: …` suffix.
+/// rendered as a `: …` suffix (agent-office: a lone path at
+/// [`MAX_TOOL_PATH_CHARS`], see [`cap_tool_target`]).
 pub(crate) fn generic_tool_display(tool: &str, target: Option<&str>) -> ToolDetail {
     let suffix = target
-        .map(|t| format!(": {}", ellipsize(t, MAX_TOOL_TARGET_CHARS)))
+        .map(|t| format!(": {}", cap_tool_target(t)))
         .unwrap_or_default();
     ToolDetail::Generic {
         display: format!("{}{suffix}", ellipsize(tool, MAX_DECODED_FIELD_CHARS)),
@@ -710,6 +711,29 @@ pub(crate) fn describe_tool_target<'a>(tool: &str, input: Option<&'a Value>) -> 
 /// Tighter cap for the tool-target descriptor (the `: file/cmd` suffix on a
 /// Generic tool display) — a glanceable fragment, not a full field.
 pub(crate) const MAX_TOOL_TARGET_CHARS: usize = 40;
+
+/// agent-office: cap for a lone path target, as long as macOS's PATH_MAX. Real
+/// targets are absolute paths, often 50+ chars (a scratchpad's runs past
+/// 200), and a 40-char cut left only a directory prefix. Whole, the panel
+/// drops the session's own directory from it and fits the rest
+/// (`text::fit_tool_line`).
+pub(crate) const MAX_TOOL_PATH_CHARS: usize = 1024;
+
+/// agent-office: a lone path over its cap keeps its END (the file name is the
+/// part worth reading), so it loses its head behind a leading ellipsis; any
+/// other target is cut at its end as before.
+fn cap_tool_target(t: &str) -> String {
+    let n = t.chars().count();
+    if t.contains('/') && !t.contains(' ') {
+        if n <= MAX_TOOL_PATH_CHARS {
+            return t.to_owned();
+        }
+        let tail: String = t.chars().skip(n - MAX_TOOL_PATH_CHARS).collect();
+        format!("{ELLIPSIS}{tail}")
+    } else {
+        ellipsize(t, MAX_TOOL_TARGET_CHARS)
+    }
+}
 
 /// Cap for content-derived strings that become slot state ([`AgentEvent::UserActionRequest`] reason,
 /// Rename label) — generous against every legitimate value, tight against a
@@ -1488,6 +1512,28 @@ mod tests {
         }
         match make_tool_detail("test", "Read", None) {
             ToolDetail::Generic { display } => assert_eq!(display, "Read"),
+            other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
+    /// agent-office: the file a tool works on is what its line is read for. A
+    /// long absolute path must reach the panel whole (it fits the line to its
+    /// width), and one over the cap keeps its file name, not its root.
+    #[test]
+    fn a_long_path_target_keeps_its_file_name() {
+        let path = "/tmp/demo/-home-demo-code-personal-blog/00000000/scratchpad/notes/main.rs";
+        let input = json!({ "file_path": path });
+        match make_tool_detail("claude-code", "Edit", Some(&input)) {
+            ToolDetail::Generic { display } => assert_eq!(display, format!("Edit: {path}")),
+            other => panic!("expected Generic, got {other:?}"),
+        }
+        let deep = format!("/{}/main.rs", "d/".repeat(MAX_TOOL_PATH_CHARS));
+        match generic_tool_display("Read", Some(&deep)) {
+            ToolDetail::Generic { display } => {
+                let target = display.strip_prefix("Read: ").expect("has a target suffix");
+                assert!(target.starts_with('…') && target.ends_with("/main.rs"), "{target}");
+                assert_eq!(target.chars().count(), MAX_TOOL_PATH_CHARS + 1);
+            }
             other => panic!("expected Generic, got {other:?}"),
         }
     }

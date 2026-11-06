@@ -106,13 +106,12 @@ impl Summarizer {
     }
 
     pub fn new(base: &str, key: String, model: String) -> Self {
-        let base = base.trim_end_matches('/').trim_end_matches("/v1");
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .build()
                 .expect("a client with only a timeout set builds"),
-            url: format!("{base}/v1/chat/completions"),
+            url: chat_url(base),
             key,
             model,
             slots: Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
@@ -298,9 +297,48 @@ fn clean(raw: &str) -> Option<String> {
     (!line.is_empty()).then(|| truncate_cells(line, SUMMARY_CELLS))
 }
 
+/// `<base>/v1/chat/completions`, unless the base's path already names an API
+/// version (`/v1`, `/api/v3`, `/api/paas/v4`, `/v1beta/openai`): such a
+/// service serves chat under that version, and another `/v1` would 404.
+fn chat_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let versioned = path.split('/').skip(1).any(|seg| {
+        seg.strip_prefix('v').is_some_and(|rest| {
+            let tag = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+            tag.len() < rest.len() && tag.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+    });
+    if versioned {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare base gets `/v1` as before; a base that already names its
+    /// version is used as given, or services on `/api/v3` and the like 404.
+    #[test]
+    fn the_chat_url_adds_v1_only_when_the_base_names_no_version() {
+        for (base, url) in [
+            ("https://x", "https://x/v1/chat/completions"),
+            ("https://x/", "https://x/v1/chat/completions"),
+            ("https://x/v1", "https://x/v1/chat/completions"),
+            ("https://x/v1/", "https://x/v1/chat/completions"),
+            ("https://x/openai", "https://x/openai/v1/chat/completions"),
+            ("https://x/api/v3", "https://x/api/v3/chat/completions"),
+            ("https://x/api/paas/v4", "https://x/api/paas/v4/chat/completions"),
+            ("https://x/v1beta/openai", "https://x/v1beta/openai/chat/completions"),
+            // A host that looks like a version is not a path segment.
+            ("https://v2.x", "https://v2.x/v1/chat/completions"),
+        ] {
+            assert_eq!(chat_url(base), url, "{base}");
+        }
+    }
 
     #[test]
     fn model_chatter_is_trimmed_to_a_label() {

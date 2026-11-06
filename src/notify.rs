@@ -42,9 +42,10 @@ pub struct Notifier {
     /// once, and a new one by the same session is told again.
     told: HashSet<(AgentId, SystemTime)>,
     badge: Option<usize>,
-    /// The waits standing at the first tick are noted, not told: you just
-    /// opened the office and see them.
-    primed: bool,
+    /// The first tick: a wait that began before it is noted, not told. You
+    /// just opened the office and see it, even when the office only
+    /// recognises it later (a question shows once its outcome is read).
+    opened: Option<SystemTime>,
     /// A banner went out since the window last had focus.
     pub unseen: bool,
 }
@@ -81,9 +82,9 @@ impl Notifier {
             })
             .collect();
         let mut tick = Tick::default();
-        let quiet = focused || !self.primed;
+        let opened = *self.opened.get_or_insert(now);
         for &(id, wait, since) in &waiting {
-            if !self.told.insert((id, since)) || quiet {
+            if !self.told.insert((id, since)) || focused || since < opened {
                 continue;
             }
             let slot = &scene.agents[&id];
@@ -112,7 +113,6 @@ impl Notifier {
                 body: body.unwrap_or_default(),
             });
         }
-        self.primed = true;
         self.unseen |= !tick.alerts.is_empty();
         self.told
             .retain(|told| waiting.iter().any(|&(id, _, since)| *told == (id, since)));
@@ -344,5 +344,38 @@ mod tests {
         assert!(t.alerts.is_empty());
         assert_eq!(t.badge, Some(2));
         assert!(!n.unseen);
+    }
+
+    /// A question asked before the office opened is only recognised once its
+    /// outcome is read, seconds after the first tick; it is as old as the
+    /// rest and must not buzz. A question asked after the office opened
+    /// still does.
+    #[test]
+    fn a_question_asked_before_the_office_opened_is_not_bannered_when_recognised_late() {
+        let (mut scene, ids) = scene_of(&["old", "new"]);
+        // Idle since its transcript's last write, as the window dates it.
+        scene.agents.get_mut(&ids[0]).unwrap().state_started_at = at(10);
+        let mut n = Notifier::default();
+        let first = primed(&mut n, &scene, &views(&[]), 60);
+        assert!(first.alerts.is_empty());
+        let asking = |q: &str| TaskView {
+            outcome: Some(format!("问：{q}")),
+            outcome_summarized: true,
+            ..TaskView::default()
+        };
+        let v = views(&[(ids[0], asking("要不要发版？"))]);
+        let t = primed(&mut n, &scene, &v, 63);
+        assert!(t.alerts.is_empty(), "asked before the office opened");
+        assert_eq!(t.badge, Some(1), "still counted");
+        assert!(!n.unseen);
+        scene.agents.get_mut(&ids[1]).unwrap().state_started_at = at(90);
+        let v = views(&[
+            (ids[0], asking("要不要发版？")),
+            (ids[1], asking("要不要删旧表？")),
+        ]);
+        let t = primed(&mut n, &scene, &v, 91);
+        assert_eq!(t.alerts.len(), 1);
+        assert_eq!(t.alerts[0].agent, ids[1]);
+        assert_eq!(t.alerts[0].body, "要不要删旧表？");
     }
 }

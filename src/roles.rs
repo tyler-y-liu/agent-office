@@ -257,7 +257,11 @@ const MARK: &str = "<!-- agent-office role=";
 /// A role's file as installed: its template and our mark, with a hash of
 /// the template so an edit by hand is told from a stale copy.
 fn rendered(post: &Post) -> String {
-    let body = post.template().trim_end();
+    render(post, post.template())
+}
+
+fn render(post: &Post, template: &str) -> String {
+    let body = template.trim_end();
     let sha = crate::tasks::memo::key(&[body]);
     format!("{body}\n{MARK}{} sha={sha} -->\n", post.id)
 }
@@ -269,6 +273,9 @@ pub enum State {
     Ours {
         current: bool,
     },
+    /// Ours and current, but in the other language: `install` brings it
+    /// over to the UI's, yet it is no older version.
+    OtherLang,
     /// Ours but changed by hand since.
     Edited,
     /// A file of the same name that is not ours.
@@ -283,18 +290,27 @@ fn state_of(post: &Post, text: Option<&str>) -> State {
         return State::Foreign;
     };
     let body = text[..at].trim_end();
-    let sha = text[at..]
+    let Some(end) = text[at..].find("-->").map(|i| at + i + "-->".len()) else {
+        return State::Edited;
+    };
+    let sha = text[at..end]
         .split("sha=")
         .nth(1)
         .and_then(|s| s.split_whitespace().next());
     // The mark hashes the template it came from, which is all the body was
-    // unless someone changed it.
-    if sha != Some(crate::tasks::memo::key(&[body]).as_str()) {
+    // unless someone changed it; anything added after the mark is the
+    // user's too, and a rewrite or delete would lose it.
+    if sha != Some(crate::tasks::memo::key(&[body]).as_str()) || !text[end..].trim().is_empty() {
         return State::Edited;
     }
-    State::Ours {
-        current: text == rendered(post),
+    if text == rendered(post) {
+        return State::Ours { current: true };
     }
+    let other = crate::i18n::t(post.template_en, post.template);
+    if text == render(post, other) {
+        return State::OtherLang;
+    }
+    State::Ours { current: false }
 }
 
 pub fn agents_dir() -> Result<PathBuf> {
@@ -419,6 +435,7 @@ pub fn cli(args: &[&str]) -> Result<()> {
                     State::Missing => "没装",
                     State::Ours { current: true } => "已装",
                     State::Ours { current: false } => "已装（旧版，install 会升级）",
+                    State::OtherLang => "已装（另一种语言的版本，install 会换成界面语言）",
                     State::Edited => "已装（改过）",
                     State::Foreign => "同名文件不是 agent-office 的",
                 };
@@ -451,7 +468,7 @@ pub fn doctor_line() -> (bool, String) {
         return (false, format!("读不了 {}", dir.display()));
     };
     let count = |f: fn(&State) -> bool| states.iter().filter(|(_, s)| f(s)).count();
-    let ours = count(|s| matches!(s, State::Ours { .. } | State::Edited));
+    let ours = count(|s| matches!(s, State::Ours { .. } | State::OtherLang | State::Edited));
     let edited = count(|s| *s == State::Edited);
     let stale = count(|s| *s == State::Ours { current: false });
     let mut line = format!("{ours}/{} 个已装在 {}", ROSTER.len(), dir.display());
@@ -528,6 +545,24 @@ pub fn next_posts(after: After, own: Option<Role>) -> Vec<Role> {
 /// How much of the earlier session's task and last reply a relay carries: enough to
 /// go on, short of crowding out the role's card.
 const RELAY_REPLY_CHARS: usize = 2000;
+/// Of that, how much comes from the start; the rest is the end, where a
+/// hand-back puts what was not done and the risks.
+const RELAY_HEAD_CHARS: usize = 300;
+
+/// `text` within `RELAY_REPLY_CHARS`: its start and its end, saying how much
+/// of the middle was left out, so the next post knows it is not all.
+fn clip(text: &str) -> String {
+    let n = text.chars().count();
+    if n <= RELAY_REPLY_CHARS {
+        return text.to_owned();
+    }
+    let tail = RELAY_REPLY_CHARS - RELAY_HEAD_CHARS;
+    let head: String = text.chars().take(RELAY_HEAD_CHARS).collect();
+    let end: String = text.chars().skip(n - tail).collect();
+    let cut = n - RELAY_REPLY_CHARS;
+    let mark = crate::tr!("…（中间省略 {} 字）…", "… ({} characters cut) …", cut);
+    format!("{head}\n{mark}\n{end}")
+}
 
 /// The task a relay hands on: what the earlier session was asked, what it
 /// came to (or where it stuck), and where its changes are, so the next
@@ -546,14 +581,14 @@ pub fn relay_task(
         name
     );
     if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
-        let t: String = t.chars().take(RELAY_REPLY_CHARS).collect();
+        let t = clip(t);
         out.push_str(&crate::tr!("它的任务：{}\n", "Its task: {}\n", t));
     }
     if let (After::Stuck, Some(why)) = (after, stuck) {
         out.push_str(&crate::tr!("它卡住了：{}\n", "It got stuck: {}\n", why));
     }
     if let Some(c) = came_to.map(str::trim).filter(|c| !c.is_empty()) {
-        let c: String = c.chars().take(RELAY_REPLY_CHARS).collect();
+        let c = clip(c);
         let head = match after {
             After::Done => crate::i18n::t("它的结论：", "What it came to: "),
             After::Stuck => crate::i18n::t("它最后说的：", "The last it said: "),
@@ -732,6 +767,7 @@ fn claude_bin() -> Option<PathBuf> {
 /// Start a session as `role` on `task` in `dir`: in the desktop app, its new
 /// session opened with the prompt filled in; or here in the terminal.
 pub fn dispatch(role: Role, dir: &Path, task: &str, terminal: bool) -> Result<String> {
+    folder_ready(dir)?;
     if let Some(why) = not_ready(role, terminal) {
         anyhow::bail!(why);
     }
@@ -751,12 +787,27 @@ pub fn dispatch(role: Role, dir: &Path, task: &str, terminal: bool) -> Result<St
         anyhow::bail!("--terminal 只支持 macOS / Linux");
     }
     let link = desktop_link(&dir, &prompt(role, task, true))?;
-    crate::jump::open_url(&link).map_err(anyhow::Error::msg)?;
+    crate::jump::open_url_checked(&link).map_err(anyhow::Error::msg)?;
     Ok(format!(
         "已在 Claude 打开新会话（{}，{}），确认后发送",
         role.post().zh,
         dir.display()
     ))
+}
+
+/// Kept apart from `dispatch` so a test can check it without the link ever
+/// being opened. A relay's folder can be a worktree removed since; another
+/// folder would put the work in the wrong repository, so none is guessed.
+fn folder_ready(dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        dir.is_dir(),
+        crate::tr!(
+            "目录 {} 已经不在了（worktree 删了？），没有派",
+            "folder {} is gone (worktree removed?); nothing dispatched",
+            dir.display()
+        )
+    );
+    Ok(())
 }
 
 /// `agent-office dispatch`.
@@ -885,7 +936,7 @@ mod tests {
             let pm = Role::Pm.post();
             assert_eq!(
                 state_of(pm, read(&path_of(&dir, pm)).unwrap().as_deref()),
-                State::Ours { current: false }
+                State::OtherLang
             );
             let out = install(&dir, false).unwrap();
             assert_eq!(out.written.len(), ROSTER.len() - 1);
@@ -1025,6 +1076,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Lines added under our mark are the user's: install used to read the
+    /// file as an old version of ours and rewrite it, and remove to delete
+    /// it, losing them either way.
+    #[test]
+    fn lines_added_after_our_mark_keep_the_file_from_install_and_remove() {
+        let dir = temp_dir("appended");
+        install(&dir, false).unwrap();
+        let qa = path_of(&dir, Role::Qa.post());
+        let appended = format!("{}\n## 我自己加的\n- 先跑 make lint\n", rendered(Role::Qa.post()));
+        std::fs::write(&qa, &appended).unwrap();
+        assert_eq!(state_of(Role::Qa.post(), Some(&appended)), State::Edited);
+        let out = install(&dir, false).unwrap();
+        assert_eq!((out.written.len(), out.kept_edited.clone()), (0, vec!["qa"]));
+        assert_eq!(std::fs::read_to_string(&qa).unwrap(), appended);
+        let out = remove(&dir, false).unwrap();
+        assert_eq!(out.kept_edited, ["qa"]);
+        assert_eq!(std::fs::read_to_string(&qa).unwrap(), appended);
+        // Whitespace after the mark is no edit.
+        let spaced = format!("{}\n\n", rendered(Role::Qa.post()));
+        assert_eq!(state_of(Role::Qa.post(), Some(&spaced)), State::Ours { current: false });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Roles installed in Chinese and the UI switched to English are not an
+    /// older version: calling them that sent users to upgrade what was
+    /// already current.
+    #[test]
+    fn a_role_in_the_other_language_is_not_called_old() {
+        let dir = temp_dir("otherlang");
+        with(Lang::Zh, || install(&dir, false).unwrap());
+        with(Lang::En, || {
+            for (post, state) in status(&dir).unwrap() {
+                assert_eq!(state, State::OtherLang, "{}", post.id);
+            }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worktree merged and removed leaves its worker done on the card: a
+    /// relay from it must fail saying so, not open a session in a folder
+    /// that is not there or in some other repository.
+    #[test]
+    fn dispatch_to_a_folder_that_is_gone_fails() {
+        let gone = temp_dir("gone");
+        let err = folder_ready(&gone).unwrap_err().to_string();
+        assert!(err.contains(&gone.display().to_string()), "{err}");
+        assert!(folder_ready(&std::env::temp_dir()).is_ok());
+    }
+
     #[test]
     fn remove_takes_only_ours() {
         let dir = temp_dir("remove");
@@ -1113,6 +1213,15 @@ mod tests {
         }
         let stuck = relay_task("api", After::Stuck, None, None, Some("同一个测试连失败 5 次"), dir);
         assert!(stuck.contains("同一个测试连失败 5 次"));
+        // A hand-back ends on what was not done and the risks: a long
+        // reply keeps its end, and says that its middle was cut.
+        let reply = format!("开头{}没做的：压测；风险：迁移不可逆", "中".repeat(5000));
+        let task = relay_task("api", After::Done, None, Some(&reply), None, dir);
+        assert!(task.contains("开头") && task.contains("风险：迁移不可逆"), "{task}");
+        assert!(task.contains("中间省略"), "{task}");
+        assert!(task.chars().count() < 2300);
+        let en = with(Lang::En, || relay_task("api", After::Done, None, Some(&reply), None, dir));
+        assert!(en.contains("characters cut") && en.contains("风险：迁移不可逆"), "{en}");
         // A pasted prompt of any length still makes a link.
         let long = "长".repeat(20_000);
         let task = relay_task("api", After::Done, Some(&long), Some(&long), None, dir);
