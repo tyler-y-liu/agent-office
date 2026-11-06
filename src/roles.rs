@@ -994,8 +994,8 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
             ).to_owned()
         } else {
             crate::tr!(
-                "已在 DeepSeek Harness 建好「{}」空白会话（{repo} · {id}），去这个目录的 workspace 最上面找",
-                "created a blank {} session in DeepSeek Harness ({repo} · {id}); it is at the top of that directory's workspace",
+                "已在 DeepSeek Harness 建好「{}」空白会话（{repo} · {id}）",
+                "created a blank {} session in DeepSeek Harness ({repo} · {id})",
                 role.name(),
             ).to_owned()
         });

@@ -14,6 +14,16 @@ pub const SOURCE: &str = "dsh";
 const PLUGIN_ID: &str = "agent-office";
 const TEMPLATE: &str = include_str!("dsh_plugin.mjs");
 
+/// The package whose browser half opens a dispatched Session in the app. A
+/// package, not a file: DSH serves browser code only from a `package.json`
+/// declaring `dsh.client`, found from the mounted row's path.
+const WEB_ID: &str = "agent-office-web";
+const WEB_FILES: &[(&str, &str)] = &[
+    ("package.json", include_str!("dsh_web/package.json")),
+    ("host.mjs", include_str!("dsh_web/host.mjs")),
+    ("client.js", include_str!("dsh_web/client.js")),
+];
+
 /// `$DSH_HOME`, else `~/.dsh`, as dsh resolves its home.
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("DSH_HOME")
@@ -44,6 +54,14 @@ pub fn dispatch_dir() -> Option<PathBuf> {
 
 fn plugin_path(dir: &Path) -> PathBuf {
     dir.join("agent-office-dsh.mjs")
+}
+
+fn web_dir(dir: &Path) -> PathBuf {
+    dir.join("web")
+}
+
+fn web_entry(dir: &Path) -> PathBuf {
+    web_dir(dir).join("host.mjs")
 }
 
 fn patch_path(home: &Path) -> PathBuf {
@@ -136,8 +154,12 @@ fn after_unmount(text: &str, wanted: &str) -> String {
     }
 }
 
+fn after_connect(text: &str, plugin: &Path, dir: &Path) -> Result<String> {
+    with_plugin(&with_ours(text, plugin)?, WEB_ID, &web_entry(dir))
+}
+
 fn after_disconnect(text: &str) -> String {
-    after_unmount(text, PLUGIN_ID)
+    after_unmount(&after_unmount(text, PLUGIN_ID), WEB_ID)
 }
 
 fn with_plugin(text: &str, wanted: &str, plugin: &Path) -> Result<String> {
@@ -227,8 +249,16 @@ pub fn connect() -> Result<()> {
     let plugin = plugin_path(&dir);
     std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing, &dispatch)?)
         .with_context(|| crate::tr!("写 {} 失败", "could not write {}", plugin.display()))?;
+    let web = web_dir(&dir);
+    std::fs::create_dir_all(&web)
+        .with_context(|| crate::tr!("建 {} 失败", "could not create {}", web.display()))?;
+    for (name, text) in WEB_FILES {
+        let path = web.join(name);
+        std::fs::write(&path, text)
+            .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
+    }
     let before = read_patch(&home)?;
-    write_atomic(&patch_path(&home), &with_ours(&before, &plugin)?)?;
+    write_atomic(&patch_path(&home), &after_connect(&before, &plugin, &dir)?)?;
     println!(
         "{}",
         crate::tr!(
@@ -262,6 +292,7 @@ pub fn disconnect() -> Result<()> {
     }
     if let Some(dir) = our_dir() {
         let _ = std::fs::remove_file(plugin_path(&dir));
+        let _ = std::fs::remove_dir_all(web_dir(&dir));
     }
     Ok(())
 }
@@ -284,14 +315,28 @@ pub fn focus_app() {
 /// Whether our plugin is mounted and forwards the turn's start: one written
 /// by an older build lacks it, and its figures leave their desks between calls.
 /// Nor does such a one say which session you are looking at, so a reply you
-/// watched land in the app would wait in the pantry to be read.
+/// watched land in the app would wait in the pantry to be read. Nor one
+/// without the browser half: its dispatches land unseen behind the session
+/// you were reading.
 pub fn installed() -> bool {
     let (Some(home), Some(dir)) = (home(), our_dir()) else {
         return false;
     };
     std::fs::read_to_string(plugin_path(&dir))
         .is_ok_and(|t| forwards_turn_start(&t) && says_what_you_view(&t) && supports_dispatch(&t))
-        && read_patch(&home).is_ok_and(|t| items(&t).iter().any(|i| is_ours(i)))
+        && web_current(&web_dir(&dir))
+        && read_patch(&home).is_ok_and(|t| {
+            let items = items(&t);
+            items.iter().any(|i| is_ours(i)) && items.iter().any(|i| is_plugin(i, WEB_ID))
+        })
+}
+
+/// Every browser-half file is there as this build writes it: a stale one
+/// from an older build may not open what this build dispatches.
+fn web_current(web: &Path) -> bool {
+    WEB_FILES
+        .iter()
+        .all(|(name, text)| std::fs::read_to_string(web.join(name)).is_ok_and(|t| t == *text))
 }
 
 fn forwards_turn_start(plugin: &str) -> bool {
@@ -384,6 +429,61 @@ mod tests {
         let base = with_ours("", Path::new("/events.mjs")).unwrap();
         let both = with_plugin(&base, "agent-office-roles", Path::new("/roles.mjs")).unwrap();
         assert_eq!(after_unmount(&both, "agent-office-roles"), base);
+    }
+
+    /// The browser half rides along with the event plugin: connect mounts
+    /// both once however often it runs, and disconnect takes both, leaving
+    /// the user's rows as they were.
+    #[test]
+    fn connect_mounts_the_browser_half_and_disconnect_takes_it() {
+        let original = "- insert:\n    - id: pixtuoid\n      name: /p.mjs\n";
+        let dir = Path::new("/h/.dsh/agent-office");
+        let plugin = plugin_path(dir);
+        let once = after_connect(original, &plugin, dir).unwrap();
+        assert_eq!(after_connect(&once, &plugin, dir).unwrap(), once);
+        assert_eq!(once.matches("id: agent-office-web").count(), 1);
+        assert!(once.contains("name: \"/h/.dsh/agent-office/web/host.mjs\""));
+        assert_eq!(after_disconnect(&once), original);
+    }
+
+    /// DSH loads a browser half only from a package whose manifest declares
+    /// `dsh.client` for the web and exports `./client`, and registers it under
+    /// the id the bundle names. Any mismatch and dispatches stop opening,
+    /// silently: this pins what the spike proved DSH accepts.
+    #[test]
+    fn the_browser_package_is_shaped_as_dsh_loads_it() {
+        let file = |name: &str| WEB_FILES.iter().find(|(n, _)| *n == name).unwrap().1;
+        let pkg: serde_json::Value = serde_json::from_str(file("package.json")).unwrap();
+        assert_eq!(pkg["dsh"]["client"]["platform"], "web");
+        assert_eq!(pkg["exports"]["."], "./host.mjs");
+        assert_eq!(pkg["exports"]["./client"], "./client.js");
+        let id = pkg["name"].as_str().unwrap();
+        assert!(file("client.js").contains(&format!("id: \"{id}\"")));
+        // The mounted row resolves to the host half, whose nearest manifest
+        // must be this package's.
+        assert!(web_entry(Path::new("/d")).ends_with("web/host.mjs"));
+        // It opens exactly the presets a dispatch creates, and never the
+        // subagents a DSH PM spawns under those same presets.
+        assert!(TEMPLATE.contains("const agentPreset = `office-${request.role}`"));
+        assert!(file("client.js").contains("preset.startsWith(\"office-\")"));
+        assert!(file("client.js").contains("row.origin !== \"subagent\""));
+    }
+
+    /// A browser half left by an older build reads as not connected, so the
+    /// user is sent back to `connect dsh` instead of dispatching blind.
+    #[test]
+    fn a_stale_browser_half_is_not_current() {
+        let dir = std::env::temp_dir().join(format!("ao-dsh-web-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!web_current(&dir));
+        for (name, text) in WEB_FILES {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        assert!(web_current(&dir));
+        std::fs::write(dir.join("client.js"), "// old").unwrap();
+        assert!(!web_current(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Paths with quotes or backslashes must not break out of the JS string.
