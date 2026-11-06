@@ -429,6 +429,73 @@ pub fn prompt(role: Role, task: &str, with_card: bool) -> String {
     format!("[office:{}] 角色：{}\n{card}\n{TASK_HEAD}{task}", post.id, post.zh)
 }
 
+/// The card a relay picks up from: what the selected session came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum After {
+    /// Its turn is over and its result unread.
+    Done,
+    Stuck,
+}
+
+/// Who to hand on to, best first: finished work goes to be tested and
+/// reviewed; stuck work to its own trade and to the architect. Never the
+/// session's own post for done work, which would only redo it.
+pub fn next_posts(after: After, own: Option<Role>) -> Vec<Role> {
+    let wanted = match after {
+        After::Done => vec![Role::Qa, Role::Reviewer],
+        After::Stuck => own
+            .filter(|r| *r != Role::Pm)
+            .into_iter()
+            .chain([Role::Architect])
+            .collect(),
+    };
+    let mut out: Vec<Role> = Vec::new();
+    for r in wanted {
+        if !out.contains(&r) && !(after == After::Done && Some(r) == own) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// How much of the earlier session's task and last reply a relay carries: enough to
+/// go on, short of crowding out the role's card.
+const RELAY_REPLY_CHARS: usize = 2000;
+
+/// The task a relay hands on: what the earlier session was asked, what it
+/// came to (or where it stuck), and where its changes are, so the next
+/// post starts from that instead of asking what to do.
+pub fn relay_task(
+    name: &str,
+    after: After,
+    task: Option<&str>,
+    came_to: Option<&str>,
+    stuck: Option<&str>,
+    cwd: &Path,
+) -> String {
+    let mut out = format!("接着「{name}」的活往下做。\n");
+    if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
+        let t: String = t.chars().take(RELAY_REPLY_CHARS).collect();
+        out.push_str(&format!("它的任务：{t}\n"));
+    }
+    if let (After::Stuck, Some(why)) = (after, stuck) {
+        out.push_str(&format!("它卡住了：{why}\n"));
+    }
+    if let Some(c) = came_to.map(str::trim).filter(|c| !c.is_empty()) {
+        let c: String = c.chars().take(RELAY_REPLY_CHARS).collect();
+        let head = match after {
+            After::Done => "它的结论",
+            After::Stuck => "它最后说的",
+        };
+        out.push_str(&format!("{head}：{c}\n"));
+    }
+    out.push_str(&format!(
+        "它的改动在：{}\n先看它改了什么（git status / git diff），再做你这个角色该做的。",
+        cwd.display()
+    ));
+    out
+}
+
 /// The most a `claude://code/new` prompt may hold: the desktop app cuts
 /// one longer to this many UTF-16 units, and a cut brief is worse than none.
 const DESKTOP_PROMPT_MAX: usize = 14_336;
@@ -784,6 +851,52 @@ mod tests {
     }
     /// The desktop app reads the link's query as form data would not: a
     /// `+` stays a plus, and a raw `&` or `#` would cut the prompt short.
+    /// Finished work goes on to be checked, never back to its own post;
+    /// stuck work to someone of its trade and to the architect.
+    #[test]
+    fn relay_suggests_the_next_post() {
+        assert_eq!(next_posts(After::Done, None), vec![Role::Qa, Role::Reviewer]);
+        assert_eq!(next_posts(After::Done, Some(Role::Qa)), vec![Role::Reviewer]);
+        assert_eq!(
+            next_posts(After::Stuck, Some(Role::Backend)),
+            vec![Role::Backend, Role::Architect]
+        );
+        assert_eq!(next_posts(After::Stuck, None), vec![Role::Architect]);
+        // A stuck PM needs a design look, not a second PM.
+        assert_eq!(next_posts(After::Stuck, Some(Role::Pm)), vec![Role::Architect]);
+    }
+
+    /// A relay must start the next post on the work, not on a question:
+    /// it carries the task, what came of it and where the changes are, and
+    /// still fits the desktop app's prompt with the role's card.
+    #[test]
+    fn a_relay_task_carries_what_came_before() {
+        let dir = Path::new("/work/shop-app");
+        let task = relay_task(
+            "docs-site",
+            After::Done,
+            Some("审一下安装文档的改动"),
+            Some("审完了，两处命令写错"),
+            None,
+            dir,
+        );
+        for part in ["docs-site", "审一下安装文档的改动", "两处命令写错", "/work/shop-app"] {
+            assert!(task.contains(part), "{part} missing from {task}");
+        }
+        let stuck = relay_task("api", After::Stuck, None, None, Some("同一个测试连失败 5 次"), dir);
+        assert!(stuck.contains("同一个测试连失败 5 次"));
+        // A pasted prompt of any length still makes a link.
+        let long = "长".repeat(20_000);
+        let task = relay_task("api", After::Done, Some(&long), Some(&long), None, dir);
+        for post in ROSTER {
+            assert!(desktop_link(dir, &prompt(post.role, &task, true)).is_ok(), "{}", post.id);
+        }
+        // Read back, the relay is a task, so the new session is no empty dispatch.
+        let p = prompt(Role::Qa, &task, true);
+        let (_, rest) = parse_marker(&p).unwrap();
+        assert!(task_of(rest).is_some());
+    }
+
     #[test]
     fn a_dispatch_link_is_percent_encoded_and_never_uses_plus() {
         let link = desktop_link(Path::new("/tmp/my repo"), "a b&c#d\n任务+").unwrap();
