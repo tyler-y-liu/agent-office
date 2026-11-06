@@ -266,6 +266,20 @@ pub fn disconnect() -> Result<()> {
     Ok(())
 }
 
+/// Bring the Harness window forward: its app answers `dsh://open` by raising
+/// its main window. A dispatch that leaves the new session behind another
+/// window reads as a dispatch that did nothing.
+pub fn focus_app() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("dsh://open")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
 /// Whether the patch mounts our plugin and the plugin file is there.
 /// Whether our plugin is mounted and forwards the turn's start: one written
 /// by an older build lacks it, and its figures leave their desks between calls.

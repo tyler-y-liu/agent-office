@@ -234,6 +234,8 @@ struct Layout {
     cat_hit: Option<Area>,
     /// Each chip of the panel's role bar, in window pixels.
     role_hits: Vec<(Area, crate::roles::Role)>,
+    /// The bar's `⇄`, which switches the host the next click sends to.
+    host_hits: Vec<(Area, crate::roles::Backend)>,
     /// Window pixels to a logical unit, which the scene's hits are in.
     unit: i64,
 }
@@ -856,8 +858,7 @@ impl Win {
         let mut cells = Buffer::empty(panel_area);
         // The bar names the host a click would dispatch into, so it asks the
         // same question a click will.
-        let bar_host = self.core.dispatch_target();
-        self.core.ui.dispatch_host = bar_host.map(crate::roles::Backend::label);
+        self.core.ui.bar = self.core.dispatch_bar();
         let drawn = panel::render(
             &mut cells,
             panel_area,
@@ -868,6 +869,21 @@ impl Win {
         );
         canvas.fill(i64::from(panel_x), 0, w.get() - panel_x, h.get(), PANEL_BG);
         paint_cells(&mut canvas, &mut self.faces, &cells, (panel_x, 0), g);
+        let host_hits = drawn
+            .hosts
+            .iter()
+            .map(|&(row, col, w, host)| {
+                (
+                    Area {
+                        x: i64::from(panel_x) + i64::from(col) * i64::from(g.cell_w),
+                        y: i64::from(row) * i64::from(g.row_h),
+                        w: u32::from(w) * g.cell_w,
+                        h: g.row_h,
+                    },
+                    host,
+                )
+            })
+            .collect();
         let role_hits = drawn
             .roles
             .iter()
@@ -941,6 +957,7 @@ impl Win {
             board_hits,
             cat_hit,
             role_hits,
+            host_hits,
             unit: i64::from(fit.scale().get()),
         });
         // The cards may have moved under a still pointer (the wheel, a
@@ -1201,6 +1218,14 @@ impl Win {
                     h: 1,
                 })
             });
+        // The bar's `⇄` changes where the next chip sends; it has to be read
+        // before the chips, since it sits on the row above them.
+        if x >= last.panel_x
+            && let Some((_, host)) = last.host_hits.iter().find(|(r, _)| r.meets(&point))
+        {
+            self.core.choose_dispatch_host(*host);
+            return;
+        }
         // The role bar dispatches straight to a post: it is the same plan `p`
         // would make, without the digit step.
         if x >= last.panel_x

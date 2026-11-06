@@ -950,6 +950,9 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
             },
             std::time::Duration::from_secs(10),
         )?;
+        // The session is created behind the Harness window: without raising
+        // it, a relay you cannot see is a relay you cannot check.
+        crate::dsh::focus_app();
         return Ok(if submit {
             crate::tr!(
                 "已在 DeepSeek Harness 创建并提交「{}」会话（{}，{}）",
@@ -960,8 +963,8 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
             ).to_owned()
         } else {
             crate::tr!(
-                "已在 DeepSeek Harness 建好「{}」空白会话（{}），在会话列表打开后写任务",
-                "created a blank {} session in DeepSeek Harness ({}); open it from the session list and write its task",
+                "已在 DeepSeek Harness 建好「{}」空白会话（{}），在会话列表最上面打开它写任务",
+                "created a blank {} session in DeepSeek Harness ({}); open it at the top of the session list and write its task",
                 role.name(),
                 result.session_id,
             ).to_owned()

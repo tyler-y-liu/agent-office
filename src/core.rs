@@ -159,7 +159,11 @@ pub struct Core {
     dispatches: Dispatches,
     /// When the role bar's host was last worked out, and what it was: the
     /// answer walks the role files, and the bar is drawn every beat.
-    host_at: Option<(Instant, Option<crate::roles::Backend>)>,
+    host_at: Option<(Instant, Option<(crate::roles::Backend, bool)>)>,
+    /// The host picked from the bar or the picker this run. It outranks the
+    /// configured default, so a click does not have to be repeated for every
+    /// dispatch: switching once is a decision, not one pick's footnote.
+    picked_host: Option<crate::roles::Backend>,
     /// When the empty office last looked again at what is set up.
     setup_checked: Option<Instant>,
 }
@@ -480,6 +484,7 @@ impl Core {
             jumps: Jumps::default(),
             dispatches: Dispatches::default(),
             host_at: None,
+            picked_host: None,
         }
     }
 
@@ -862,8 +867,7 @@ impl Core {
         });
         // The worker's own host unless AGENT_OFFICE_DISPATCH_HOST names one,
         // and `h` in the picker can still switch it before a role is picked.
-        let following = host_of(slot);
-        let backend = crate::roles::dispatch_host(following);
+        let backend = self.dispatch_backend(host_of(slot));
         let switchable = crate::roles::host_ready(backend.other());
         Some(DispatchPlan {
             dir,
@@ -873,22 +877,54 @@ impl Core {
         })
     }
 
-    /// The host the role bar would dispatch into, when one could take it.
-    /// `None` hides the bar: a bar that only ever answers "not set up" would
-    /// be furniture. Cheap enough to ask each frame, unlike a whole plan —
-    /// it carries no relay text and touches no repository.
-    pub fn dispatch_target(&mut self) -> Option<crate::roles::Backend> {
-        if let Some((at, host)) = self.host_at
+    /// What the role bar shows: the host a click dispatches into, and whether
+    /// the other one could take a dispatch too. `None` hides the bar: one
+    /// that only ever answers "not set up" would be furniture. Cheap enough
+    /// to ask each frame, unlike a whole plan — no relay text, no repository.
+    pub fn dispatch_bar(&mut self) -> Option<(crate::roles::Backend, bool)> {
+        if let Some((at, bar)) = self.host_at
             && at.elapsed() < HOST_CACHE_FOR
         {
-            return host;
+            return bar;
         }
-        let host = self
+        let bar = self
             .worker_host()
-            .map(crate::roles::dispatch_host)
-            .filter(|host| crate::roles::host_ready(*host));
-        self.host_at = Some((Instant::now(), host));
-        host
+            .map(|following| self.dispatch_backend(following))
+            .filter(|host| crate::roles::host_ready(*host))
+            .map(|host| (host, crate::roles::host_ready(host.other())));
+        self.host_at = Some((Instant::now(), bar));
+        bar
+    }
+
+    /// The host a dispatch goes to: the one picked this run, else the
+    /// configured default, else the worker's own — and one that could not
+    /// take a dispatch never wins, so a stale pick cannot break `p`.
+    fn dispatch_backend(&self, following: crate::roles::Backend) -> crate::roles::Backend {
+        match self.picked_host {
+            Some(host) if crate::roles::host_ready(host) => host,
+            _ => crate::roles::dispatch_host(following),
+        }
+    }
+
+    /// Dispatch into `host` from now on, if it could take it; otherwise say
+    /// what it is missing, since that is how a host that was never set up
+    /// gets found out.
+    pub fn choose_dispatch_host(&mut self, host: crate::roles::Backend) {
+        let current = self
+            .dispatch_bar()
+            .map_or(crate::roles::Backend::Claude, |(host, _)| host);
+        if host == current {
+            return;
+        }
+        match crate::roles::host_missing(host) {
+            None => {
+                self.picked_host = Some(host);
+                // The bar and the next plan both read this cache.
+                self.host_at = None;
+                self.watch.tally("dispatch.host.switched");
+            }
+            Some(why) => self.note(&why, Tone::Failed),
+        }
     }
 
     /// The host the dispatch's worker runs in, which the bar follows: the
@@ -902,14 +938,11 @@ impl Core {
     /// the dispatch; otherwise say what it is missing, since `h` is the only
     /// way to learn a host is not set up without losing the pick.
     pub fn toggle_dispatch_host(&mut self, plan: &mut DispatchPlan) {
-        let other = plan.backend.other();
-        match crate::roles::host_missing(other) {
-            None => {
-                plan.backend = other;
-                plan.switchable = crate::roles::host_ready(other.other());
-                self.watch.tally("picker.host.switched");
-            }
-            Some(why) => self.note(&why, Tone::Failed),
+        self.choose_dispatch_host(plan.backend.other());
+        // A refused switch leaves the plan as it was.
+        if let Some((host, _)) = self.dispatch_bar() {
+            plan.backend = host;
+            plan.switchable = crate::roles::host_ready(host.other());
         }
     }
 
