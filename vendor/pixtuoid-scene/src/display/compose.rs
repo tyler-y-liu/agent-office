@@ -1290,7 +1290,7 @@ fn push_characters(
             crate::layout::Size { w, h: h + hair },
             badge_ceiling,
         );
-        let badge = crate::display::Badge::new(anchor, agent, &namesakes, theme);
+        let badge = crate::display::Badge::new(anchor, top.y, agent, &namesakes, theme);
         let run = badge.run();
         badges.push(badge);
         order.push((

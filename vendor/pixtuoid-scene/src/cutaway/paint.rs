@@ -6098,7 +6098,9 @@ mod tests {
             crate::effects::flame_crown(top_left, 8, Motion::Full.beat(at(0))),
             crate::effects::sleep_z(top_left, 0, Motion::Full.beat(at(500)))
                 .expect("a z rising at 500 ms"),
-            crate::effects::requires_action_mark(top_left),
+            // agent-office: the "!" and the "?" both keep the contract.
+            crate::effects::requires_action_mark(top_left, false),
+            crate::effects::requires_action_mark(top_left, true),
         ]
     }
 

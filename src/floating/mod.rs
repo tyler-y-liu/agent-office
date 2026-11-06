@@ -672,6 +672,13 @@ impl Win {
                 speaker.play(chime);
             }
         }
+        let stuck: Vec<AgentId> = frame
+            .scene
+            .agents
+            .values()
+            .filter(|s| crate::tasks::stuck_at_work(s, frame.views.get(&s.agent_id)).is_some())
+            .map(|s| s.agent_id)
+            .collect();
         if fit.logical().w < min.w || fit.logical().h < min.h {
             let base = i64::from(g.row_h) + i64::from(self.faces.ascent(g.px));
             self.faces.draw(
@@ -723,6 +730,7 @@ impl Win {
                         .filter_map(|(id, v)| Some((*id, v.role?)))
                         .collect(),
                     board,
+                    stuck: stuck.clone(),
                     now,
                 },
             )
@@ -735,6 +743,7 @@ impl Win {
             let now = SystemTime::now();
             let stage = lively::Stage {
                 u: i64::from(fit.upscale().max(1)),
+                unit: fit.scale().get(),
                 scale_factor: sf,
                 w: ow,
                 h: oh,
@@ -746,25 +755,21 @@ impl Win {
             self.paint_rooms(&mut canvas, &frame, &tags, &signs, &rooms, stage);
             paint_door_signs(&mut canvas, &mut self.faces, &signs, sf);
             let tags = in_group_inks(tags, &frame, &self.core.ui.seen, now);
-            let stuck: Vec<AgentId> = frame
-                .scene
-                .agents
-                .values()
-                .filter(|s| crate::tasks::stuck_at_work(s, frame.views.get(&s.agent_id)).is_some())
-                .map(|s| s.agent_id)
-                .collect();
             paint_stuck(
                 &mut canvas,
                 &mut self.faces,
                 &tags,
                 &stuck,
                 sf,
-                fit.upscale(),
+                (fit.upscale(), fit.scale().get()),
             );
             if let Some(first) = frame.first_waiting {
-                // Its "!" hops in 700ms, too fast to step on the beat.
+                // Its halo breathes smoother than the beat steps.
                 self.quick |= tags.iter().any(|t| t.agent == first);
-                paint_first_waiting(&mut canvas, &mut self.faces, &tags, first, sf, stage);
+                paint_first_waiting(&mut canvas, &tags, first, stage, fit.scale().get());
+            }
+            if let Some(selected) = self.core.ui.selected {
+                paint_selected(&mut canvas, &tags, selected, fit.scale().get(), sf);
             }
             paint_tags(
                 &mut canvas,
@@ -994,6 +999,7 @@ impl Win {
                 full,
                 scale_factor,
                 &avoid,
+                &extras.stuck,
             );
             boards = paint_world_text(art, text, d, extras.board.as_ref());
             speakers = text
@@ -1247,6 +1253,8 @@ struct OfficeExtras {
     roles: HashMap<AgentId, Role>,
     /// The wall board's two lines, in place of its own.
     board: Option<[String; 2]>,
+    /// The agents stuck at work, whose badges wear the stuck mark.
+    stuck: Vec<AgentId>,
     now: SystemTime,
 }
 
@@ -1421,7 +1429,7 @@ impl Win {
             };
             lively::cheer_label(canvas, &mut self.faces, stage, t, cheer);
             if cheer == crate::tasks::Cheer::Recovered {
-                for o in tags.iter().filter(|o| lively::neighbours(t, o, stage.u)) {
+                for o in tags.iter().filter(|o| lively::neighbours(t, o, stage)) {
                     lively::clapping(canvas, stage, o);
                 }
             }
@@ -1551,8 +1559,8 @@ fn paint_cells(
 }
 
 /// Ink of the bar by a card done and waiting to be read: the panel's colour
-/// for that group.
-const DONE_BAR: u32 = 0x00ff_e8a3;
+/// for that group ([`panel::DONE`]).
+const DONE_BAR: u32 = 0x00a6_d8ff;
 
 /// A bar down the left of each card in `outlines` (its first and last panel
 /// rows), in the gap between the panel's edge and its text. A box round
@@ -1734,6 +1742,13 @@ pub(crate) struct Tag {
     /// The window row its figure's top stands at, whichever tier its badge
     /// stepped up to.
     figure_top: i64,
+    /// The row its badge would take on its own, just over its head; above
+    /// it, the badge stepped up off a neighbour's and a leader points back.
+    rest_y: i64,
+    /// Its back to the viewer, at a desk whose monitor rises over its head
+    /// (pixtuoid hangs its badge over that): its desktop is beside it, not
+    /// in front of it.
+    faces_away: bool,
     label: Option<Area>,
     plate: u32,
     marker: u32,
@@ -1744,14 +1759,15 @@ pub(crate) struct Tag {
     /// Its post, worn as a chip of the role's colour before its name.
     role: Option<Role>,
     task: Option<String>,
-    /// Its whole name and its task shown; else its name cut short
-    /// ([`short_name`]) and no task.
+    /// Its task shown and its name whole; else its name alone, cut short
+    /// ([`short_name`]) when no tier over its head has room for it whole.
     full: bool,
 }
 
-/// Up to this many figures every badge shows in full; past it only the
-/// ones [`shown_in_full`] picks do, the rest a short name and no task, so a
-/// crowd's two-line tags do not pile up over each other.
+/// Up to this many figures every badge carries its task; past it only the
+/// ones [`shown_in_full`] picks do, so a crowd's two-line tags do not pile
+/// up over each other. A name reads whole wherever it finds room: a name cut
+/// to "shop-…·1" beside one left whole told no one which repo sat there.
 const ALL_FULL_UPTO: usize = 3;
 
 /// Cells a short badge's name may take.
@@ -1814,8 +1830,28 @@ fn shown_in_full(frame: &crate::core::Frame, selected: Option<AgentId>) -> Vec<A
 
 /// Rows over its badge a task label may climb to find room.
 const LABEL_TIERS: i64 = 2;
-/// Tiers a badge may step up off a neighbour's.
-const BADGE_TIERS: usize = 3;
+/// Tiers a badge may step up off a neighbour's. Four up from a row of
+/// desks reaches the heads of the row behind, and the top of the window
+/// piles them up again.
+const BADGE_TIERS: i64 = 3;
+
+/// Layout rows a waiter's "!" or "?" rises over its head
+/// (`plot_requires_action_mark` in pixtuoid-scene: up to 6, even-aligned).
+const MARK_ROWS: i64 = 6;
+
+/// Where `b`'s figure's head and the mark over it stand, in window pixels,
+/// `scale` of them a layout unit: a neighbour's badge keeps off it, or it
+/// hid who sat there and whether they wait on you.
+fn head_area(b: &Badge, scale: i64) -> Area {
+    let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * 3 / 8;
+    let rows = MARK_ROWS + i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) / 3;
+    Area {
+        x: (i64::from(b.at.x) - half_w) * scale,
+        y: (i64::from(b.head) - MARK_ROWS) * scale,
+        w: u32::try_from(2 * half_w * scale).unwrap_or(0),
+        h: u32::try_from(rows * scale).unwrap_or(0),
+    }
+}
 
 /// Points a badge's name and a task label are set in.
 const NAME_PT: f64 = 10.0;
@@ -1830,10 +1866,10 @@ fn tag_pad(scale_factor: f64) -> u32 {
 }
 
 /// Where each badge goes, at `u` window pixels an art pixel in an office
-/// `win_w` window pixels wide: on the foot of the plate pixtuoid would bake,
-/// centred on it, in full for the agents in `full` (all of them when only a
-/// few are in) and as a dot for the rest; then each full one's task on a
-/// plate of its own over its badge, climbing a tier when a neighbour holds
+/// `win_w` window pixels wide: just over its figure's head, whole, stepping
+/// up a tier at a time while a neighbour holds the spot ([`stack_up`]); then
+/// the task of each agent in `full` (all of them when only a few are in) on
+/// a plate of its own over its badge, climbing a tier when a neighbour holds
 /// the row, left out when no tier is free or it would leave the window's
 /// top. The full ones take their rows first. The names and tasks are set
 /// here rather than baked because 8 art pixels are too small to read.
@@ -1847,6 +1883,7 @@ fn place_tags(
     full: &[AgentId],
     scale_factor: f64,
     avoid: &[Area],
+    stuck: &[AgentId],
 ) -> Vec<Tag> {
     let (name_px, task_px) = (pt_px(NAME_PT, scale_factor), pt_px(TASK_PT, scale_factor));
     let pad = tag_pad(scale_factor);
@@ -1857,13 +1894,16 @@ fn place_tags(
         .badges
         .iter()
         .map(|b| {
-            let at = run_rect(&badge_run(b), d);
-            let shown = all_full || full.contains(&b.agent);
-            let name = if shown {
-                b.name.text().to_owned()
-            } else {
-                short_name(b.name.text())
+            // On the head, not where pixtuoid hangs it: over a back-turned
+            // sitter's monitor that is two rows of desks up, over the heads
+            // of whoever sits there.
+            let on_head = Badge {
+                at: pixtuoid_scene::layout::Point { y: b.head, ..b.at },
+                ..b.clone()
             };
+            let at = run_rect(&badge_run(&on_head), d);
+            let shown = all_full || full.contains(&b.agent);
+            let name = b.name.text().to_owned();
             let role = roles.get(&b.agent).copied();
             // The chip is part of the badge, so a neighbour steps clear of it
             // too, and a short badge keeps it: the post reads in a crowd.
@@ -1882,7 +1922,9 @@ fn place_tags(
                     w,
                     h,
                 },
-                figure_top: foot + i64::from(LABEL_GAP) * i64::from(u),
+                figure_top: i64::from(b.head) * i64::from(d * u),
+                rest_y: foot - i64::from(h),
+                faces_away: b.at.y < b.head,
                 label: None,
                 plate: to_u32(b.plate),
                 marker: to_u32(b.marker),
@@ -1900,18 +1942,46 @@ fn place_tags(
         .collect();
     // Stable, so the short ones keep pixtuoid's order among themselves.
     tags.sort_by_key(|t| !t.full);
-    // A badge that would cover a neighbour's (sitters side by side on a
-    // sofa) steps up a tier over its own figure, so every name reads.
+    let heads: Vec<(AgentId, Area)> = text
+        .badges
+        .iter()
+        .map(|b| (b.agent, head_area(b, i64::from(d * u))))
+        .collect();
+    // A stuck badge wears its mark to its right ([`paint_stuck`]); a
+    // neighbour keeps clear of that too.
+    let mark_w = stuck_mark_w(faces, name_px, pad) + pad;
     let mut taken: Vec<Area> = Vec::with_capacity(tags.len());
     for t in &mut tags {
+        let tail = if stuck.contains(&t.agent) { mark_w } else { 0 };
+        let reach = |b: Area| Area { w: b.w + tail, ..b };
+        let clear: Vec<Area> = heads
+            .iter()
+            .filter(|(id, _)| *id != t.agent)
+            .map(|&(_, h)| h)
+            .chain(taken.iter().copied())
+            .collect();
         let step = i64::from(t.badge.h + pad);
-        for _ in 0..BADGE_TIERS {
-            if !taken.iter().any(|o| o.meets(&t.badge)) || t.badge.y - step < 0 {
-                break;
-            }
-            t.badge.y -= step;
+        let mut spot = stack_up(reach(t.badge), &clear, step);
+        // No tier has room for it whole: its name cut short, as a crowd's
+        // were, over a name piled on the next row's heads.
+        if spot.is_none() && !t.full {
+            let short = short_name(&t.name);
+            let cut = Faces::cells(&t.name).saturating_sub(Faces::cells(&short))
+                * faces.cell_w(name_px);
+            let (cx, w) = (t.badge.x + i64::from(t.badge.w / 2), t.badge.w - cut);
+            t.badge = Area {
+                x: inside(cx - i64::from(w / 2), w),
+                w,
+                ..t.badge
+            };
+            t.name = short;
+            spot = stack_up(reach(t.badge), &clear, step);
         }
-        taken.push(t.badge);
+        // Still none: it stays on its head.
+        if let Some(s) = spot {
+            t.badge.y = s.y;
+        }
+        taken.push(reach(t.badge));
     }
     // A task label keeps off the door signs too.
     taken.extend(avoid.iter().copied());
@@ -1932,6 +2002,37 @@ fn place_tags(
         taken.extend(t.label);
     }
     tags
+}
+
+/// `badge` stepped up `step` at a time, at most [`BADGE_TIERS`] tiers and
+/// not off the window's top, to the first spot that covers none of `taken`
+/// (a neighbour's badge, another figure's head); `None` when every tier is
+/// covered.
+fn stack_up(badge: Area, taken: &[Area], step: i64) -> Option<Area> {
+    (0..=BADGE_TIERS)
+        .map(|tier| Area {
+            y: badge.y - step * tier,
+            ..badge
+        })
+        .take_while(|b| b.y >= 0)
+        .find(|b| !taken.iter().any(|o| o.meets(b)))
+}
+
+/// The leader from a badge `t` stepped up off its head back down to its
+/// figure, as a window-pixel rectangle `thick` wide: the badge can sit over
+/// a neighbour's head, and without it read as theirs. `None` on its head.
+fn leader(t: &Tag, thick: u32) -> Option<Area> {
+    let bottom = t.badge.y + i64::from(t.badge.h);
+    if t.badge.y >= t.rest_y || bottom >= t.figure_top {
+        return None;
+    }
+    let cx = t.badge.x + i64::from(t.badge.w / 2);
+    Some(Area {
+        x: cx,
+        y: bottom,
+        w: thick,
+        h: u32::try_from(t.figure_top - bottom).unwrap_or(0),
+    })
 }
 
 /// The signs pixtuoid would bake, on the art grid in its order. Its
@@ -1956,6 +2057,12 @@ fn paint_world_text(
         } else {
             None
         };
+        // By day the board shows its name alone: its tally's 5px words were
+        // too small to read, counted otherwise than the panel's header beside
+        // it, and English only. The evening's tally takes its lines.
+        if run.role == TextRole::Board && line.is_none() {
+            continue;
+        }
         let run = match line {
             Some(line) => {
                 let ink = run.spans.first().map_or(
@@ -2395,29 +2502,27 @@ const STUCK_RED: u32 = 0x00f7_768e;
 /// Mark each stuck agent in `stuck` where it sits: a red ring round its
 /// figure and the panel's stuck mark by its badge, so it stands out from the
 /// agents working normally around it. Not a "?": that read as a question for
-/// you, which is what waiting means. `u` is window pixels an art pixel.
+/// you, which is what waiting means. `u` is window pixels an art pixel,
+/// `scale` a layout unit.
 fn paint_stuck(
     canvas: &mut Canvas,
     faces: &mut Faces,
     tags: &[Tag],
     stuck: &[AgentId],
     scale_factor: f64,
-    u: u16,
+    (u, scale): (u16, u16),
 ) {
     let u = i64::from(u.max(1));
     let name_px = pt_px(NAME_PT, scale_factor);
     let pad = tag_pad(scale_factor);
     for t in tags.iter().filter(|t| stuck.contains(&t.agent)) {
         let b = t.badge;
-        let cx = b.x + i64::from(b.w / 2);
-        let top = t.figure_top;
-        let half_h = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * u / 2;
-        let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * u * 3 / 4;
+        let (cx, cy, half_w, half_h) = figure_box(t, scale);
         let dot = (u / 2).max(1) as u32;
-        for (x, y) in ring(cx, top + half_h, half_w, half_h + u) {
+        for (x, y) in ring(cx, cy, half_w, half_h + u) {
             canvas.fill(x, y, dot, dot, STUCK_RED);
         }
-        let w = faces.cell_w(name_px) + 2 * pad;
+        let w = stuck_mark_w(faces, name_px, pad);
         let (x, y) = (b.x + i64::from(b.w + pad), b.y);
         canvas.fill(x, y, w, b.h, STUCK_RED);
         let base = y + i64::from(pad) + i64::from(faces.ascent(name_px));
@@ -2432,6 +2537,29 @@ fn paint_stuck(
             name_px,
         );
     }
+}
+
+/// The width of the stuck mark [`paint_stuck`] sets right of a badge.
+fn stuck_mark_w(faces: &mut Faces, name_px: u32, pad: u32) -> u32 {
+    faces.cell_w(name_px) + 2 * pad
+}
+
+/// The centre and half extents of `t`'s figure in window pixels, `scale`
+/// of them a layout unit: the figure is drawn in layout units, so sized by
+/// art pixels a ring round it shrank to its head.
+fn figure_box(t: &Tag, scale: u16) -> (i64, i64, i64, i64) {
+    let (w, h) = figure_size(scale);
+    (t.badge.x + i64::from(t.badge.w / 2), t.figure_top + h / 2, w * 3 / 4, h / 2)
+}
+
+/// A figure's width and height in window pixels, `scale` of them a layout
+/// unit.
+fn figure_size(scale: u16) -> (i64, i64) {
+    let s = i64::from(scale.max(1));
+    (
+        i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * s,
+        i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * s,
+    )
 }
 
 /// The outline of an ellipse centred on (`cx`, `cy`) with radii `rx`, `ry`,
@@ -2451,9 +2579,6 @@ fn ring(cx: i64, cy: i64, rx: i64, ry: i64) -> Vec<(i64, i64)> {
 
 /// How long one breath of the first waiting agent's halo takes.
 const BREATH_MS: u64 = 2_400;
-/// How long one hop of its "!" takes.
-const HOP_MS: u64 = 700;
-
 /// How long from `now` until the next beat starts.
 fn to_next_beat(now: SystemTime) -> Duration {
     Duration::from_millis(BEAT_MS - lively::ms_of(now) % BEAT_MS)
@@ -2482,27 +2607,23 @@ fn tint(canvas: &mut Canvas, x: i64, y: i64, ink: u32, alpha: f64) {
 }
 
 /// Mark `first`, the session the panel heads its waiting line with, where
-/// it stands: a halo in the panel's waiting colour breathing round its figure
-/// and a "!" hopping over its tags, so the one to answer first is found in
-/// the office as fast as on the panel.
+/// it stands: a halo in the panel's waiting colour breathing round its figure,
+/// so the one to answer first is found in the office as fast as on the
+/// panel. Its "!" or "?" is the head mark every waiter wears: a second one
+/// floating over its tags sat far off its head and said the same.
 fn paint_first_waiting(
     canvas: &mut Canvas,
-    faces: &mut Faces,
     tags: &[Tag],
     first: AgentId,
-    scale_factor: f64,
     stage: lively::Stage,
+    scale: u16,
 ) {
     let Some(t) = tags.iter().find(|t| t.agent == first) else {
         return;
     };
     let ink = color_u32(crate::panel::WAIT, STUCK_RED);
     let u = stage.u;
-    let b = t.badge;
-    let cx = b.x + i64::from(b.w / 2);
-    let half_h = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_H) * u / 2;
-    let half_w = i64::from(pixtuoid_scene::layout::CHARACTER_SPRITE_W) * u * 3 / 4;
-    let cy = t.figure_top + half_h;
+    let (cx, cy, half_w, half_h) = figure_box(t, scale);
     // A band a few art pixels wide, densest at its inner edge, that swells
     // and fades as it breathes.
     let swell = breath(stage.ms, BREATH_MS);
@@ -2517,15 +2638,41 @@ fn paint_first_waiting(
             }
         }
     }
-    let px = pt_px(NAME_PT, scale_factor);
-    let pad = tag_pad(scale_factor);
-    let (w, h) = (faces.cell_w(px) + 2 * pad, px + 2 * pad);
-    let hop = (breath(stage.ms, HOP_MS) * f64::from(h) / 2.0).round() as i64;
-    let top = t.label.map_or(b.y, |l| l.y.min(b.y)) - i64::from(h + pad) - hop;
-    let (x, y) = (cx - i64::from(w / 2), top.max(0));
-    canvas.fill(x, y, w, h, ink);
-    let base = y + i64::from(pad) + i64::from(faces.ascent(px));
-    faces.draw(canvas, x + i64::from(pad), base, "!", PANEL_BG, px);
+}
+
+/// White, the selected card's name on its badge.
+const SELECTED_INK: u32 = 0x00ff_ffff;
+
+/// Mark the figure of the card selected on the panel: a solid ring round it
+/// and a frame round its badge, so the card and the figure it belongs to
+/// are found as one. Its name alone turning white was lost in a crowd.
+fn paint_selected(
+    canvas: &mut Canvas,
+    tags: &[Tag],
+    selected: AgentId,
+    scale: u16,
+    scale_factor: f64,
+) {
+    let Some(t) = tags.iter().find(|t| t.agent == selected) else {
+        return;
+    };
+    let line = (scale_factor.round() as u32).max(1);
+    let b = t.badge;
+    let (cx, cy, half_w, half_h) = figure_box(t, scale);
+    let gap = i64::from(scale) / 2;
+    for k in 0..2 * i64::from(line) {
+        for (x, y) in ring(cx, cy, half_w + gap + k, half_h + gap + k) {
+            canvas.fill(x, y, 1, 1, SELECTED_INK);
+        }
+    }
+    let l = i64::from(line);
+    for r in std::iter::once(b).chain(t.label) {
+        let (x, y, w, h) = (r.x - l, r.y - l, r.w + 2 * line, r.h + 2 * line);
+        canvas.fill(x, y, w, line, SELECTED_INK);
+        canvas.fill(x, y + i64::from(h) - l, w, line, SELECTED_INK);
+        canvas.fill(x, y, line, h, SELECTED_INK);
+        canvas.fill(x + i64::from(w) - l, y, line, h, SELECTED_INK);
+    }
 }
 
 /// A role chip's width on a badge: its glyph with a pad either side.
@@ -2578,12 +2725,19 @@ fn paint_tags(
 ) {
     let (name_px, task_px) = (pt_px(NAME_PT, scale_factor), pt_px(TASK_PT, scale_factor));
     let pad = tag_pad(scale_factor);
+    // Under every plate, so a leader runs behind the badges it passes.
+    let thick = (scale_factor.round() as u32).max(1);
+    for t in tags {
+        if let Some(l) = leader(t, thick) {
+            canvas.fill(l.x, l.y, l.w, l.h, t.marker);
+        }
+    }
     for t in tags {
         let r = t.badge;
         canvas.fill(r.x, r.y, r.w, r.h, t.plate);
         canvas.fill(r.x, r.y, pad, r.h, t.marker);
         let ink = if selected == Some(t.agent) {
-            0x00ff_ffff
+            SELECTED_INK
         } else {
             t.ink
         };
@@ -2592,8 +2746,21 @@ fn paint_tags(
         if let Some(role) = t.role {
             let post = role.post();
             let w = role_chip_w(faces, role, name_px, pad);
-            canvas.fill(r.x + i64::from(pad), r.y, w, r.h, to_u32(crate::roles::CHIP_BG));
-            faces.draw(canvas, r.x + i64::from(2 * pad), base, role.chip(), to_u32(post.ink), name_px);
+            canvas.fill(
+                r.x + i64::from(pad),
+                r.y,
+                w,
+                r.h,
+                to_u32(crate::roles::CHIP_BG),
+            );
+            faces.draw(
+                canvas,
+                r.x + i64::from(2 * pad),
+                base,
+                role.chip(),
+                to_u32(post.ink),
+                name_px,
+            );
             x = r.x + i64::from(pad + w + pad);
         }
         faces.draw(canvas, x, base, &t.name, ink, name_px);
@@ -2630,6 +2797,11 @@ mod tests {
             .filter(|&(x, y)| canvas.px[(y * canvas.w + x) as usize] == DONE_BAR)
             .collect();
         assert!(!inked.is_empty(), "the card is marked");
+        assert_eq!(
+            DONE_BAR,
+            color_u32(panel::DONE, 0),
+            "the bar is the done group's colour"
+        );
         let (x0, x1) = (panel_x + g.cell_w, panel_x + 2 * g.cell_w);
         assert!(
             inked.iter().all(|&(x, _)| (x0..x1).contains(&x)),
@@ -2647,9 +2819,96 @@ mod tests {
         );
     }
 
-    /// A badge past the crowd's cut keeps a short name, not a dot: a dot
-    /// told no one which session sat there. Its namesake number stays, or
-    /// two sessions of one repo read the same.
+    fn area(x: i64, y: i64) -> Area {
+        Area { x, y, w: 40, h: 10 }
+    }
+
+    /// Sitters side by side: a badge that would cover its neighbour's steps
+    /// up over it whole, rather than both overlapping or one being cut to
+    /// "shop-…·1" while the other reads in full.
+    #[test]
+    fn a_badge_on_a_taken_spot_stacks_up_over_it() {
+        let step = 12;
+        let at = |b: Area, taken: &[Area]| stack_up(b, taken, step).map(|b| b.y);
+        assert_eq!(
+            at(area(0, 100), &[area(200, 100)]),
+            Some(100),
+            "nothing in the way: it stays on its head"
+        );
+        assert_eq!(
+            at(area(10, 100), &[area(0, 100)]),
+            Some(100 - step),
+            "one tier up off its neighbour"
+        );
+        let one = area(10, 100 - step);
+        assert_eq!(
+            at(area(20, 100), &[area(0, 100), one]),
+            Some(100 - 2 * step),
+            "and over the one stacked there too"
+        );
+        // A tier more reached the heads of the row behind: past the last
+        // tier there is no spot, and the caller cuts the name short.
+        let column: Vec<Area> = (0..=BADGE_TIERS).map(|k| area(0, 100 - step * k)).collect();
+        assert_eq!(at(area(5, 100), &column), None, "no higher than its tiers");
+        assert_eq!(at(area(0, 5), &[area(0, 5)]), None, "never off the window's top");
+    }
+
+    /// A stuck badge wears its mark to its right; a neighbour sitting just
+    /// clear of the badge itself still steps off the mark, or covered it.
+    #[test]
+    fn a_neighbour_keeps_off_a_stuck_badges_mark() {
+        let Ok(mut faces) = Faces::load() else {
+            return;
+        };
+        let ink = Rgb { r: 9, g: 9, b: 9 };
+        let id = |n: usize| AgentId::from_parts("claude-code", &format!("s{n}"));
+        let badge = |n: usize, x: u16| Badge {
+            agent: id(n),
+            at: pixtuoid_scene::layout::Point { x, y: 60 },
+            head: 60,
+            marker: ink,
+            name: pixtuoid_scene::display::TextSpan::new("cc·repo", ink),
+            plate: ink,
+        };
+        let place = |faces: &mut Faces, badges: &[Badge], stuck: &[AgentId]| {
+            let text = HostText {
+                badges,
+                bubbles: &[],
+                signs: &[],
+                dim: pixtuoid_scene::look::Dim::NONE,
+            };
+            place_tags(
+                faces,
+                text,
+                (1, 4, 1600),
+                &HashMap::new(),
+                &HashMap::new(),
+                &[],
+                2.0,
+                &[],
+                stuck,
+            )
+        };
+        let w = i64::from(place(&mut faces, &[badge(0, 100)], &[])[0].badge.w);
+        // Centres a badge and a pad apart: the badges just clear each other.
+        let gap = u16::try_from((w + i64::from(tag_pad(2.0))) / 4 + 1).unwrap();
+        let pair = [badge(0, 100), badge(1, 100 + gap)];
+        let free = place(&mut faces, &pair, &[]);
+        assert_eq!(free[1].badge.y, free[1].rest_y, "clear of the badge alone");
+        let marked = place(&mut faces, &pair, &[id(0)]);
+        let (a, b) = (&marked[0], &marked[1]);
+        let pad = tag_pad(2.0);
+        let mark = Area {
+            x: a.badge.x + i64::from(a.badge.w + pad),
+            w: stuck_mark_w(&mut faces, pt_px(NAME_PT, 2.0), pad),
+            ..a.badge
+        };
+        assert!(!b.badge.meets(&mark), "the neighbour covers the stuck mark");
+    }
+
+    /// A badge with no room for its whole name keeps a short one, not a
+    /// dot: a dot told no one which session sat there. Its namesake number
+    /// stays, or two sessions of one repo read the same.
     #[test]
     fn a_short_badge_keeps_its_name_and_number() {
         assert_eq!(short_name("blog"), "blog");
@@ -2657,6 +2916,345 @@ mod tests {
         let n = short_name("agent-office\u{b7}2");
         assert!(n.ends_with("\u{b7}2"), "{n}");
         assert!(crate::text::cells(&n) <= SHORT_NAME_CELLS, "{n}");
+    }
+
+    /// Six long names side by side on a row of desks: stacked without end,
+    /// the fourth tier covered the heads (and the "!" or "?") of the row
+    /// behind and the window's top piled them up again. No badge climbs past
+    /// its tiers or covers another figure's head; the ones with no room left
+    /// read short, the ones in full still read whole.
+    #[test]
+    fn a_row_of_long_names_stays_within_its_tiers_and_off_other_heads() {
+        let Ok(mut faces) = Faces::load() else {
+            return;
+        };
+        let ink = Rgb { r: 9, g: 9, b: 9 };
+        let id = |n: usize| AgentId::from_parts("claude-code", &format!("s{n}"));
+        // The cutaway's density; desks 10 layout columns apart.
+        let (d, u, win_w) = (4, 2, 1600);
+        let scale = i64::from(d * u);
+        let row = |n: usize, head: u16| Badge {
+            agent: id(n),
+            at: pixtuoid_scene::layout::Point {
+                x: 30 + 10 * (n % 6) as u16,
+                y: head,
+            },
+            head,
+            marker: ink,
+            name: pixtuoid_scene::display::TextSpan::new(
+                format!("cc·customer-notifications-service·{n}"),
+                ink,
+            ),
+            plate: ink,
+        };
+        // Six on the front row, and two on the row behind whose heads the
+        // stack used to climb onto.
+        let badges: Vec<Badge> = (0..6)
+            .map(|n| row(n, 60))
+            .chain((6..8).map(|n| row(n, 36)))
+            .collect();
+        let text = HostText {
+            badges: &badges,
+            bubbles: &[],
+            signs: &[],
+            dim: pixtuoid_scene::look::Dim::NONE,
+        };
+        let selected = id(3);
+        let tags = place_tags(
+            &mut faces,
+            text,
+            (d, u, win_w),
+            &HashMap::new(),
+            &HashMap::new(),
+            &[selected],
+            2.0,
+            &[],
+            &[],
+        );
+        let step = i64::from(tags[0].badge.h + tag_pad(2.0));
+        for t in &tags {
+            assert!(
+                t.badge.y >= t.rest_y - BADGE_TIERS * step,
+                "{} climbed past its tiers",
+                t.name
+            );
+            for b in badges.iter().filter(|b| b.agent != t.agent) {
+                assert!(
+                    !t.badge.meets(&head_area(b, scale)),
+                    "{} covers another figure's head",
+                    t.name
+                );
+            }
+        }
+        let whole = |t: &Tag| {
+            t.name == badges.iter().find(|b| b.agent == t.agent).unwrap().name.text()
+        };
+        let sel = tags.iter().find(|t| t.agent == selected).unwrap();
+        assert!(whole(sel), "the selected one reads whole: {}", sel.name);
+        assert!(
+            tags.iter().any(|t| !whole(t)),
+            "a crowd this long cannot all read whole"
+        );
+        for t in tags.iter().filter(|t| !whole(t)) {
+            let n = badges.iter().position(|b| b.agent == t.agent).unwrap();
+            assert!(t.name.ends_with(&format!("\u{b7}{n}")), "{} keeps its number", t.name);
+            assert!(crate::text::cells(&t.name) <= SHORT_NAME_CELLS, "{}", t.name);
+        }
+    }
+
+    fn tag_at(badge: Area, rest_y: i64, figure_top: i64) -> Tag {
+        let ink = Rgb { r: 9, g: 9, b: 9 };
+        Tag {
+            agent: AgentId::from_parts("claude-code", "s"),
+            badge,
+            figure_top,
+            rest_y,
+            faces_away: false,
+            label: None,
+            plate: 0,
+            marker: 0,
+            marker_rgb: ink,
+            name: "cc·repo".into(),
+            ink: 0,
+            role: None,
+            task: None,
+            full: true,
+        }
+    }
+
+    /// A badge stepped up off its head can sit over a neighbour's head and
+    /// read as theirs: a leader runs from it down to its own figure. One on
+    /// its head needs none.
+    #[test]
+    fn a_stacked_badge_points_back_to_its_figure() {
+        let resting = tag_at(area(0, 90), 90, 102);
+        assert!(leader(&resting, 2).is_none(), "on its head");
+        let stacked = tag_at(area(0, 66), 90, 102);
+        let l = leader(&stacked, 2).expect("stepped up: a leader");
+        assert_eq!(l.y, 76, "from the badge's foot");
+        assert_eq!(l.y + i64::from(l.h), 102, "to its figure's head");
+        assert_eq!(l.x, 20, "down from the badge's middle");
+        assert_eq!(l.w, 2);
+    }
+
+    /// The figure of the card selected on the panel is ringed round its
+    /// whole body and its badge framed, so it is found in a crowd: its name
+    /// alone turning white was not enough. Nothing is drawn with none.
+    #[test]
+    fn the_selected_figure_is_ringed_and_its_badge_framed() {
+        let scale = 8;
+        let t = tag_at(area(60, 40), 40, 52);
+        let mut none = Canvas::new(200, 200, 0);
+        paint_selected(&mut none, &[], t.agent, scale, 1.0);
+        assert!(none.px.iter().all(|&p| p == 0));
+        let mut c = Canvas::new(200, 200, 0);
+        paint_selected(&mut c, std::slice::from_ref(&t), t.agent, scale, 1.0);
+        let at = |x: i64, y: i64| c.px[(y as u32 * c.w + x as u32) as usize];
+        let (cx, cy, half_w, half_h) = figure_box(&t, scale);
+        let column: Vec<i64> = (0..200)
+            .filter(|&y| at(cx, y) == SELECTED_INK && y > t.figure_top)
+            .collect();
+        let bottom = *column.last().expect("the ring passes under the figure");
+        assert!(bottom >= cy + half_h, "round the whole body, not its head");
+        assert!(at(cx + half_w + scale as i64 / 2, cy) == SELECTED_INK, "and beside it");
+        assert_eq!(at(t.badge.x - 1, t.badge.y), SELECTED_INK, "the badge framed");
+    }
+
+    /// A back-turned sitter's figure is drawn under its desk's monitor, and
+    /// pixtuoid hangs its badge over that, two rows of desks up and over
+    /// other heads. The office hangs it on the figure's head instead, at
+    /// most a cell above, so a name reads as the one under it.
+    #[test]
+    fn a_badge_hangs_on_its_figures_head_not_over_the_desk() {
+        let Ok(mut faces) = Faces::load() else {
+            return;
+        };
+        let ink = Rgb { r: 9, g: 9, b: 9 };
+        // The cutaway's density: a layout row is d art rows, each u pixels.
+        let (d, u) = (4, 2);
+        let head = 60;
+        let badges = [Badge {
+            agent: AgentId::from_parts("claude-code", "s"),
+            // Where the raised monitor put it: 20 rows over the head.
+            at: pixtuoid_scene::layout::Point {
+                x: 40,
+                y: head - 20,
+            },
+            head,
+            marker: ink,
+            name: pixtuoid_scene::display::TextSpan::new("cc·repo", ink),
+            plate: ink,
+        }];
+        let text = HostText {
+            badges: &badges,
+            bubbles: &[],
+            signs: &[],
+            dim: pixtuoid_scene::look::Dim::NONE,
+        };
+        let tags = place_tags(
+            &mut faces,
+            text,
+            (d, u, 400),
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            2.0,
+            &[],
+            &[],
+        );
+        let t = &tags[0];
+        let head_px = i64::from(head) * i64::from(d * u);
+        assert_eq!(t.figure_top, head_px, "its ring and marks find the figure");
+        let gap = head_px - (t.badge.y + i64::from(t.badge.h));
+        let cell = i64::from(u32::from(pixtuoid_scene::layout::CELL_ROWS) * d * u);
+        assert!((0..=cell).contains(&gap), "{gap} px over the head");
+        assert!(leader(t, 1).is_none());
+    }
+
+    /// CIE76 distance between two colours: how far apart they read.
+    fn cie76(a: Rgb, b: Rgb) -> f64 {
+        fn lab(c: Rgb) -> [f64; 3] {
+            let lin = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            let (r, g, b) = (lin(c.r), lin(c.g), lin(c.b));
+            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+            let f = |t: f64| {
+                if t > 0.008856 {
+                    t.cbrt()
+                } else {
+                    7.787 * t + 16.0 / 116.0
+                }
+            };
+            [
+                116.0 * f(y) - 16.0,
+                500.0 * (f(x) - f(y)),
+                200.0 * (f(y) - f(z)),
+            ]
+        }
+        lab(a)
+            .iter()
+            .zip(lab(b))
+            .map(|(p, q)| (p - q).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    /// The panel's state colours mean stuck, waiting, working and done; a
+    /// repository wearing one of them read as its agents being in that
+    /// state. Every repo hue stays apart from each (CIE76 distance).
+    #[test]
+    fn no_repo_hue_reads_as_a_state() {
+        let rgb = |c: Color| {
+            let Color::Rgb(r, g, b) = c else {
+                unreachable!()
+            };
+            Rgb { r, g, b }
+        };
+        let states = [
+            panel::Group::Stuck,
+            panel::Group::Waiting,
+            panel::Group::Working,
+            panel::Group::Done,
+        ];
+        for hue in pixtuoid_scene::badge::REPO_HUES {
+            for g in states {
+                let de = cie76(hue, rgb(g.color()));
+                // The old amber repo hue sat 29 from the waiting colour.
+                assert!(de >= 33.0, "{hue:?} is {de:.0} from {g:?}");
+            }
+        }
+    }
+
+    /// Two repositories side by side in the office are told apart by their
+    /// colour alone; a pair 20 apart (a pink and a purple, two violets) read
+    /// as one repo. Every pair of repo hues stays apart (CIE76 distance).
+    #[test]
+    fn no_two_repo_hues_read_as_one() {
+        let hues = pixtuoid_scene::badge::REPO_HUES;
+        for (i, &a) in hues.iter().enumerate() {
+            for &b in &hues[i + 1..] {
+                let de = cie76(a, b);
+                assert!(de >= 25.0, "{a:?} is {de:.0} from {b:?}");
+            }
+        }
+    }
+
+    /// By day the wall board shows its name alone: its tally was too small
+    /// to read and counted otherwise than the panel's header. From six the
+    /// evening's tally still takes the board's lines, and a click on them
+    /// replays the day.
+    #[test]
+    fn the_board_shows_its_tally_only_in_the_evening() {
+        let ink = Rgb {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        let line = |y: u16, role: TextRole, text: &str| TextRun {
+            at: pixtuoid_scene::layout::Point { x: 2, y },
+            align: Align::Left,
+            spans: vec![pixtuoid_scene::display::TextSpan::new(text, ink)],
+            plate: Some(Rgb { r: 1, g: 1, b: 1 }),
+            strip: None,
+            role,
+        };
+        let signs = [
+            line(0, TextRole::Brand, "agent-office"),
+            line(12, TextRole::Board, "2 req 4 run"),
+            line(24, TextRole::Board, "up 3m"),
+        ];
+        let text = HostText {
+            badges: &[],
+            bubbles: &[],
+            signs: &signs,
+            dim: pixtuoid_scene::look::Dim::NONE,
+        };
+        let inked = |art: &Canvas, y0: u32, y1: u32| {
+            (y0..y1).any(|y| (0..art.w).any(|x| art.px[(y * art.w + x) as usize] != 0))
+        };
+        let mut day = Canvas::new(120, 40, 0);
+        assert!(paint_world_text(&mut day, text, 1, None).is_empty());
+        assert!(inked(&day, 0, 12), "the name stays");
+        assert!(!inked(&day, 12, 40), "no tally by day");
+        let mut evening = Canvas::new(120, 40, 0);
+        let tally = ["12 turns today".to_owned(), "stuck 2×".to_owned()];
+        let boards = paint_world_text(&mut evening, text, 1, Some(&tally));
+        assert_eq!(boards.len(), 2, "the evening's two lines, to click");
+    }
+
+    /// Done and waiting were two yellows; done is a cool colour now, and as
+    /// a card's chip and a name over the dark panel it still reads at AA.
+    #[test]
+    fn done_reads_apart_from_waiting_and_at_aa() {
+        fn lum(c: u32) -> f64 {
+            let ch = |s: u32| {
+                let v = f64::from((c >> s) & 0xff) / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+        }
+        let ratio = |a: u32, b: u32| {
+            let (x, y) = (lum(a), lum(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        let done = color_u32(panel::Group::Done.color(), 0);
+        let wait = color_u32(panel::Group::Waiting.color(), 0);
+        let blue_minus_red = |c: u32| i64::from(c & 0xff) - i64::from((c >> 16) & 0xff);
+        assert!(blue_minus_red(done) > 0, "done is cool");
+        assert!(blue_minus_red(wait) < 0, "waiting is warm");
+        assert!(ratio(done, PANEL_BG) >= 4.5, "done text on the panel");
     }
 
     /// A drag across many sizes keeps the office it started with, and its
@@ -2841,6 +3439,7 @@ mod tests {
                     x: 40 + 10 * n as u16,
                     y: 40,
                 },
+                head: 40,
                 marker: ink,
                 name: pixtuoid_scene::display::TextSpan::new(format!("cc·repo·{n}"), ink),
                 plate: ink,
@@ -2848,6 +3447,7 @@ mod tests {
             .chain(std::iter::once(Badge {
                 agent: id(6),
                 at: pixtuoid_scene::layout::Point { x: 99, y: 40 },
+                head: 40,
                 marker: ink,
                 name: pixtuoid_scene::display::TextSpan::new("cc·toolhub-store", ink),
                 plate: ink,
@@ -2869,6 +3469,7 @@ mod tests {
             &HashMap::new(),
             &[id(2), id(6)],
             2.0,
+            &[],
             &[],
         );
         assert_eq!(tags.len(), 7, "every figure keeps a tag to click");
@@ -2913,6 +3514,7 @@ mod tests {
                     x: 40 + 12 * n as u16,
                     y: 40,
                 },
+                head: 40,
                 marker: ink,
                 name: pixtuoid_scene::display::TextSpan::new("cc·repo", ink),
                 plate: ink,
@@ -2925,7 +3527,7 @@ mod tests {
             dim: pixtuoid_scene::look::Dim::NONE,
         };
         let place = |faces: &mut Faces, roles: &HashMap<AgentId, Role>| {
-            place_tags(faces, text, (1, 4, 400), &HashMap::new(), roles, &[], 2.0, &[])
+            place_tags(faces, text, (1, 4, 400), &HashMap::new(), roles, &[], 2.0, &[], &[])
         };
         let plain = place(&mut faces, &HashMap::new());
         let roles: HashMap<AgentId, Role> = [(id(0), Role::Frontend), (id(1), Role::Qa)].into();

@@ -10,8 +10,8 @@ use pixtuoid_core::sprite::format::Density;
 use crate::display::Span;
 use crate::display::pen::Pen;
 use crate::effects::look::{
-    FLAME_CORE, FLAME_DEEP, FLAME_MID, FLAME_TIP, Inks, REQUIRES_ACTION_MARK_1X, SLEEP_Z_1X,
-    SLEEP_Z_MAX_RISE, plot_effect, sleep_z_fade, walking_dust_foot,
+    FLAME_CORE, FLAME_DEEP, FLAME_MID, FLAME_TIP, Inks, SLEEP_Z_1X, SLEEP_Z_MAX_RISE, plot_effect,
+    requires_action_mark_1x, sleep_z_fade, walking_dust_foot,
 };
 use crate::effects::{Effect, EffectKind};
 
@@ -95,7 +95,7 @@ const SLEEP_Z: &[&str] = &[
     "######", //
 ];
 
-/// The requires-action mark, beside the head.
+/// The requires-action mark, beside the head: a "?", waiting on your reply.
 const REQUIRES_ACTION_MARK: &[&str] = &[
     ".####.", //
     "##..##", //
@@ -107,6 +107,29 @@ const REQUIRES_ACTION_MARK: &[&str] = &[
     "..##..", //
     "..##..", //
 ];
+
+/// agent-office: the mark of one waiting on your approval, a "!", as the
+/// panel's chip marks it; as tall as the "?", so either sits on one line.
+const APPROVAL_MARK: &[&str] = &[
+    "..##..", //
+    "..##..", //
+    "..##..", //
+    "..##..", //
+    "..##..", //
+    "..##..", //
+    "......", //
+    "..##..", //
+    "..##..", //
+];
+
+/// agent-office: the mark a requires-action mark in `phase` shows.
+fn requires_action_mark(phase: u64) -> &'static [&'static str] {
+    if phase == crate::effects::MARK_REPLY {
+        REQUIRES_ACTION_MARK
+    } else {
+        APPROVAL_MARK
+    }
+}
 
 /// Art columns from the head mark to the west edge of what floats beside the
 /// head: clear of the hair, and of the badge centred over it.
@@ -180,9 +203,10 @@ fn base_look(
             true
         }
         EffectKind::RequiresActionMark => {
-            let top = head.y + BESIDE_DY_1X - glyph_h(REQUIRES_ACTION_MARK_1X);
+            let glyph = requires_action_mark_1x(e.phase);
+            let top = head.y + BESIDE_DY_1X - glyph_h(glyph);
             stamp(
-                REQUIRES_ACTION_MARK_1X,
+                glyph,
                 head.x + BESIDE_DX_1X,
                 top,
                 emit,
@@ -215,8 +239,9 @@ fn dense_look(
             stamp(SLEEP_Z, x, top, emit, |_| Some((inks.sleep_z, coverage)));
         }
         EffectKind::RequiresActionMark => {
-            let top = head.y + BESIDE_DY - glyph_h(REQUIRES_ACTION_MARK);
-            stamp(REQUIRES_ACTION_MARK, head.x + BESIDE_DX, top, emit, |_| {
+            let glyph = requires_action_mark(e.phase);
+            let top = head.y + BESIDE_DY - glyph_h(glyph);
+            stamp(glyph, head.x + BESIDE_DX, top, emit, |_| {
                 Some((inks.requires_action, 1.0))
             });
         }
@@ -283,8 +308,10 @@ mod tests {
         for glyph in [
             SLEEP_Z,
             REQUIRES_ACTION_MARK,
+            APPROVAL_MARK,
             SLEEP_Z_1X,
-            REQUIRES_ACTION_MARK_1X,
+            crate::effects::look::REQUIRES_ACTION_MARK_1X,
+            crate::effects::look::APPROVAL_MARK_1X,
             DUST,
             FLAME_CROWN[0],
             FLAME_CROWN[1],

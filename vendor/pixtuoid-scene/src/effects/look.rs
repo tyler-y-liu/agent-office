@@ -41,7 +41,7 @@ impl Inks {
 pub(crate) fn plot_effect(e: &Effect, inks: &Inks, plot: &mut impl FnMut(u16, u16, Rgb, f32)) {
     match e.kind {
         EffectKind::SleepZ => plot_sleep_z(plot, e.at, e.phase, inks),
-        EffectKind::RequiresActionMark => plot_requires_action_mark(plot, e.at, inks),
+        EffectKind::RequiresActionMark => plot_requires_action_mark(plot, e.at, e.phase, inks),
         EffectKind::WalkingDust => plot_walking_dust(plot, e.at, e.phase, inks),
         EffectKind::FlameCrown => plot_flame_crown(plot, e.at, e.phase),
         EffectKind::PetHeart => plot_pet_heart(plot, e.at, e.phase),
@@ -58,13 +58,32 @@ pub(crate) const SLEEP_Z_1X: &[&str] = &[
     "##", //
 ];
 
-/// The requires-action mark on the base art, as [`SLEEP_Z_1X`] is.
+/// The requires-action mark on the base art, as [`SLEEP_Z_1X`] is: a "?",
+/// waiting on your reply.
 pub(crate) const REQUIRES_ACTION_MARK_1X: &[&str] = &[
     "###", //
     "..#", //
     ".#.", //
     ".#.", //
 ];
+
+/// agent-office: the mark of one waiting on your approval, a "!", as the
+/// panel's chip marks it.
+pub(crate) const APPROVAL_MARK_1X: &[&str] = &[
+    ".#.", //
+    ".#.", //
+    "...", //
+    ".#.", //
+];
+
+/// agent-office: the base-art mark a requires-action mark in `phase` shows.
+pub(crate) fn requires_action_mark_1x(phase: u64) -> &'static [&'static str] {
+    if phase == super::MARK_REPLY {
+        REQUIRES_ACTION_MARK_1X
+    } else {
+        APPROVAL_MARK_1X
+    }
+}
 
 /// Layout rows a sleep z rises over its life.
 pub(crate) const SLEEP_Z_MAX_RISE: u16 = 4;
@@ -176,11 +195,12 @@ fn plot_mascot_bubble(plot: &mut impl FnMut(u16, u16, Rgb, f32), at: Point, rise
 fn plot_requires_action_mark(
     plot: &mut impl FnMut(u16, u16, Rgb, f32),
     top_left: Point,
+    phase: u64,
     inks: &Inks,
 ) {
     let fg = inks.requires_action;
     let by = top_left.y.saturating_sub(5) & !1u16;
-    for (dx, dy, _) in inked(REQUIRES_ACTION_MARK_1X) {
+    for (dx, dy, _) in inked(requires_action_mark_1x(phase)) {
         plot(top_left.x + 2 + dx, by + dy, fg, 1.0);
     }
 }

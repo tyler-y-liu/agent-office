@@ -5340,6 +5340,76 @@ fn only_a_placement_that_breathes_takes_the_breath() {
     );
 }
 
+/// agent-office: one waiting on you wears its head mark wherever it is, not
+/// only at its desk: lined up at a waypoint, standing about, on its way. And
+/// the mark says what it waits on as the panel does, "!" for a prompt to
+/// approve and "?" for a question to answer. One at work wears none.
+#[test]
+fn a_waiter_wears_its_head_mark_off_its_desk_and_says_what_it_waits_on() {
+    use crate::effects::{EffectKind, MARK_APPROVAL, MARK_REPLY};
+    use crate::pose::Pose;
+    let (scene, layout, id, now0, pack) = sim_rig();
+    let wp = layout.waypoints.first().expect("a waypoint");
+    let mid = Point {
+        x: layout.buf_w / 2,
+        y: layout.buf_h / 2,
+    };
+    let poses = [
+        (
+            "lined up",
+            Pose::AtWaypoint {
+                wp: 0,
+                kind: wp.kind,
+            },
+        ),
+        ("standing", Pose::AimlessAt { dest: mid }),
+        (
+            "walking",
+            crate::pose::LegPose {
+                from: mid,
+                to: Point { x: mid.x + 8, ..mid },
+                progress: LegProgress::ZERO,
+                carrying_coffee: false,
+            }
+            .straight(),
+        ),
+    ];
+    let mark = |state: ActivityState, pose: Pose| {
+        let mut slot = scene.agents[&id].clone();
+        slot.state = state;
+        let poses = HashMap::from([(id, Some(pose))]);
+        let (placements, ..) = crate::sim::resolve_characters(
+            &[slot],
+            &poses,
+            &layout,
+            &pack,
+            &HashMap::new(),
+            Motion::Full.timing(now0),
+        );
+        let [p] = <[_; 1]>::try_from(placements).expect("one agent, one placement");
+        p.effects
+            .iter()
+            .find(|e| e.kind == EffectKind::RequiresActionMark)
+            .map(|e| e.phase)
+    };
+    let waits = |reason: &str| ActivityState::RequiresAction {
+        reason: Some(reason.into()),
+    };
+    for (what, pose) in poses {
+        assert_eq!(mark(waits("Bash"), pose), Some(MARK_APPROVAL), "{what}: \"!\"");
+        assert_eq!(
+            mark(waits(crate::waiting::REPLY_REASON), pose),
+            Some(MARK_REPLY),
+            "{what}: \"?\""
+        );
+        assert_eq!(
+            mark(ActivityState::Running { item: None }, pose),
+            None,
+            "{what}: at work, no mark"
+        );
+    }
+}
+
 /// Co-located visitors step aside, and each one's badge goes with them.
 #[test]
 fn co_located_visitors_badges_step_aside_with_their_sprites() {

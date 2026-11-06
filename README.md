@@ -11,8 +11,8 @@ A pixel office on Victoria Harbour for your Claude Code sessions. Every session 
 With several agent sessions running at once, it's hard to keep track of which one finished, which one is waiting for you to click "Allow", and which one has been going in circles for ten minutes. agent-office puts them all in one office:
 
 - **One-line summaries**: reads each session's latest prompt, todos and recent actions, and summarizes them in one short line through an OpenAI-compatible API you configure. When a turn ends it summarizes the result too: what got done, where it got stuck, or what it is asking you.
-- **Seats by state**: working sessions sit at their desks, finished ones go to the pantry, sessions waiting for approval or asking you a question queue in the waiting area, and stuck ones stay at their desk with a red "?". The side panel groups them as waiting → stuck → done, unread → working → idle.
-- **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command or subagent is running), marks a session as possibly stuck.
+- **Seats by state**: working sessions sit at their desks, finished ones go to the pantry, sessions waiting for approval ("!" over the head) or asking you a question ("?") queue in the waiting area, and stuck ones stay at their desk in a red ring with a "⚠" by their name tag. The side panel groups them as waiting → stuck → done, unread → working → idle.
+- **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command is running; a Claude Code session waiting on its own subagent isn't timed), marks a session as possibly stuck.
 - **Notifications**: when the window is in the background and a session starts waiting for you, you get a system notification. The Dock badge always shows how many are waiting.
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
 - **Several agents**: Claude Code, Codex, Cursor (`cursor-agent`) and DeepSeek Harness (dsh).

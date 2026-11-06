@@ -14,7 +14,9 @@ pub(crate) enum EffectKind {
     /// A "z" rising off a sleeper's head; ms into its rise of
     /// [`SLEEP_Z_RISE_MS`].
     SleepZ,
-    /// The requires-action mark over a figure; still.
+    /// The requires-action mark over a figure; still. agent-office: its
+    /// phase is [`MARK_REPLY`] when it waits on your reply ("?"), else
+    /// [`MARK_APPROVAL`] ("!"), as the panel's chips mark them.
     RequiresActionMark,
     /// The puff a walker's stride kicks up; the foot it rises under
     /// ([`planted_foot`]).
@@ -64,12 +66,18 @@ pub(crate) fn sleep_z(at: Point, seed: u64, beat: Beat) -> Option<Effect> {
     })
 }
 
-/// The requires-action mark over the figure at `at`.
-pub(crate) fn requires_action_mark(at: Point) -> Effect {
+/// agent-office: a requires-action mark's phase for a prompt to approve.
+pub(crate) const MARK_APPROVAL: u64 = 0;
+/// agent-office: a requires-action mark's phase for a question to answer.
+pub(crate) const MARK_REPLY: u64 = 1;
+
+/// The requires-action mark over the figure at `at`; agent-office: a "?"
+/// when it waits on your `reply`, else a "!".
+pub(crate) fn requires_action_mark(at: Point, reply: bool) -> Effect {
     Effect {
         kind: EffectKind::RequiresActionMark,
         at,
-        phase: 0,
+        phase: if reply { MARK_REPLY } else { MARK_APPROVAL },
     }
 }
 

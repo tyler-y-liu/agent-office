@@ -7,10 +7,8 @@
 use std::time::{Duration, SystemTime};
 
 use pixtuoid_core::AgentId;
-use pixtuoid_scene::layout::{CHARACTER_SPRITE_H, CHARACTER_SPRITE_W};
-
 use super::vector::Faces;
-use super::{Area, Canvas, DoorSign, Tag, pt_px, tag_pad};
+use super::{Area, Canvas, DoorSign, Tag, figure_size, pt_px, tag_pad};
 use crate::fun::{Festival, Mood};
 use crate::i18n::t;
 use crate::tasks::Cheer;
@@ -20,6 +18,9 @@ use crate::tasks::Cheer;
 pub(super) struct Stage {
     /// Window pixels to an art pixel.
     pub u: i64,
+    /// Window pixels to a layout unit, which a figure is drawn in: the art
+    /// is denser than the layout, so sized in art pixels a figure shrank.
+    pub unit: u16,
     pub scale_factor: f64,
     /// The office's width and height in window pixels.
     pub w: u32,
@@ -130,7 +131,7 @@ pub(super) fn handoff(canvas: &mut Canvas, s: Stage, from: &Tag, to: &Tag, t: f3
     let ((fx, fy), (tx, ty)) = (figure(from), figure(to));
     let t = f64::from(t.clamp(0.0, 1.0));
     let lerp = |a: i64, b: i64| a as f64 + (b - a) as f64 * t;
-    let lift = (t * (1.0 - t) * 4.0) * (figure_h(s.u) as f64);
+    let lift = (t * (1.0 - t) * 4.0) * (figure_h(s) as f64);
     // Twice the art's scale: a slip in flight at one art pixel a letter is
     // a speck nobody follows.
     let u = 2 * s.u;
@@ -141,17 +142,29 @@ pub(super) fn handoff(canvas: &mut Canvas, s: Stage, from: &Tag, to: &Tag, t: f3
     canvas.fill(x, y, u32::try_from(w).unwrap_or(0), u32::try_from(u).unwrap_or(1), stripe);
 }
 
-/// A figure's centre column and top row, in window pixels./// A figure's centre column and top row, in window pixels.
+/// A figure's centre column and top row, in window pixels.
 fn figure(t: &Tag) -> (i64, i64) {
     (t.badge.x + i64::from(t.badge.w / 2), t.figure_top)
 }
 
-fn figure_w(u: i64) -> i64 {
-    i64::from(CHARACTER_SPRITE_W) * u
+fn figure_w(s: Stage) -> i64 {
+    figure_size(s.unit).0
 }
 
-fn figure_h(u: i64) -> i64 {
-    i64::from(CHARACTER_SPRITE_H) * u
+fn figure_h(s: Stage) -> i64 {
+    figure_size(s.unit).1
+}
+
+/// The pool of light round a lit desk's figure `t`, centred on the desk it
+/// sits at: centre and radii in window pixels.
+fn pool(s: Stage, t: &Tag) -> (f64, f64, f64, f64) {
+    let (cx, top) = figure(t);
+    (
+        cx as f64,
+        (top + figure_h(s) * 3 / 5) as f64,
+        (figure_w(s) * 3 / 2) as f64,
+        (figure_h(s) * 3 / 4) as f64,
+    )
 }
 
 /// Late at night only the overtime desks keep a light on: the floor goes
@@ -161,15 +174,7 @@ pub(super) fn night_lights(canvas: &mut Canvas, s: Stage, tags: &[Tag], lit: &[A
     let pools: Vec<(f64, f64, f64, f64)> = tags
         .iter()
         .filter(|t| lit.contains(&t.agent))
-        .map(|t| {
-            let (cx, top) = figure(t);
-            (
-                cx as f64,
-                (top + figure_h(s.u) * 3 / 5) as f64,
-                (figure_w(s.u) * 3) as f64,
-                (figure_h(s.u) * 8 / 5) as f64,
-            )
-        })
+        .map(|t| pool(s, t))
         .collect();
     let (w, h) = (s.w.min(canvas.w), s.h.min(canvas.h));
     let top = s.floor_top.clamp(0, i64::from(h)) as u32;
@@ -230,8 +235,11 @@ fn dim(px: u32, amount: f64) -> u32 {
 pub(super) fn overtime_supper(canvas: &mut Canvas, s: Stage, t: &Tag) {
     let u = s.u;
     let (cx, top) = figure(t);
-    let base = top + figure_h(u) * 3 / 4;
-    let x = cx + figure_w(u) * 2 / 3;
+    // On the desktop: beside a back-turned sitter it runs halfway down the
+    // figure, and lower stood the supper on its chair; in front of one
+    // facing the viewer it is down by the figure's lap.
+    let base = top + figure_h(s) * if t.faces_away { 4 } else { 7 } / 8;
+    let x = cx + figure_w(s) * 2 / 3;
     let y = base - 5 * u;
     sprite(canvas, x, y, u, NOODLES);
     sprite(canvas, x + 7 * u, y, u, MILK_TEA);
@@ -250,8 +258,8 @@ pub(super) fn packing_up(canvas: &mut Canvas, s: Stage, t: &Tag) {
     let (cx, top) = figure(t);
     sprite(
         canvas,
-        cx - figure_w(u) * 2 / 3 - sprite_w(BRIEFCASE) * u,
-        top + figure_h(u) - 5 * u,
+        cx - figure_w(s) * 2 / 3 - sprite_w(BRIEFCASE) * u,
+        top + figure_h(s) - 5 * u,
         u,
         BRIEFCASE,
     );
@@ -265,10 +273,10 @@ pub(super) fn mood(canvas: &mut Canvas, s: Stage, t: &Tag, mood: Mood) {
     match mood {
         Mood::Frustrated => {
             let bob = ((s.ms / 300) % 2) as i64 * u;
-            sprite(canvas, cx + figure_w(u) / 2, top + 2 * u + bob, u, SWEAT);
+            sprite(canvas, cx + figure_w(s) / 2, top + 2 * u + bob, u, SWEAT);
             sprite(
                 canvas,
-                cx - figure_w(u) / 2 - 2 * u,
+                cx - figure_w(s) / 2 - 2 * u,
                 top + 3 * u - bob,
                 u,
                 SWEAT,
@@ -278,7 +286,7 @@ pub(super) fn mood(canvas: &mut Canvas, s: Stage, t: &Tag, mood: Mood) {
             let shown = (s.ms / 500) % 4;
             for i in 0..shown as i64 {
                 canvas.fill(
-                    cx + figure_w(u) / 2 + i * 2 * u,
+                    cx + figure_w(s) / 2 + i * 2 * u,
                     top + 2 * u,
                     u as u32,
                     u as u32,
@@ -312,8 +320,8 @@ pub(super) fn mood(canvas: &mut Canvas, s: Stage, t: &Tag, mood: Mood) {
 pub(super) fn cat_by(canvas: &mut Canvas, s: Stage, t: &Tag) -> Area {
     let u = s.u;
     let (cx, top) = figure(t);
-    let x = cx + figure_w(u) / 2;
-    let y = top + figure_h(u) - CAT.len() as i64 * u;
+    let x = cx + figure_w(s) / 2;
+    let y = top + figure_h(s) - CAT.len() as i64 * u;
     sprite(canvas, x, y, u, CAT);
     if (s.ms / 700).is_multiple_of(3) {
         sprite(canvas, x, y + 2 * u, u, CAT_TAIL_UP);
@@ -336,8 +344,8 @@ pub(super) fn stretch(canvas: &mut Canvas, s: Stage, t: &Tag, ago: Duration) {
     // Up in the first quarter second, then two slow pumps.
     let reach =
         ((ago.as_millis() / 250).min(1) as i64 + i64::from((ago.as_millis() / 400) % 2 == 1)) * u;
-    let half = figure_w(u) / 3;
-    let y = top + figure_h(u) / 4 - reach;
+    let half = figure_w(s) / 3;
+    let y = top + figure_h(s) / 4 - reach;
     for x in [cx - half - u, cx + half] {
         sprite(canvas, x, y, u, ARM);
         sprite(canvas, x - u, y - 2 * u, u, &["pp.", "pp."][..]);
@@ -435,11 +443,14 @@ pub(super) fn clapping(canvas: &mut Canvas, s: Stage, t: &Tag) {
     );
 }
 
-/// Whether `other` sits near enough `t` to clap for it.
-pub(super) fn neighbours(t: &Tag, other: &Tag, u: i64) -> bool {
+/// Whether `other` sits near enough `t` to clap for it: a desk or so
+/// either side on its row.
+pub(super) fn neighbours(t: &Tag, other: &Tag, s: Stage) -> bool {
     let (ax, ay) = figure(t);
     let (bx, by) = figure(other);
-    t.agent != other.agent && (ax - bx).abs() < figure_w(u) * 8 && (ay - by).abs() < figure_h(u) * 3
+    t.agent != other.agent
+        && (ax - bx).abs() < figure_w(s) * 2
+        && (ay - by).abs() < figure_h(s) * 3 / 4
 }
 
 /// The boss popping up over your office's sign `ago` after you approved
@@ -814,6 +825,7 @@ mod tests {
         let mut c = Canvas::new(200, 120, 0x0080_8080);
         let s = Stage {
             u: 2,
+            unit: 2,
             scale_factor: 1.0,
             w: 200,
             h: 120,
@@ -830,6 +842,8 @@ mod tests {
                 h: 8,
             },
             figure_top: 50,
+            rest_y: 0,
+            faces_away: false,
             label: None,
             plate: 0,
             marker: 0,
@@ -876,6 +890,7 @@ mod tests {
         }
         let s = Stage {
             u: 2,
+            unit: 2,
             scale_factor: 1.0,
             w: 220,
             h: 140,
@@ -891,6 +906,8 @@ mod tests {
                 h: 8,
             },
             figure_top: top,
+            rest_y: 0,
+            faces_away: false,
             label: None,
             plate: 0,
             marker: 0,
@@ -912,15 +929,7 @@ mod tests {
         night_lights(&mut fast, s, &tags, &lit);
         let pools: Vec<_> = tags[..2]
             .iter()
-            .map(|t| {
-                let (cx, top) = figure(t);
-                (
-                    cx as f64,
-                    (top + figure_h(s.u) * 3 / 5) as f64,
-                    (figure_w(s.u) * 3) as f64,
-                    (figure_h(s.u) * 8 / 5) as f64,
-                )
-            })
+            .map(|t| pool(s, t))
             .collect();
         by_pixel(&mut slow, s, &pools);
         assert!(fast.px == slow.px);
