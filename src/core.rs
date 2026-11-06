@@ -77,6 +77,8 @@ fn hooks_out() -> &'static str {
     )
 }
 
+/// How often an empty office looks again at the hooks and roles.
+const SETUP_RECHECK: Duration = Duration::from_secs(3);
 /// How long a note on what a key did stays in the footer.
 const NOTE_FOR: Duration = Duration::from_secs(5);
 /// How long after a first `q` a second one quits: the window stays up all
@@ -117,6 +119,8 @@ pub struct Core {
     /// `ps`, tmux, `open`), their results back here: who, the scene asked
     /// against, and what happened.
     jumps: Jumps,
+    /// When the empty office last looked again at what is set up.
+    setup_checked: Option<Instant>,
 }
 
 type Jumped = (AgentId, Arc<SceneState>, Result<&'static str, String>);
@@ -371,6 +375,7 @@ impl Core {
             watch: Watch::load(),
             outlook_rx,
             desktop_rx: desktop::spawn(),
+            setup_checked: None,
             notifier: notify::Notifier::default(),
             banners: notify::banners_on(),
             jumps: Jumps::default(),
@@ -398,6 +403,18 @@ impl Core {
         let live = self.live(&views);
         let now = SystemTime::now();
         let scene = without_long_idle(&live, &views, &self.ui.seen, now);
+        // An empty office lists what is left to set up: you run those steps
+        // with it open, so it looks again rather than trust the start.
+        if scene.agents.is_empty()
+            && self
+                .setup_checked
+                .is_none_or(|t| t.elapsed() >= SETUP_RECHECK)
+        {
+            self.setup_checked = Some(Instant::now());
+            self.ui.hooks = crate::hook::installed();
+            self.hooks = self.ui.hooks;
+            self.ui.roles = crate::roles::doctor_line().0;
+        }
         let order = panel::order(&scene, &views, now, &self.ui.seen);
         if self
             .ui
