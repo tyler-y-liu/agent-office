@@ -94,7 +94,11 @@ impl Notifier {
                     view.and_then(|v| v.line.clone()),
                 ),
                 Wait::Reply => (
-                    crate::i18n::t("问你", "Asking you"),
+                    if view.is_some_and(|v| v.needs_task) {
+                        panel::needs_task()
+                    } else {
+                        crate::i18n::t("问你", "Asking you")
+                    },
                     view.and_then(|v| v.outcome.as_deref())
                         .map(|o| crate::i18n::strip_ask(o).unwrap_or(o).to_owned()),
                 ),

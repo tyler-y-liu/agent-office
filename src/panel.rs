@@ -99,8 +99,9 @@ pub fn waits_on_you(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> Op
         ActivityState::Idle
             if !read
                 && view.is_some_and(|v| {
-                    v.outcome_summarized
-                        && v.outcome.as_deref().is_some_and(|o| crate::i18n::is_ask(o))
+                    v.needs_task
+                        || v.outcome_summarized
+                            && v.outcome.as_deref().is_some_and(|o| crate::i18n::is_ask(o))
                 }) =>
         {
             Some(Wait::Reply)
@@ -389,10 +390,14 @@ fn status(
             }
         }
         // Opened or not, the question stays unanswered until you reply.
-        ActivityState::Idle if waits_on_you(slot, view, false) == Some(Wait::Reply) => (
-            format!("? {} {}", reply_wait(), ago(slot.state_started_at)),
-            WAIT,
-        ),
+        ActivityState::Idle if waits_on_you(slot, view, false) == Some(Wait::Reply) => {
+            let what = if view.is_some_and(|v| v.needs_task) {
+                needs_task()
+            } else {
+                reply_wait()
+            };
+            (format!("? {what} {}", ago(slot.state_started_at)), WAIT)
+        }
         // Read, it is up on the rooftop however short its idle stretch: the
         // card says why, or "空闲 7m" up there reads as a bug.
         ActivityState::Idle if read => (
@@ -461,6 +466,11 @@ fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
         }
         _ => None,
     }
+}
+
+/// Dispatched in a role with no task: it waits for you to give it one.
+pub fn needs_task() -> &'static str {
+    crate::i18n::t("等你写任务", "Needs a task")
 }
 
 /// The agent finished its turn and waits on your answer.
@@ -681,10 +691,13 @@ fn card(
                 spans.push(Span::styled(mark, Style::default().fg(DIM)));
             }
         }
-        None => spans.push(Span::styled(
-            crate::i18n::t("（还没有指令）", "(no prompt yet)"),
-            Style::default().fg(DIM),
-        )),
+        None => {
+            let none = match (role, view.is_some_and(|v| v.needs_task)) {
+                (Some(p), true) => crate::tr!("{} · 还没给任务", "{} · no task yet", p.role.name()),
+                _ => crate::i18n::t("（还没有指令）", "(no prompt yet)").to_owned(),
+            };
+            spans.push(Span::styled(none, Style::default().fg(DIM)));
+        }
     }
     if pending {
         spans.push(Span::styled(" …", Style::default().fg(DIM)));
@@ -1335,6 +1348,37 @@ mod tests {
             Group::Idle,
             "idle 15 min+ is up on the rooftop"
         );
+    }
+
+    /// A role dispatched with no task can only ask what to do. With
+    /// summaries off nothing reads its reply as a question, and it used to
+    /// land in the pantry as done, while it waited on you for its task.
+    #[test]
+    fn no_task_dispatch_waits_on_you() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let id = start(&mut scene, &mut r, "ux", None, t0);
+        let s = scene.agents.get_mut(&id).unwrap();
+        s.state = ActivityState::Idle;
+        s.state_started_at = now - Duration::from_secs(20);
+        let view = TaskView {
+            role: Some(crate::roles::Role::Ux),
+            needs_task: true,
+            // Summaries off: the raw reply, not the model's 「问：」.
+            outcome: Some("这次要我看哪个页面或流程？".into()),
+            outcome_summarized: false,
+            ..TaskView::default()
+        };
+        let slot = &scene.agents[&id];
+        assert_eq!(waits_on_you(slot, Some(&view), false), Some(Wait::Reply));
+        assert_eq!(Group::of(slot, Some(&view), now, false), Group::Waiting);
+        let (chip, color) = status(slot, Some(&view), false, now);
+        assert!(chip.contains("等你写任务"), "{chip}");
+        assert_eq!(color, WAIT);
+        // Opened, you have seen what it asked, as with any question.
+        assert_eq!(waits_on_you(slot, Some(&view), true), None);
     }
 
     /// A done session asking you a question needs you as much as a prompt

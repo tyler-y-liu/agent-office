@@ -548,7 +548,7 @@ impl Core {
                             &crate::tr!(
                                 "已在 Claude 开好「{}」的新会话，写上任务发送",
                                 "opened a new {} session in Claude: write the task and send",
-                                if crate::i18n::is_zh() { role.post().zh } else { role.post().id }
+                                role.name()
                             ),
                             Tone::Ok,
                         ),

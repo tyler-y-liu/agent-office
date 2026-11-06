@@ -25,6 +25,7 @@ pub struct Post {
     pub role: Role,
     pub id: &'static str,
     pub zh: &'static str,
+    pub en: &'static str,
     /// The one character its chip shows.
     pub glyph: &'static str,
     pub ink: Rgb,
@@ -41,6 +42,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Product,
         id: "product",
         zh: "产品",
+        en: "Product",
         glyph: "产",
         ink: ink(0xe0, 0x8f, 0x5a),
         template: include_str!("../roles/office-product.md"),
@@ -49,6 +51,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Ux,
         id: "ux",
         zh: "设计",
+        en: "Design",
         glyph: "设",
         ink: ink(0xd9, 0x6f, 0xb8),
         template: include_str!("../roles/office-ux.md"),
@@ -57,6 +60,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Architect,
         id: "architect",
         zh: "架构",
+        en: "Architect",
         glyph: "架",
         ink: ink(0x9a, 0x7c, 0xe0),
         template: include_str!("../roles/office-architect.md"),
@@ -65,6 +69,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Frontend,
         id: "frontend",
         zh: "前端",
+        en: "Frontend",
         glyph: "前",
         ink: ink(0x4f, 0xa8, 0xe8),
         template: include_str!("../roles/office-frontend.md"),
@@ -73,6 +78,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Backend,
         id: "backend",
         zh: "后端",
+        en: "Backend",
         glyph: "后",
         ink: ink(0x3f, 0xb8, 0x9c),
         template: include_str!("../roles/office-backend.md"),
@@ -81,6 +87,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Qa,
         id: "qa",
         zh: "测试",
+        en: "QA",
         glyph: "测",
         ink: ink(0x8c, 0xc0, 0x4f),
         template: include_str!("../roles/office-qa.md"),
@@ -89,6 +96,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Devops,
         id: "devops",
         zh: "运维",
+        en: "DevOps",
         glyph: "运",
         ink: ink(0xc9, 0xa2, 0x3a),
         template: include_str!("../roles/office-devops.md"),
@@ -97,6 +105,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Reviewer,
         id: "reviewer",
         zh: "审查",
+        en: "Reviewer",
         glyph: "审",
         ink: ink(0x8a, 0x9b, 0xb0),
         template: include_str!("../roles/office-reviewer.md"),
@@ -105,6 +114,7 @@ pub const ROSTER: &[Post] = &[
         role: Role::Pm,
         id: "pm",
         zh: "项目经理",
+        en: "PM",
         glyph: "管",
         ink: ink(0xe8, 0x5d, 0x5d),
         template: include_str!("../roles/office-pm.md"),
@@ -133,6 +143,12 @@ impl Role {
     pub fn of_agent_type(t: &str) -> Option<Self> {
         let name = t.rsplit(':').next().unwrap_or(t);
         Self::of_id(name.strip_prefix(PREFIX)?)
+    }
+
+    /// Its post in the UI's language.
+    pub fn name(self) -> &'static str {
+        let post = self.post();
+        crate::i18n::t(post.zh, post.en)
     }
 
     pub fn agent_name(self) -> String {

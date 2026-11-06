@@ -55,6 +55,10 @@ pub struct Transcript {
     /// The post its prompt's `[office:<id>]` marker gave it; a later prompt
     /// without one keeps it, one with another changes it.
     pub role: Option<Role>,
+    /// The last prompt was a role's marker with no task: the session was
+    /// dispatched empty and can only ask what to do, so it waits on you
+    /// whether or not a summary says it asked.
+    pub needs_task: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +266,7 @@ impl Transcript {
             Some((role, rest)) => {
                 self.role = Some(role);
                 let Some(task) = crate::roles::task_of(rest) else {
+                    self.needs_task = true;
                     return;
                 };
                 task
@@ -269,6 +274,7 @@ impl Transcript {
             None => text,
         };
         let Some(p) = human_prompt(text) else { return };
+        self.needs_task = false;
         if self.prompts.back() == Some(&p) {
             return;
         }
@@ -1415,6 +1421,22 @@ mod tests {
         assert_eq!(t.role, Some(Role::Reviewer));
         t.feed(&user(json!("提到 [office:qa] 的这行不算")));
         assert_eq!(t.role, Some(Role::Reviewer));
+    }
+
+    /// A session dispatched with no task can only ask what to do: it waits
+    /// on you until you give it one, and a task you then type ends that.
+    #[test]
+    fn a_real_task_after_the_marker_ends_the_wait() {
+        let mut t = Transcript::default();
+        t.feed(&user(json!("[office:ux] 角色：设计\n\n任务：还没定，先问我要做什么。")));
+        assert!(t.needs_task, "an empty dispatch waits for its task");
+        // Claude Code's note of the same prompt keeps it waiting.
+        t.feed(&json!({"type":"last-prompt","lastPrompt":"[office:ux]\n任务：还没定，先问我要做什么。"}).to_string());
+        assert!(t.needs_task);
+        t.feed(&user(json!("看看设置页")));
+        assert!(!t.needs_task, "the task you typed is the work now");
+        t.feed(&user(json!("[office:qa] 跑全量测试")));
+        assert!(!t.needs_task, "a dispatch that names its task has one");
     }
 
     #[test]

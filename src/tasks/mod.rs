@@ -58,6 +58,8 @@ pub struct TaskView {
     pub cheer: Option<(Cheer, SystemTime)>,
     /// When the transcript was last written.
     pub written_at: Option<SystemTime>,
+    /// Dispatched in a role with no task yet ([`Transcript::needs_task`]).
+    pub needs_task: bool,
 }
 
 /// Why an agent looks stuck.
@@ -689,6 +691,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         reply: t.last_reply.clone(),
         cheer: t.cheer,
         written_at: e.tail.modified,
+        needs_task: t.needs_task,
     }
 }
 
