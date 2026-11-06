@@ -289,6 +289,56 @@ pub fn idle_since_written(scene: &Arc<SceneState>, views: &tasks::TaskViews) -> 
     Arc::new(fixed)
 }
 
+/// `scene` with each idle session that still has a subagent at work drawn
+/// working. A session that backgrounds its subagents ends its turn while
+/// they run, so the wire reads it idle; it is not done until they report
+/// back and it picks up again. One whose turn ended on a question to you
+/// still waits on you, and is left as it is.
+pub fn working_through_helpers(
+    scene: &Arc<SceneState>,
+    views: &tasks::TaskViews,
+    seen: &HashMap<AgentId, SystemTime>,
+) -> Arc<SceneState> {
+    let mut busy: Vec<AgentId> = Vec::new();
+    for s in scene.agents.values() {
+        let at_work = s.exiting_at.is_none()
+            && !matches!(s.state, pixtuoid_core::ActivityState::Idle);
+        if !at_work {
+            continue;
+        }
+        let mut at = s.parent_id;
+        // Bounded: a corrupt parent cycle must not hang the frame.
+        for _ in 0..scene.agents.len() {
+            let Some(p) = at.and_then(|p| scene.agents.get(&p)) else { break };
+            if p.state == pixtuoid_core::ActivityState::Idle
+                && p.exiting_at.is_none()
+                && panel::waits_on_you(p, views.get(&p.agent_id), panel::read_since_idle(p, seen))
+                    .is_none()
+                && !busy.contains(&p.agent_id)
+            {
+                busy.push(p.agent_id);
+            }
+            at = p.parent_id;
+        }
+    }
+    if busy.is_empty() {
+        return Arc::clone(scene);
+    }
+    let mut drawn = (**scene).clone();
+    for id in busy {
+        if let Some(s) = drawn.agents.get_mut(&id) {
+            s.state = pixtuoid_core::ActivityState::Running {
+                item: Some(pixtuoid_core::state::ToolUse {
+                    tool_use_id: None,
+                    detail: Some(panel::ON_HELPERS.into()),
+                    kind: pixtuoid_core::state::ToolKind::Task,
+                }),
+            };
+        }
+    }
+    Arc::new(drawn)
+}
+
 /// How long a session idles before the office stops drawing it.
 const HIDE_IDLE_AFTER: Duration = Duration::from_secs(60 * 60);
 
@@ -379,7 +429,11 @@ impl Core {
     /// Every live session, as the transcripts date their idle stretches.
     fn live(&self, views: &tasks::TaskViews) -> Arc<SceneState> {
         named_subagents(
-            &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+            &working_through_helpers(
+                &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+                views,
+                &self.ui.seen,
+            ),
             views,
         )
     }
@@ -1325,6 +1379,72 @@ mod tests {
             &idle_since_written(&scene, &Arc::new(HashMap::new())),
             &scene
         ));
+    }
+
+    /// A session that backgrounds its subagents ends its turn while they
+    /// run: drawn by its own state it read 「闲着」 and walked off to the
+    /// rooftop while its helpers still worked. It works until they are done;
+    /// one that asked you something still waits on you.
+    #[test]
+    fn a_session_with_a_helper_at_work_is_working() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(16);
+        let mut r = Reducer::new();
+        let mut start = |sid: &str, parent: Option<AgentId>| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: parent,
+                },
+                now,
+                Transport::Hook,
+            );
+            id
+        };
+        let lead = start("lead", None);
+        let helper = start("agent-helper", Some(lead));
+        let deep = start("deep", None);
+        let mid = start("agent-mid", Some(deep));
+        let leaf = start("agent-leaf", Some(mid));
+        let asked = start("asked", None);
+        let asked_helper = start("agent-asked", Some(asked));
+        let done = start("done", None);
+        let done_helper = start("agent-done", Some(done));
+        let running = pixtuoid_core::ActivityState::Running { item: None };
+        for id in [helper, leaf, asked_helper] {
+            scene.agents.get_mut(&id).unwrap().state = running.clone();
+        }
+        for id in [lead, deep, mid, asked, done, done_helper] {
+            scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
+        }
+        let views: tasks::TaskViews = Arc::new(HashMap::from([(
+            asked,
+            tasks::TaskView {
+                outcome: Some("问：先合哪个？".into()),
+                outcome_summarized: true,
+                ..Default::default()
+            },
+        )]));
+        let seen = HashMap::from([(lead, now)]);
+        let drawn = working_through_helpers(&Arc::new(scene), &views, &seen);
+        let group = |id: AgentId| {
+            let s = &drawn.agents[&id];
+            panel::Group::of(s, views.get(&id), now, panel::read_since_idle(s, &seen))
+        };
+        assert_eq!(group(lead), panel::Group::Working, "its helper still runs, though you read it");
+        assert_eq!(group(deep), panel::Group::Working, "a grandchild at work counts");
+        assert_eq!(group(mid), panel::Group::Working);
+        assert_eq!(group(asked), panel::Group::Waiting, "a question to you still waits");
+        assert_eq!(group(done), panel::Group::Done, "helpers done: done");
+        let chip = |id: AgentId| {
+            panel::status(&drawn.agents[&id], views.get(&id), false, now).0
+        };
+        assert!(chip(lead).contains("等子代理"), "not thinking: {}", chip(lead));
     }
 
     /// The desktop app keeps every session alive until it is archived, so

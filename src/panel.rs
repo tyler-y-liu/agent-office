@@ -75,6 +75,11 @@ impl PanelState {
     }
 }
 
+/// The item of a session drawn working while its subagents run
+/// ([`crate::core::working_through_helpers`]): its own turn is over, so it
+/// is waiting on them, not thinking.
+pub const ON_HELPERS: &str = "agent-office:on-helpers";
+
 /// Whether `slot` is idle and was opened since it went idle: its result is
 /// read, so it no longer waits in the pantry to be looked at.
 pub fn read_since_idle(slot: &AgentSlot, seen: &HashMap<AgentId, SystemTime>) -> bool {
@@ -433,7 +438,7 @@ fn rgb(c: Rgb) -> Color {
 }
 
 /// `read` says it was opened since it went idle ([`read_since_idle`]).
-fn status(
+pub(crate) fn status(
     slot: &AgentSlot,
     view: Option<&TaskView>,
     read: bool,
@@ -453,6 +458,9 @@ fn status(
         ),
         ActivityState::Running { item } => {
             let what = match (item, view.and_then(|v| v.phase)) {
+                (Some(i), _) if i.detail.as_deref() == Some(ON_HELPERS) => {
+                    crate::i18n::t("… 等子代理", "… on helpers").to_owned()
+                }
                 (Some(_), Some(p)) => format!("▸ {}", p.label()),
                 (Some(_), None) => crate::i18n::t("▸ 工作中", "▸ working").to_owned(),
                 (None, _) => crate::i18n::t("… 思考中", "… thinking").to_owned(),
