@@ -619,7 +619,13 @@ pub fn not_ready(role: Role, terminal: bool) -> Option<String> {
     needed
         .into_iter()
         .any(missing)
-        .then(|| "角色还没装：先运行 agent-office roles install".to_owned())
+        .then(|| {
+            crate::i18n::t(
+                "角色还没装：先运行 agent-office roles install",
+                "roles not installed: run agent-office roles install first",
+            )
+            .to_owned()
+        })
 }
 
 /// The arguments that start `claude` as `role` on `task`; the agent file
