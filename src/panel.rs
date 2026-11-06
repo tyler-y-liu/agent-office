@@ -24,6 +24,9 @@ const TASK: Color = Color::Rgb(0xff, 0xe8, 0xa3);
 pub const WAIT: Color = Color::Rgb(0xe0, 0xaf, 0x68);
 const WORK: Color = Color::Rgb(0x9e, 0xce, 0x6a);
 const STUCK: Color = Color::Rgb(0xf7, 0x76, 0x8e);
+/// Done and waiting to be read: a cool ice blue, where the task text's pale
+/// yellow sat beside the waiting amber and read as one more wait.
+pub const DONE: Color = Color::Rgb(0xa6, 0xd8, 0xff);
 const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);
 /// The panel's own background, which a faded card's colours sink toward.
 const PANEL_BG: Color = Color::Rgb(0x16, 0x18, 0x1d);
@@ -193,7 +196,7 @@ impl Group {
         match self {
             Self::Waiting => WAIT,
             Self::Stuck => STUCK,
-            Self::Done => TASK,
+            Self::Done => DONE,
             Self::Working => WORK,
             Self::Idle => DIM,
         }
@@ -498,7 +501,7 @@ pub(crate) fn status(
         // colour, not idle under a header that says to read it.
         ActivityState::Idle if Group::of(slot, view, now, read) == Group::Done => (
             crate::tr!("✓ 做完 {}", "✓ done {}", ago(slot.state_started_at)),
-            TASK,
+            DONE,
         ),
         ActivityState::Idle => (
             crate::tr!("· 空闲 {}", "· idle {}", ago(slot.state_started_at)),

@@ -3467,6 +3467,9 @@ async fn walk_jsonl_rereads_from_zero_when_known_file_truncated_below_cursor() {
     );
 }
 
+// agent-office: the census half needs the dev-only `harness` feature; gate it so
+// a plain `cargo test` in this vendored copy compiles.
+#[cfg(feature = "harness")]
 #[tokio::test]
 async fn an_unterminated_last_record_is_held_back_by_the_watcher_and_the_census_alike() {
     let dir = tempfile::tempdir().unwrap();

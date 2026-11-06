@@ -24,7 +24,8 @@ pub const LINE_UP_AFTER_MS: u64 = 20_000;
 pub const REPLY_REASON: &str = "agent-office: reply";
 
 /// Whether `slot` waits on your reply rather than on a prompt.
-fn waits_on_reply(slot: &AgentSlot) -> bool {
+/// agent-office: crate-wide, so its head mark says which.
+pub(crate) fn waits_on_reply(slot: &AgentSlot) -> bool {
     matches!(&slot.state, ActivityState::RequiresAction { reason: Some(r) } if &**r == REPLY_REASON)
 }
 

@@ -67,28 +67,35 @@ native = [
 name = "pixtuoid_core"
 path = "src/lib.rs"
 
+# agent-office: every example drives the dev-only `harness` module, so a plain
+# `cargo test` must not try to build them.
 [[example]]
 name = "bump"
 path = "examples/bump.rs"
+required-features = ["harness"]
 
 [[example]]
 name = "capture_fixture"
 path = "examples/capture_fixture.rs"
 test = true
+required-features = ["harness"]
 
 [[example]]
 name = "hermetic"
 path = "examples/hermetic.rs"
 test = true
+required-features = ["harness"]
 
 [[example]]
 name = "issues"
 path = "examples/issues.rs"
+required-features = ["harness"]
 
 [[example]]
 name = "tui_drive"
 path = "examples/tui_drive.rs"
 test = true
+required-features = ["harness"]
 
 [[test]]
 name = "native_watch"

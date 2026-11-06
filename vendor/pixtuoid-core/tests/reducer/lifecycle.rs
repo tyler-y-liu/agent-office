@@ -408,9 +408,11 @@ fn resurrect_in_place_clears_stale_tasks_in_flight_so_the_fresh_session_is_not_d
         t0 + Duration::from_secs(4),
         Transport::Hook,
     );
+    // agent-office: the live call opened the fresh life's turn, so its end
+    // leaves the figure thinking, not Delegating.
     assert_eq!(
         scene.agents[&id].state,
-        ActivityState::Idle,
+        ActivityState::Running { item: None },
         "the dead life's Task residue put the fresh session back to Delegating"
     );
 }

@@ -168,6 +168,31 @@ fn stuck(t: &Transcript, working: bool, quiet: Duration, limits: &StuckLimits) -
     (working && quiet >= limit).then(|| Stuck::Quiet(quiet.as_secs() / 60))
 }
 
+/// Whether `id` going quiet can mean it is stuck: it is working, and no
+/// subagent of its own is still busy. A parent's transcript gets no line while
+/// a foreground subagent runs or waits on you, so that silence is the
+/// subagent's to judge (or yours to answer). A running subagent that has itself
+/// been silent past `long` no longer vouches: an Esc that reached neither its
+/// transcript nor `SubagentStop` leaves it Running, and pixtuoid sweeps it only
+/// once its parent has no dispatch in flight, which may be never.
+fn quiet_counts(scene: &SceneState, id: AgentId, now: SystemTime, long: Duration) -> bool {
+    let busy = |s: &pixtuoid_core::AgentSlot| match s.state {
+        ActivityState::Running { .. } => now
+            .duration_since(s.last_event_at)
+            .map_or(true, |quiet| quiet < long),
+        ActivityState::RequiresAction { .. } => true,
+        ActivityState::Idle => false,
+    };
+    scene
+        .agents
+        .get(&id)
+        .is_some_and(|s| matches!(s.state, ActivityState::Running { .. }))
+        && !scene
+            .agents
+            .values()
+            .any(|s| s.parent_id == Some(id) && s.exiting_at.is_none() && busy(s))
+}
+
 /// The stuck verdict that holds for `slot`: only a working agent can be stuck,
 /// since one waiting on you or idle is not trying anything.
 pub fn stuck_at_work(slot: &pixtuoid_core::AgentSlot, view: Option<&TaskView>) -> Option<Stuck> {
@@ -184,7 +209,8 @@ struct Entry {
     transcript: Transcript,
     sub: Option<SubMeta>,
     trigger: Trigger,
-    summary: Option<String>,
+    /// The model's line and the prompt it was asked for.
+    summary: Option<(String, String)>,
     /// The outcome line and the reply it was read from.
     outcome: Option<(String, String)>,
     outcome_in_flight: bool,
@@ -400,8 +426,9 @@ async fn run(
         }
         memo::Memo::load()
     });
-    // Each reply with the memo key of the request it answers.
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(AgentId, String, Option<String>)>();
+    // Each reply with the memo key and the prompt of the request it answers.
+    let (done_tx, mut done_rx) =
+        mpsc::unbounded_channel::<(AgentId, String, String, Option<String>)>();
     // Each outcome reply with the agent reply it was asked for, and its key.
     let (outcome_tx, mut outcome_rx) =
         mpsc::unbounded_channel::<(AgentId, String, String, Option<String>)>();
@@ -410,19 +437,12 @@ async fn run(
     loop {
         tokio::select! {
             _ = tick.tick() => {}
-            Some((id, key, out)) = done_rx.recv() => {
+            Some((id, key, prompt, out)) = done_rx.recv() => {
                 if let Some(line) = &out {
                     memo.insert(key, line.clone());
                 }
                 if let Some(e) = entries.get_mut(&id) {
-                    // A failed refresh keeps the last good line.
-                    match out {
-                        Some(line) => {
-                            e.trigger.finished();
-                            e.summary = Some(line);
-                        }
-                        None => e.trigger.failed(Instant::now()),
-                    }
+                    summary_done(e, prompt, out, Instant::now());
                 }
             }
             Some((id, reply, key, out)) = outcome_rx.recv() => {
@@ -556,14 +576,14 @@ async fn run(
                     let key = s.summary_key(&input);
                     if let Some(line) = memo.get(&key) {
                         e.trigger.finished();
-                        e.summary = Some(line.to_owned());
+                        e.summary = Some((input.latest_prompt.clone(), line.to_owned()));
                         continue;
                     }
                     let (s, tx, id) = (s.clone(), done_tx.clone(), *id);
                     tokio::spawn(async move {
                         let out = s.summarize(&input).await;
                         debug_log(id, "task", &out);
-                        let _ = tx.send((id, key, out.ok()));
+                        let _ = tx.send((id, key, input.latest_prompt, out.ok()));
                     });
                 }
             }
@@ -571,11 +591,8 @@ async fn run(
         let views: HashMap<AgentId, TaskView> = entries
             .iter()
             .map(|(id, e)| {
-                let working = scene
-                    .agents
-                    .get(id)
-                    .is_some_and(|s| matches!(s.state, ActivityState::Running { .. }));
-                (*id, view(e, working, now))
+                let long = stuck_limits().quiet_long_call;
+                (*id, view(e, quiet_counts(&scene, *id, SystemTime::now(), long), now))
             })
             .collect();
         views_tx.send_if_modified(|cur| {
@@ -606,6 +623,18 @@ fn idle_long_as_written(
             now,
         ),
         None => crate::core::idle_long(slot, now),
+    }
+}
+
+/// A summary request for `prompt` came back. A failed refresh keeps the last
+/// good line; [`view`] shows it only while that prompt is still the task.
+fn summary_done(e: &mut Entry, prompt: String, out: Option<String>, now: Instant) {
+    match out {
+        Some(line) => {
+            e.trigger.finished();
+            e.summary = Some((prompt, line));
+        }
+        None => e.trigger.failed(now),
     }
 }
 
@@ -701,7 +730,14 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         _ => (truncate_cells(r, SUMMARY_CELLS), false),
     });
     let desc = e.sub.as_ref().and_then(|s| s.description.clone());
-    let (line, summarized) = match (desc, &e.summary) {
+    // A line asked for an earlier prompt describes an earlier task: until the
+    // new one's comes back (or when it fails) the new prompt shows as written.
+    let summary = e
+        .summary
+        .as_ref()
+        .filter(|(of, _)| Some(of.as_str()) == t.latest_prompt())
+        .map(|(_, line)| line);
+    let (line, summarized) = match (desc, summary) {
         (Some(d), _) => (Some(d), true),
         (None, Some(s)) => (Some(s.clone()), true),
         (None, None) => (
@@ -1127,6 +1163,172 @@ mod tests {
         assert_eq!(view(&e, false, Instant::now()).outcome, None);
     }
 
+    /// The user moved on and the gateway failed: the card must say what the
+    /// session works on now, not pass the last task's line off as this one's.
+    /// Once the new line comes back it takes over.
+    #[test]
+    fn a_new_task_whose_summary_failed_shows_its_own_prompt() {
+        let mut e = entry();
+        e.transcript.prompts.push_back("修登录页报错".into());
+        summary_done(
+            &mut e,
+            "修登录页报错".into(),
+            Some("修复登录页报错".into()),
+            Instant::now(),
+        );
+        e.transcript.prompts.push_back("把导出改成 CSV".into());
+        summary_done(&mut e, "把导出改成 CSV".into(), None, Instant::now());
+        let v = view(&e, true, Instant::now());
+        assert_eq!(v.line.as_deref(), Some("把导出改成 CSV"));
+        assert!(!v.summarized);
+        summary_done(
+            &mut e,
+            "把导出改成 CSV".into(),
+            Some("导出改为 CSV".into()),
+            Instant::now(),
+        );
+        let v = view(&e, true, Instant::now());
+        assert_eq!(v.line.as_deref(), Some("导出改为 CSV"));
+        assert!(v.summarized);
+    }
+
+    /// A refresh of the same task (its todo moved on, ten more calls) that
+    /// fails must not throw a good line away for the raw prompt; nor may a
+    /// late reply for an earlier prompt stand in for the current one.
+    #[test]
+    fn a_failed_refresh_of_the_same_task_keeps_its_summary() {
+        let mut e = entry();
+        e.transcript.prompts.push_back("修登录页报错".into());
+        summary_done(
+            &mut e,
+            "修登录页报错".into(),
+            Some("修复登录页报错".into()),
+            Instant::now(),
+        );
+        e.transcript.todo_active = Some("补回归测试".into());
+        summary_done(&mut e, "修登录页报错".into(), None, Instant::now());
+        let v = view(&e, true, Instant::now());
+        assert_eq!(v.line.as_deref(), Some("修复登录页报错"));
+        assert!(v.summarized);
+        e.transcript.prompts.push_back("把导出改成 CSV".into());
+        summary_done(
+            &mut e,
+            "修登录页报错".into(),
+            Some("修复登录页报错".into()),
+            Instant::now(),
+        );
+        assert_eq!(
+            view(&e, true, Instant::now()).line.as_deref(),
+            Some("把导出改成 CSV")
+        );
+    }
+
+    /// A parent waiting on a foreground subagent writes nothing to its own
+    /// transcript for as long as the subagent runs: that is delegation, not
+    /// a stall, and must not put the parent ahead of the sessions waiting on
+    /// you. Once no subagent of its own is at work, its silence counts again,
+    /// and errors in a row count all along.
+    #[test]
+    fn a_parent_quiet_behind_a_working_subagent_is_not_stuck() {
+        let t0 = SystemTime::now();
+        let parent_id = AgentId::from_parts(CC_SOURCE, "s");
+        let mut parent = idle_slot(t0);
+        parent.state = ActivityState::Running { item: None };
+        let child_id = AgentId::from_parts(CC_SOURCE, "agent-c");
+        let mut child = parent.clone();
+        child.agent_id = child_id;
+        child.parent_id = Some(parent_id);
+        let mut scene = SceneState::uniform(8);
+        scene.agents.insert(parent_id, parent);
+        scene.agents.insert(child_id, child);
+        let mut e = entry();
+        e.grew_at = Instant::now() - Duration::from_secs(25 * 60);
+        e.transcript.outstanding = vec![("t".into(), "Agent".into())];
+        let stuck_now = |scene: &SceneState, e: &Entry| {
+            let long = StuckLimits::DEFAULT.quiet_long_call;
+            view(e, quiet_counts(scene, parent_id, t0, long), Instant::now()).stuck
+        };
+        assert_eq!(stuck_now(&scene, &e), None, "its subagent is at work");
+        scene.agents.get_mut(&child_id).unwrap().state = ActivityState::Idle;
+        assert_eq!(stuck_now(&scene, &e), Some(Stuck::Quiet(25)));
+        let child = scene.agents.get_mut(&child_id).unwrap();
+        child.state = ActivityState::Running { item: None };
+        child.exiting_at = Some(t0);
+        assert_eq!(stuck_now(&scene, &e), Some(Stuck::Quiet(25)), "it has left");
+        scene.agents.get_mut(&child_id).unwrap().exiting_at = None;
+        e.transcript.fail_streak = 3;
+        assert_eq!(stuck_now(&scene, &e), Some(Stuck::Failing(3)));
+        // Someone else's subagent does not vouch for this one.
+        e.transcript.fail_streak = 0;
+        scene.agents.get_mut(&child_id).unwrap().parent_id =
+            Some(AgentId::from_parts(CC_SOURCE, "other"));
+        assert_eq!(stuck_now(&scene, &e), Some(Stuck::Quiet(25)));
+    }
+
+    /// A parent and its subagent `child` (in `state`, last heard from
+    /// `child_quiet` ago), with the parent's own transcript 25 minutes quiet
+    /// on an Agent call: whether the parent reads as stuck at `t0`.
+    fn parent_stuck_behind(
+        state: ActivityState,
+        child_quiet: Duration,
+        t0: SystemTime,
+    ) -> Option<Stuck> {
+        let parent_id = AgentId::from_parts(CC_SOURCE, "s");
+        let mut parent = idle_slot(t0);
+        parent.state = ActivityState::Running { item: None };
+        let child_id = AgentId::from_parts(CC_SOURCE, "agent-c");
+        let mut child = parent.clone();
+        child.agent_id = child_id;
+        child.parent_id = Some(parent_id);
+        child.state = state;
+        child.last_event_at = t0 - child_quiet;
+        let mut scene = SceneState::uniform(8);
+        scene.agents.insert(parent_id, parent);
+        scene.agents.insert(child_id, child);
+        let mut e = entry();
+        e.grew_at = Instant::now() - Duration::from_secs(25 * 60);
+        e.transcript.outstanding = vec![("t".into(), "Agent".into())];
+        let long = StuckLimits::DEFAULT.quiet_long_call;
+        view(&e, quiet_counts(&scene, parent_id, t0, long), Instant::now()).stuck
+    }
+
+    /// A subagent waiting on your approval leaves its parent Running with no
+    /// new line for as long as you take. That is one thing waiting on you:
+    /// the subagent already sits under "waiting on you", so the parent must
+    /// not also show up as stuck, however long you are away.
+    #[test]
+    fn a_parent_whose_subagent_waits_on_you_is_not_stuck() {
+        let waiting = ActivityState::RequiresAction { reason: None };
+        let t0 = SystemTime::now();
+        assert_eq!(parent_stuck_behind(waiting.clone(), Duration::ZERO, t0), None);
+        assert_eq!(
+            parent_stuck_behind(waiting, Duration::from_secs(40 * 60), t0),
+            None,
+            "a long wait on you is still a wait on you"
+        );
+    }
+
+    /// An Esc that reached neither the subagent's transcript nor its
+    /// `SubagentStop` leaves the subagent drawn as Running long after it
+    /// stopped, and pixtuoid only sweeps it once the parent has no dispatch
+    /// in flight. Such a subagent must not keep its parent from ever being
+    /// flagged: past the long-call limit of its own silence, the parent's
+    /// silence counts again. A subagent heard from recently still vouches.
+    #[test]
+    fn a_subagent_silent_past_the_long_limit_no_longer_covers_its_parent() {
+        let running = ActivityState::Running { item: None };
+        let t0 = SystemTime::now();
+        let long = StuckLimits::DEFAULT.quiet_long_call;
+        assert_eq!(
+            parent_stuck_behind(running.clone(), Duration::from_secs(60), t0),
+            None
+        );
+        assert_eq!(
+            parent_stuck_behind(running, long + Duration::from_secs(60), t0),
+            Some(Stuck::Quiet(25))
+        );
+    }
+
     #[test]
     fn without_a_summary_the_line_is_the_raw_prompt_marked_unsummarized() {
         let mut e = entry();
@@ -1136,7 +1338,10 @@ mod tests {
         let v = view(&e, false, Instant::now());
         assert!(!v.summarized);
         assert!(crate::text::cells(v.line.as_deref().unwrap()) <= SUMMARY_CELLS);
-        e.summary = Some("修复登录页报错".into());
+        e.summary = Some((
+            "请帮我把登录页的报错修好然后补一个回归测试再部署".into(),
+            "修复登录页报错".into(),
+        ));
         assert_eq!(
             view(&e, false, Instant::now()).line.as_deref(),
             Some("修复登录页报错")

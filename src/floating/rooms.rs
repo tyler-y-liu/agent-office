@@ -644,6 +644,8 @@ mod tests {
                 h: 4,
             },
             figure_top: 50,
+            rest_y: 0,
+            faces_away: false,
             label: None,
             plate: 0,
             marker: 0,

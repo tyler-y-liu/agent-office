@@ -13,6 +13,7 @@
 ## 验证
 
 - 改完运行 `cargo test --release`，所有测试都要过。
+- 改了 `vendor/pixtuoid-core`（reducer、状态、decoder、sprite 格式）：在该目录运行 `cargo test --release`。依赖 `harness` feature 和上游 `tests/sources` 采集数据的测试与 examples 在这里不编译（发布包没带这些数据）。
 - 改了 vendor 的美术或渲染：在 `vendor/pixtuoid-scene` 里运行 `cargo test --release`。画面确实有意改动时，用 `SNAPSHOTS=overwrite cargo test --release` 更新像素金样，并说明改了什么。
 - 只有在 macOS 本机才能看画面：`cargo run --release -- --shot out.png` 跑 20 秒后存一张截图。云端（Linux，没有显示器，环境变量 `CLAUDE_CODE_REMOTE=true`）跑不了窗口、`--shot` 和跳转。在云端只做 build 和 test，并在结果里写明画面没有验证。
 - 测试要写清楚"这个行为为什么重要"。业务逻辑变了测试还能过，说明测试写错了。

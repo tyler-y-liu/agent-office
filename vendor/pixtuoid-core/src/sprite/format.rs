@@ -2000,6 +2000,8 @@ mod validation_floor_tests {
                 ("cat_walk", 2),
                 ("dog_walk", 2),
                 ("lobster_walk", 2),
+                // agent-office: the rooftop laundry sways, so it needs two frames too.
+                ("laundry_pole", 2),
             ]
         );
         for &walk in Walk::VARIANTS {

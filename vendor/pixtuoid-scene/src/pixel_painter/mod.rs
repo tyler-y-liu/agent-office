@@ -280,6 +280,7 @@ pub(crate) fn paint_frame(ctx: &mut PaintCtx<'_>, frame: &SimFrame) -> Drawn {
         // Badged where hoverable: a badge, like a hover, needs its frame drawn.
         if let DrawableKind::Character {
             agent,
+            top_left,
             label_anchor,
             ..
         } = d.kind
@@ -287,7 +288,7 @@ pub(crate) fn paint_frame(ctx: &mut PaintCtx<'_>, frame: &SimFrame) -> Drawn {
         {
             drawn
                 .badges
-                .push(Badge::new(label_anchor, agent, &namesakes, ctx.theme));
+                .push(Badge::new(label_anchor, top_left.y, agent, &namesakes, ctx.theme));
         }
         drawn.hovers.push(hover);
     }

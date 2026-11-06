@@ -184,6 +184,10 @@ pub struct Badge {
     pub agent: AgentId,
     /// The point it hangs over, its sprite's top-centre.
     pub at: Point,
+    /// agent-office: the row its figure's top stands at. `at` sits over the
+    /// desk a back-turned sitter's monitor rises from, two rows of desks up;
+    /// a host that sets its own badges hangs them on the head instead.
+    pub head: u16,
     /// The marker's ink.
     pub marker: Rgb,
     /// The name, in its ink.
@@ -193,9 +197,10 @@ pub struct Badge {
 }
 
 impl Badge {
-    /// `agent`'s badge over `anchor`.
+    /// `agent`'s badge over `anchor`, its figure's top at row `head`.
     pub(crate) fn new(
         anchor: Point,
+        head: u16,
         agent: &AgentSlot,
         namesakes: &crate::badge::Namesakes,
         theme: &Theme,
@@ -207,6 +212,7 @@ impl Badge {
         Self {
             agent: agent.agent_id,
             at: anchor,
+            head,
             // agent-office: its repository's colour.
             marker: crate::badge::repo_hue(agent).unwrap_or(ink.marker),
             name: TextSpan::new(text, ink.name),

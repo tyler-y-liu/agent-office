@@ -850,7 +850,10 @@ pub(crate) fn character_effects(
             .and_then(|seed| effects::sleep_z(top_left, seed, beat)),
     );
     if cues.requires_action {
-        out.push(effects::requires_action_mark(top_left));
+        out.push(effects::requires_action_mark(
+            top_left,
+            crate::waiting::waits_on_reply(agent),
+        ));
     }
     out
 }
@@ -992,7 +995,12 @@ pub(crate) fn resolve_characters(
                             seated: seat.seated_furniture(),
                             breathes: true,
                         },
-                        Cues::default(),
+                        // agent-office: one lined up to wait on you wears its
+                        // mark in the line too, so "!" and "?" read anywhere.
+                        Cues {
+                            requires_action: is_requires_action,
+                            ..Cues::default()
+                        },
                     ));
                 }
             }
@@ -1018,7 +1026,11 @@ pub(crate) fn resolve_characters(
                         seated: false,
                         breathes: !held,
                     },
-                    Cues::default(),
+                    // agent-office: standing about while it waits on you.
+                    Cues {
+                        requires_action: is_requires_action,
+                        ..Cues::default()
+                    },
                 ));
             }
             Pose::Walking {
@@ -1088,6 +1100,8 @@ pub(crate) fn resolve_characters(
                             pack.piece(anim_name).frames().len(),
                             flip,
                         )),
+                        // agent-office: on its way to the line, too.
+                        requires_action: is_requires_action,
                         ..Cues::default()
                     },
                 ));

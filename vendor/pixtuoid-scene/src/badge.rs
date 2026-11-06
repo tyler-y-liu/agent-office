@@ -52,47 +52,52 @@ pub(crate) fn badge_hue(text: &str, theme: &Theme) -> Option<Rgb> {
 }
 
 /// agent-office: the colours a repository can wear, apart on a dark plate
-/// and from each other.
-const REPO_HUES: [Rgb; 8] = [
+/// and from each other, and clear of the panel's state colours (stuck red,
+/// waiting amber, working green, done ice blue): red, amber and green here
+/// read as their agents being stuck, waiting or working. A badge's marker
+/// and a card's avatar are graphics, so each holds 3:1 on the dark plate.
+/// The first few, which a small office wears, are the furthest apart.
+/// Public, so the host checks them against its state colours and each other.
+pub const REPO_HUES: [Rgb; 8] = [
     Rgb {
-        r: 0xff,
-        g: 0x6b,
-        b: 0x6b,
+        r: 0x4c,
+        g: 0xe1,
+        b: 0xcd,
     },
     Rgb {
-        r: 0xf4,
-        g: 0xa6,
-        b: 0x2a,
-    },
-    Rgb {
-        r: 0x9c,
-        g: 0xcc,
-        b: 0x4b,
-    },
-    Rgb {
-        r: 0x2e,
-        g: 0xc4,
-        b: 0xb6,
-    },
-    Rgb {
-        r: 0x4e,
-        g: 0xa8,
+        r: 0x00,
+        g: 0x8b,
         b: 0xff,
     },
     Rgb {
-        r: 0xa7,
-        g: 0x8b,
+        r: 0x99,
+        g: 0x66,
+        b: 0xd7,
+    },
+    Rgb {
+        r: 0xff,
+        g: 0xb2,
         b: 0xfa,
     },
     Rgb {
-        r: 0xf4,
-        g: 0x72,
-        b: 0xb6,
+        r: 0x18,
+        g: 0x85,
+        b: 0x81,
     },
     Rgb {
-        r: 0xd6,
-        g: 0xb9,
-        b: 0x8c,
+        r: 0x1b,
+        g: 0x7e,
+        b: 0xb5,
+    },
+    Rgb {
+        r: 0xcf,
+        g: 0x44,
+        b: 0xa1,
+    },
+    Rgb {
+        r: 0x92,
+        g: 0x6c,
+        b: 0x9a,
     },
 ];
 

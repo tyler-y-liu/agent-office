@@ -729,6 +729,9 @@ async fn omp_oversized_first_sight_uses_the_head_title_through_source_wiring() {
     );
 }
 
+// agent-office: reads a committed `tests/sources` capture through the dev-only
+// `harness`; the published crate ships neither, so gate it with the harness.
+#[cfg(feature = "harness")]
 #[tokio::test]
 async fn codex_permission_hermetic_fixture_drives_the_reducer_through_its_turn() {
     use pixtuoid_core::state::ActivityState;
