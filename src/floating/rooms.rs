@@ -65,15 +65,16 @@ pub(super) fn in_meeting(t: &Tag, rooms: &[Room]) -> bool {
         .any(|r| r.style == RoomStyle::Office && in_room(t, &r.area))
 }
 
-/// What a meeting room's whiteboard says: the task of each subagent in
-/// `room`, oldest first, by its summary, else its type, else its name; a
-/// role's post before it.
+/// What a meeting room's whiteboard says: a PM's plan under its progress,
+/// else the task of each subagent in `room`, oldest first, by its summary,
+/// else its type, else its name; a role's post before it. The heading is
+/// `None` for the board's usual one.
 pub(super) fn board_lines(
     room: &Area,
     tags: &[Tag],
     scene: &SceneState,
     views: &TaskViews,
-) -> Vec<String> {
+) -> (Option<String>, Vec<String>) {
     let here: Vec<AgentId> = tags
         .iter()
         .filter(|t| in_room(t, room))
@@ -82,7 +83,11 @@ pub(super) fn board_lines(
     board_lines_of(&here, scene, views)
 }
 
-fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Vec<String> {
+fn board_lines_of(
+    here: &[AgentId],
+    scene: &SceneState,
+    views: &TaskViews,
+) -> (Option<String>, Vec<String>) {
     // A PM in the room puts up its plan: who does what, and how far along.
     let plan = here
         .iter()
@@ -100,17 +105,17 @@ fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Ve
             TodoState::Pending => 1,
             TodoState::Done => 2,
         });
-        return todos
+        // A waiting item goes unmarked: on a board this narrow every cell
+        // is one more character of what it is.
+        let lines = todos
             .into_iter()
-            .map(|(state, what)| {
-                let mark = match state {
-                    TodoState::Done => "✓",
-                    TodoState::Doing => "▸",
-                    TodoState::Pending => "·",
-                };
-                format!("{mark} {what}")
+            .map(|(state, what)| match state {
+                TodoState::Done => format!("✓{what}"),
+                TodoState::Doing => format!("▸{what}"),
+                TodoState::Pending => what.clone(),
             })
             .collect();
+        return (Some(crate::panel::plan_count(&v.todos)), lines);
     }
     let mut subs: Vec<_> = here
         .iter()
@@ -118,27 +123,32 @@ fn board_lines_of(here: &[AgentId], scene: &SceneState, views: &TaskViews) -> Ve
         .filter(|s| s.parent_id.is_some())
         .collect();
     subs.sort_by_key(|s| s.created_at);
-    subs.iter()
+    let lines = subs
+        .iter()
         .map(|s| {
             let v = views.get(&s.agent_id);
             let line = v.and_then(|v| v.line.clone());
             // Who does what: a role's post goes before its task.
             match (v.and_then(|v| v.role), line) {
-                (Some(r), Some(l)) => return format!("{}：{l}", r.post().zh),
-                (Some(r), None) => return r.post().zh.to_owned(),
+                (Some(r), Some(l)) => return format!("{}：{l}", r.name()),
+                (Some(r), None) => return r.name().to_owned(),
                 (None, Some(l)) => return l,
                 (None, None) => {}
             }
             v.and_then(|v| v.agent_type.clone())
                 .unwrap_or_else(|| pixtuoid_scene::badge::shown_label(&s.label).to_owned())
         })
-        .collect()
+        .map(|l| format!("· {l}"))
+        .collect();
+    (None, lines)
 }
 
 const BOARD_FRAME: u32 = 0x00a8_aeb6;
 const BOARD_FACE: u32 = 0x00f4_f6f8;
 const BOARD_TRAY: u32 = 0x006a_7078;
-const MARKER_RED: u32 = 0x00d6_403a;
+/// Darker than a marker's usual red: the heading is small, and #d6403a on
+/// the white board read at 4.17:1, short of AA.
+const MARKER_RED: u32 = 0x00b8_322c;
 const MARKER_BLUE: u32 = 0x0024_4a8c;
 const MARKER_FAINT: u32 = 0x00c4_cad2;
 
@@ -149,7 +159,7 @@ pub(super) fn whiteboard(
     faces: &mut Faces,
     scale_factor: f64,
     room: &Room,
-    lines: &[String],
+    (heading, lines): (Option<&str>, &[String]),
 ) {
     let (a, l) = (room.area, room.l);
     let x0 = a.x + 3 * l;
@@ -192,7 +202,7 @@ pub(super) fn whiteboard(
             canvas,
             x0 + pad,
             y + ascent,
-            crate::i18n::t("议程", "Agenda"),
+            heading.unwrap_or(crate::i18n::t("议程", "Agenda")),
             MARKER_RED,
             px,
         );
@@ -221,7 +231,7 @@ pub(super) fn whiteboard(
         if !room_for(y) {
             break;
         }
-        let text = truncate_cells(&format!("· {line}"), cells);
+        let text = truncate_cells(line, cells);
         faces.draw(canvas, x0 + pad, y + ascent, &text, MARKER_BLUE, px);
         y += line_h;
     }
@@ -528,11 +538,14 @@ mod tests {
         );
         assert_eq!(
             board_lines_of(&[qa, late, p, early], &scene, &std::sync::Arc::new(views)),
-            vec![
-                "Explore".to_owned(),
-                "查登录 bug".to_owned(),
-                "测试：跑全量测试".to_owned()
-            ]
+            (
+                None,
+                vec![
+                    "· Explore".to_owned(),
+                    "· 查登录 bug".to_owned(),
+                    "· 测试：跑全量测试".to_owned()
+                ]
+            )
         );
     }
 
@@ -568,13 +581,21 @@ mod tests {
             ..TaskView::default()
         };
         let views = |v: &TaskView| std::sync::Arc::new([(pm, v.clone())].into_iter().collect());
+        // Headed by how far along it is, so a board cut short still says.
         assert_eq!(
             board_lines_of(&[pm], &scene, &views(&view)),
-            ["▸ 测试：跑测试", "· 审查：看改动", "✓ 后端：加接口"]
+            (
+                Some("计划 1/3".to_owned()),
+                vec![
+                    "▸测试：跑测试".to_owned(),
+                    "审查：看改动".to_owned(),
+                    "✓后端：加接口".to_owned()
+                ]
+            )
         );
         // Any other session's todos are its own business, not the board's.
         view.role = Some(crate::roles::Role::Frontend);
-        assert!(board_lines_of(&[pm], &scene, &views(&view)).is_empty());
+        assert!(board_lines_of(&[pm], &scene, &views(&view)).1.is_empty());
     }
 
     /// The machine shows the length of the line in two digits, and a line

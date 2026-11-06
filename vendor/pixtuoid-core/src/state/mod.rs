@@ -219,6 +219,7 @@ impl SlotLabel {
         Self::new(text, LabelProvenance::CwdDerived)
     }
 
+    /// A display name given from outside, which replaces any other label.
     // agent-office: pub, so the office can name a subagent after its parent
     // and post rather than the bare "subagent" every one of them shares.
     pub fn renamed(text: impl Into<Arc<str>>) -> Self {

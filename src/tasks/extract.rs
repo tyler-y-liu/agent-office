@@ -156,7 +156,8 @@ impl Phase {
             Phase::Code => crate::i18n::t("写码", "coding"),
             Phase::Test => crate::i18n::t("测试", "testing"),
             Phase::Run => crate::i18n::t("执行", "running"),
-            Phase::Delegate => crate::i18n::t("派活", "delegating"),
+            // Not 派活: that is what you do with `p`.
+            Phase::Delegate => crate::i18n::t("分派中", "delegating"),
         }
     }
 }

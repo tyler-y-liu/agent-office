@@ -436,6 +436,11 @@ fn turn_took(started: SystemTime, now: SystemTime) -> Option<String> {
 
 fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
     match &slot.state {
+        ActivityState::Running { .. }
+            if view.is_some_and(|v| v.role == Some(crate::roles::Role::Pm) && !v.todos.is_empty()) =>
+        {
+            view.map(|v| (plan_line(&v.todos), TEXT))
+        }
         ActivityState::Running {
             item: Some(ToolUse {
                 detail: Some(d), ..
@@ -467,6 +472,34 @@ fn doing(slot: &AgentSlot, view: Option<&TaskView>) -> Option<(String, Color)> {
             Some((o, color))
         }
         _ => None,
+    }
+}
+
+/// How far a plan is along: its done items of all of them.
+pub fn plan_count(todos: &[(crate::tasks::extract::TodoState, String)]) -> String {
+    let done = todos
+        .iter()
+        .filter(|(s, _)| *s == crate::tasks::extract::TodoState::Done)
+        .count();
+    crate::tr!("计划 {}/{}", "Plan {}/{}", done, todos.len())
+}
+
+/// A PM's plan in a line: how far along, then who is on what now. Its
+/// own tool calls are only the handing out; this is the work.
+fn plan_line(todos: &[(crate::tasks::extract::TodoState, String)]) -> String {
+    let doing: Vec<String> = todos
+        .iter()
+        .filter(|(s, _)| *s == crate::tasks::extract::TodoState::Doing)
+        // "前端：加输入框" names its post first; that is what fits.
+        .map(|(_, what)| {
+            let who = what.split(['：', ':']).next().unwrap_or(what).trim();
+            format!("{}▸", truncate_cells(who, 8))
+        })
+        .collect();
+    if doing.is_empty() {
+        plan_count(todos)
+    } else {
+        format!("{} · {}", plan_count(todos), doing.join(" "))
     }
 }
 
@@ -1673,6 +1706,34 @@ mod tests {
         assert_eq!(
             doing(slot, Some(&done("问：要不要删旧接口", true))).map(|d| d.0),
             Some("等你回复：问：要不要删旧接口".into())
+        );
+    }
+
+    /// A PM's own calls are only the handing out; its card says how far
+    /// the plan is and who is on what, wherever it sits, so the plan does
+    /// not hang on a seat in the meeting room.
+    #[test]
+    fn a_pms_card_shows_its_plan_not_its_last_call() {
+        use crate::tasks::extract::TodoState;
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let id = start(&mut scene, &mut r, "pm", None, t0);
+        let slot = scene.agents.get_mut(&id).unwrap();
+        slot.state = ActivityState::Running { item: None };
+        let view = TaskView {
+            role: Some(crate::roles::Role::Pm),
+            todos: vec![
+                (TodoState::Done, "产品：写验收".into()),
+                (TodoState::Doing, "前端：结算页加优惠券输入框".into()),
+                (TodoState::Doing, "后端：优惠券接口".into()),
+                (TodoState::Pending, "测试".into()),
+            ],
+            ..TaskView::default()
+        };
+        assert_eq!(
+            doing(slot, Some(&view)),
+            Some(("计划 1/4 · 前端▸ 后端▸".into(), TEXT))
         );
     }
 

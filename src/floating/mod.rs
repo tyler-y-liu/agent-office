@@ -1310,8 +1310,15 @@ impl Win {
         for room in rooms {
             match room.style {
                 RoomStyle::Office => {
-                    let lines = rooms::board_lines(&room.area, tags, &frame.scene, &frame.views);
-                    rooms::whiteboard(canvas, &mut self.faces, stage.scale_factor, room, &lines);
+                    let (heading, lines) =
+                        rooms::board_lines(&room.area, tags, &frame.scene, &frame.views);
+                    rooms::whiteboard(
+                        canvas,
+                        &mut self.faces,
+                        stage.scale_factor,
+                        room,
+                        (heading.as_deref(), &lines),
+                    );
                 }
                 RoomStyle::Waiting => {
                     // The sessions standing in line: subagents wait with
