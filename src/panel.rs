@@ -32,6 +32,7 @@ const SELECTED_BG: Color = Color::Rgb(0x2a, 0x2f, 0x3a);
 const PANEL_BG: Color = Color::Rgb(0x16, 0x18, 0x1d);
 /// A card waiting on you sits on a solid warm ground: it is the one to act on.
 const WAIT_BG: Color = Color::Rgb(0x4a, 0x30, 0x1e);
+const WAIT_HOVER_BG: Color = Color::Rgb(0x52, 0x37, 0x24);
 const WAIT_SELECTED_BG: Color = Color::Rgb(0x5e, 0x3e, 0x28);
 /// Secondary text on that warm ground, where [`DIM`] fell to 3.7:1.
 const DIM_ON_WAIT: Color = Color::Rgb(0xb8, 0xbc, 0xc4);
@@ -39,6 +40,8 @@ const DIM_ON_WAIT: Color = Color::Rgb(0xb8, 0xbc, 0xc4);
 const ROLE_AVATAR: Color = Color::Rgb(0x6b, 0x71, 0x7e);
 /// The card under the pointer, which a click selects.
 const HOVER_BG: Color = Color::Rgb(0x1f, 0x23, 0x2b);
+/// A role or host chip under the pointer.
+const CHIP_HOVER_BG: Color = Color::Rgb(0x38, 0x40, 0x4f);
 /// How far an idle card's colours sink into the panel: it needs nothing,
 /// but its dim text must still read (past this it fell near 2:1).
 const IDLE_FADE: f32 = 0.35;
@@ -56,11 +59,17 @@ pub struct PanelState {
     /// The first row of cards shown: the wheel moves it, and a new
     /// selection moves it as far as it takes to show that card.
     pub scroll: usize,
+    /// The last drawn list's bound, so easing stops at its last row too.
+    pub(crate) scroll_max: Option<usize>,
     /// Bring the selected card into view on the next draw. Only when the
     /// selection or its size changes, so the wheel can scroll away from it.
     pub reveal: bool,
     /// The card under the pointer.
     pub hovered: Option<AgentId>,
+    /// The role chip under the pointer, lit like a card before it is clicked.
+    pub hovered_role: Option<crate::roles::Role>,
+    /// The host chip under the pointer.
+    pub hovered_host: Option<crate::roles::Backend>,
     /// Task lines are summarized: a raw one is then marked as not yet.
     pub summaries: bool,
     /// Claude Code's hooks are in, as of the start.
@@ -78,7 +87,8 @@ impl PanelState {
     /// Scroll the cards by `rows`, down when positive; the draw keeps it
     /// within the cards.
     pub fn scroll_by(&mut self, rows: isize) {
-        self.scroll = self.scroll.saturating_add_signed(rows);
+        let next = self.scroll.saturating_add_signed(rows);
+        self.scroll = self.scroll_max.map_or(next, |max| next.min(max));
         self.reveal = false;
     }
 }
@@ -782,6 +792,8 @@ pub struct Drawn {
     /// The rows (first, last) of each card marked with a bar: done, waiting
     /// for you to read it.
     pub outlines: Vec<(u16, u16)>,
+    /// The selected card's first and last visible rows, for its focus bar.
+    pub selected: Option<(u16, u16)>,
     /// The role bar's chips: row, first cell, cells across, and the post a
     /// click on it dispatches.
     pub roles: Vec<(u16, u16, u16, crate::roles::Role)>,
@@ -903,17 +915,29 @@ fn card(
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    // Status chips share the right edge: scanning a column of states no
+    // longer means finding each one where its session name happened to end.
+    // Keep a margin when the name leaves one, but never trade a whole letter
+    // of an already tight subagent type and name for empty space.
+    let margin = u16::from(crate::text::cells(&name) < name_w);
+    let name_w = name_w.saturating_sub(margin);
+    let shown_name = truncate_cells(&name, name_w);
+    let before_chip = " ".repeat(usize::from(
+        name_w.saturating_sub(crate::text::cells(&shown_name)) + 1,
+    ));
+    let after_chip = " ".repeat(usize::from(margin));
     let mut lines = vec![Line::from(
         first
             .into_iter()
             .chain([
                 Span::raw(" "),
                 Span::styled(
-                    truncate_cells(&name, name_w),
+                    shown_name,
                     Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" "),
+                Span::raw(before_chip),
                 Span::styled(chip, Style::default().bg(st_color).fg(CHIP_INK)),
+                Span::raw(after_chip),
             ])
             .collect::<Vec<_>>(),
     )];
@@ -1136,6 +1160,8 @@ pub fn render(
         height: inner.height.saturating_sub(1),
     };
     if order.is_empty() {
+        state.scroll_max = Some(0);
+        state.scroll = 0;
         for (i, line) in empty_lines(state, inner.width).into_iter().enumerate() {
             let y = inner.y + u16::try_from(i).unwrap_or(u16::MAX);
             if y >= inner.y + inner.height {
@@ -1226,14 +1252,24 @@ pub fn render(
                         .filter_map(|(o, _)| scene.agents.get(o))
                         .filter(|s| group_of(s) == group)
                         .count();
+                    let heading = format!("● {} ({n}) ", group.title());
+                    let rule = "─".repeat(usize::from(
+                        inner.width.saturating_sub(crate::text::cells(&heading)),
+                    ));
                     lines.insert(
                         0,
-                        Line::from(Span::styled(
-                            format!("{} ({n})", group.title()),
-                            Style::default()
-                                .fg(Group::color(group))
-                                .add_modifier(Modifier::BOLD),
-                        )),
+                        Line::from(vec![
+                            Span::styled(
+                                heading,
+                                Style::default()
+                                    .fg(Group::color(group))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                rule,
+                                Style::default().fg(fade(Group::color(group), 0.55)),
+                            ),
+                        ]),
                     );
                 }
                 if !std::ptr::eq(id, &order[0].0) {
@@ -1281,7 +1317,9 @@ pub fn render(
     }
     // No scrolling past the last card, so the wheel never leaves the panel
     // blank and a shrinking list pulls its cards back into view.
-    state.scroll = state.scroll.min(y.saturating_sub(h));
+    let scroll_max = y.saturating_sub(h);
+    state.scroll_max = Some(scroll_max);
+    state.scroll = state.scroll.min(scroll_max);
     let start = state.scroll;
     // The cards wholly under the window are counted on its last row: a lone
     // ▼ on the title row was all that said the list went on.
@@ -1317,7 +1355,7 @@ pub fn render(
                 let bg = match (own, c.group == Group::Waiting, sel) {
                     (false, _, _) => None,
                     (true, true, true) => Some(WAIT_SELECTED_BG),
-                    (true, true, false) => Some(WAIT_BG),
+                    (true, true, false) => Some(if hover { WAIT_HOVER_BG } else { WAIT_BG }),
                     (true, false, true) => Some(SELECTED_BG),
                     (true, false, false) => hover.then_some(HOVER_BG),
                 };
@@ -1339,10 +1377,13 @@ pub fn render(
             }
             row += 1;
         }
-        if c.group == Group::Done
-            && let Some(rows) = shown
-        {
-            drawn.outlines.push(rows);
+        if let Some(rows) = shown {
+            if sel {
+                drawn.selected = Some(rows);
+            }
+            if c.group == Group::Done {
+                drawn.outlines.push(rows);
+            }
         }
     }
     if below > 0 {
@@ -1369,7 +1410,17 @@ pub fn render(
     }
     if let (Some(bar), Some(labels)) = (&bar, &labels) {
         let top = inner.y + inner.height.saturating_sub(bar_rows);
-        role_bar(inner.x, top, inner.width, bar, labels, buf, &mut drawn);
+        role_bar(
+            inner.x,
+            top,
+            inner.width,
+            bar,
+            labels,
+            state.hovered_role,
+            state.hovered_host,
+            buf,
+            &mut drawn,
+        );
     }
     drawn
 }
@@ -1421,6 +1472,8 @@ fn role_bar(
     width: u16,
     bar: &crate::core::DispatchBar,
     labels: &[Vec<(crate::roles::Role, &'static str)>],
+    hovered_role: Option<crate::roles::Role>,
+    hovered_host: Option<crate::roles::Backend>,
     buf: &mut Buffer,
     drawn: &mut Drawn,
 ) {
@@ -1440,11 +1493,15 @@ fn role_bar(
         if col + w > width {
             break;
         }
-        let style = match (host == bar.active, ready) {
-            (true, _) => Style::default().fg(TEXT).bg(rgb(crate::roles::CHIP_BG)),
-            // Listed but not set up: still clickable, and clicking says why.
-            (false, true) => Style::default().fg(DIM),
-            (false, false) => Style::default().fg(fade(DIM, 0.5)),
+        let style = if hovered_host == Some(host) {
+            Style::default().fg(TEXT).bg(CHIP_HOVER_BG)
+        } else {
+            match (host == bar.active, ready) {
+                (true, _) => Style::default().fg(TEXT).bg(rgb(crate::roles::CHIP_BG)),
+                // Listed but not set up: still clickable, and clicking says why.
+                (false, true) => Style::default().fg(DIM),
+                (false, false) => Style::default().fg(fade(DIM, 0.5)),
+            }
         };
         buf.set_string(x + col, y, &chip, style);
         drawn.hosts.push((y, x + col, w, host));
@@ -1457,7 +1514,12 @@ fn role_bar(
         let mut col = 0u16;
         for &(role, text) in row {
             let w = bar_cells(text);
-            let style = Style::default().fg(rgb(role.post().ink)).bg(rgb(crate::roles::CHIP_BG));
+            let ground = if hovered_role == Some(role) {
+                CHIP_HOVER_BG
+            } else {
+                rgb(crate::roles::CHIP_BG)
+            };
+            let style = Style::default().fg(rgb(role.post().ink)).bg(ground);
             buf.set_string(x + col, row_y, text, style);
             hits.push((row_y, x + col, w, role));
             col += w + 1;
@@ -1795,7 +1857,44 @@ mod tests {
         );
         assert!(drawn.rows.iter().all(|(y, _)| *y != header), "no card's");
         assert_ne!(buf[(area.width - 1, header)].bg, SELECTED_BG);
-        assert_eq!(buf[(area.width - 1, first)].bg, SELECTED_BG);
+        let body = drawn
+            .rows
+            .iter()
+            .filter(|(_, id)| *id == a)
+            .nth(1)
+            .map(|(y, _)| *y)
+            .expect("a card body row without its status chip");
+        assert_eq!(buf[(area.width - 1, body)].bg, SELECTED_BG);
+    }
+
+    /// The most urgent cards must answer the pointer too, and moving across
+    /// one must never make its existing selection look lost.
+    #[test]
+    fn a_waiting_card_hover_brightens_without_erasing_selection() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        scene.agents.get_mut(&a).unwrap().state = ActivityState::RequiresAction { reason: None };
+        let views = TaskViews::default();
+        let area = Rect::new(0, 0, 40, 12);
+        let ground = |state: &mut PanelState| {
+            let mut buf = Buffer::empty(area);
+            let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), state);
+            let (y, _) = drawn
+                .rows
+                .iter()
+                .filter(|(_, id)| *id == a)
+                .nth(1)
+                .expect("a card body row without its status chip");
+            buf[(area.width - 1, *y)].bg
+        };
+        let mut state = PanelState::default();
+        assert_eq!(ground(&mut state), WAIT_BG);
+        state.hovered = Some(a);
+        assert_eq!(ground(&mut state), WAIT_HOVER_BG);
+        state.selected = Some(a);
+        assert_eq!(ground(&mut state), WAIT_SELECTED_BG);
     }
 
     /// A session idle on the rooftop needs nothing from you: its card is its
@@ -2056,9 +2155,17 @@ mod tests {
             avatar.content.trim(),
             avatar_initial(&slot.label).to_string()
         );
-        let chip = first.last().expect("a chip");
+        let chip = first
+            .iter()
+            .find(|s| s.style.bg == Some(WAIT))
+            .expect("a chip before the right margin");
         assert_eq!(chip.style.bg, Some(WAIT), "the status on its colour");
         assert!(chip.content.contains("等你确认"));
+        assert_eq!(
+            lines[0].width(),
+            40,
+            "a short name leaves its gap before the right-aligned status, not after it"
+        );
     }
 
     /// The post is what tells two sessions of one repository apart at a
@@ -2430,7 +2537,9 @@ mod tests {
                 .map(|host| (*host, true))
                 .collect(),
         };
-        role_bar(0, 0, area.width, &bar, &labels, &mut buf, &mut drawn);
+        role_bar(
+            0, 0, area.width, &bar, &labels, None, None, &mut buf, &mut drawn,
+        );
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("shop →"), "the repository leads: {text}");
         for host in crate::roles::Backend::ALL {
@@ -2472,6 +2581,24 @@ mod tests {
                 .collect();
             assert_eq!(chip, host.short(), "the chip names its host");
         }
+        // These chips act immediately on a click, so their hover ground must
+        // be visible before that click, just as it is on a card.
+        let &(role_y, role_x, _, role) = &drawn.roles[2];
+        let &(host_y, host_x, _, host) = &drawn.hosts[0];
+        let mut hovered = Buffer::empty(area);
+        role_bar(
+            0,
+            0,
+            area.width,
+            &bar,
+            &labels,
+            Some(role),
+            Some(host),
+            &mut hovered,
+            &mut Drawn::default(),
+        );
+        assert_eq!(hovered[(role_x, role_y)].bg, CHIP_HOVER_BG);
+        assert_eq!(hovered[(host_x, host_y)].bg, CHIP_HOVER_BG);
     }
 
     /// A panel too narrow to hold the roster in two rows keeps the bar out:
@@ -2536,7 +2663,9 @@ mod tests {
                 .collect(),
         };
         let labels = bar_labels(46).unwrap();
-        role_bar(0, 0, area.width, &bar, &labels, &mut buf, &mut drawn);
+        role_bar(
+            0, 0, area.width, &bar, &labels, None, None, &mut buf, &mut drawn,
+        );
         assert_eq!(
             drawn.hosts.len(),
             crate::roles::Backend::ALL.len(),

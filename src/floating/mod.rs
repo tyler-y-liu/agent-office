@@ -135,6 +135,8 @@ struct Win {
     cursor: PhysicalPosition<f64>,
     /// A trackpad's scroll in pixels not yet a whole panel row.
     wheel_px: f64,
+    /// Wheel rows queued after the one drawn now, eased in one per frame.
+    scroll_left: isize,
     /// The last frame's layout, which a click is read against.
     last: Option<Layout>,
     /// The agent last clicked, when, and whether its card was expanded
@@ -215,6 +217,30 @@ impl ResizeHold {
                 *self.shown.insert(want)
             }
         }
+    }
+}
+
+/// A fast wheel can otherwise leave the list coasting long after it stopped.
+const SCROLL_QUEUE_MAX: isize = 12;
+
+fn queue_scroll_rows(left: &mut isize, rows: isize) {
+    *left = left
+        .saturating_add(rows)
+        .clamp(-SCROLL_QUEUE_MAX, SCROLL_QUEUE_MAX);
+}
+
+/// One queued row, stopping at the panel's own scroll boundary.
+fn step_scroll(state: &mut crate::panel::PanelState, left: &mut isize) {
+    let delta = left.signum();
+    if delta == 0 {
+        return;
+    }
+    let before = state.scroll;
+    state.scroll_by(delta);
+    if state.scroll == before {
+        *left = 0;
+    } else {
+        *left -= delta;
     }
 }
 
@@ -399,6 +425,8 @@ impl ApplicationHandler for Floating<'_> {
             WindowEvent::CursorLeft { .. } => {
                 win.cursor_in = false;
                 win.core.ui.hovered = None;
+                win.core.ui.hovered_role = None;
+                win.core.ui.hovered_host = None;
                 win.next_frame = Instant::now();
             }
             WindowEvent::MouseInput {
@@ -406,6 +434,8 @@ impl ApplicationHandler for Floating<'_> {
                 button: MouseButton::Left,
                 ..
             } => {
+                // A direct click takes over from any scrolling still easing.
+                win.scroll_left = 0;
                 // A click is not a pick: the picker goes, so a digit typed
                 // later does not dispatch into whatever got selected.
                 if win.picker.take().is_some() {
@@ -423,6 +453,9 @@ impl ApplicationHandler for Floating<'_> {
                 if !takes_key(event.logical_key.as_ref(), event.repeat, win.mods) {
                     return;
                 }
+                // Keyboard navigation reveals its target rather than fighting
+                // the wheel's remaining motion.
+                win.scroll_left = 0;
                 // Open, the picker takes the next key: a digit picks, Esc
                 // and `p` only close it, and any other key closes it and
                 // still does its own thing, so an `o` meant for the
@@ -600,6 +633,7 @@ impl Floating<'_> {
             on_top: false,
             cursor: PhysicalPosition::default(),
             wheel_px: 0.0,
+            scroll_left: 0,
             last: None,
             last_click: None,
             pending_poke: None,
@@ -662,6 +696,7 @@ impl Win {
         let frame = self.core.frame();
         // Anything below that moves between beats sets this again.
         self.quick = false;
+        self.advance_scroll();
         self.land_poke();
 
         let want = fit_for(pack, ow, oh, self.hold.shown);
@@ -899,7 +934,7 @@ impl Win {
                 )
             })
             .collect();
-        paint_done_bars(&mut canvas, &drawn.outlines, panel_x, g, sf);
+        paint_card_bars(&mut canvas, &drawn.outlines, drawn.selected, panel_x, g, sf);
         let at = Instant::now();
         self.portraits.retain(|id, (_, made)| {
             at.duration_since(*made) < PORTRAIT_FOR && frame.scene.agents.contains_key(id)
@@ -1080,8 +1115,18 @@ impl Win {
             }
         };
         if rows != 0.0 {
-            self.core.ui.scroll_by(rows as isize);
+            queue_scroll_rows(&mut self.scroll_left, rows as isize);
+            // The event loop picks the next frame's cadence before it handles
+            // the redraw, so the first wheel notch must request it here.
+            self.quick = true;
         }
+    }
+
+    /// Whole cards jumped three rows per notch; one row per frame keeps the
+    /// content legible while clicks and keystrokes still stop it immediately.
+    fn advance_scroll(&mut self) {
+        step_scroll(&mut self.core.ui, &mut self.scroll_left);
+        self.quick |= self.scroll_left != 0;
     }
 
     /// The figure in the office under window point (`x`, `y`), if any.
@@ -1108,9 +1153,8 @@ impl Win {
         }
     }
 
-    /// A hand over what a click acts on, and the card under the pointer
-    /// lit: the signs, the cat, the board and the panel's title took clicks
-    /// with nothing to say so.
+    /// A hand over what a click acts on, and the card or chip under the
+    /// pointer lit: every actionable surface answers before it is clicked.
     fn hover(&mut self) {
         let Some(last) = self.last.as_ref().filter(|_| self.cursor_in) else {
             return;
@@ -1132,6 +1176,20 @@ impl Win {
                 .find(|(r, _)| *r == row)
                 .map(|(_, id)| *id)
         };
+        let (role, host) = if in_office {
+            (None, None)
+        } else {
+            (
+                last.role_hits
+                    .iter()
+                    .find(|(r, _)| r.meets(&point))
+                    .map(|(_, role)| *role),
+                last.host_hits
+                    .iter()
+                    .find(|(r, _)| r.meets(&point))
+                    .map(|(_, host)| *host),
+            )
+        };
         let clickable = if in_office {
             last.board_hits.iter().any(|r| r.meets(&point))
                 || last.cat_hit.is_some_and(|r| r.meets(&point))
@@ -1139,10 +1197,15 @@ impl Win {
                 || last.tag_hits.iter().any(|(r, _)| r.meets(&point))
                 || self.figure_at(last, x, y).is_some()
         } else {
-            y < last.grid.row_h || card.is_some()
+            y < last.grid.row_h || card.is_some() || role.is_some() || host.is_some()
         };
-        if self.core.ui.hovered != card {
+        let changed = self.core.ui.hovered != card
+            || self.core.ui.hovered_role != role
+            || self.core.ui.hovered_host != host;
+        if changed {
             self.core.ui.hovered = card;
+            self.core.ui.hovered_role = role;
+            self.core.ui.hovered_host = host;
             self.next_frame = Instant::now();
         }
         if clickable != self.pointer {
@@ -1629,18 +1692,29 @@ fn paint_cells(
 /// for that group ([`panel::DONE`]).
 const DONE_BAR: u32 = 0x00a6_d8ff;
 
-/// A bar down the left of each card in `outlines` (its first and last panel
-/// rows), in the gap between the panel's edge and its text. A box round
-/// each read as the card being selected, and two at once as two selected.
-fn paint_done_bars(canvas: &mut Canvas, outlines: &[(u16, u16)], panel_x: u32, g: Grid, sf: f64) {
+/// A bar down the left of each unread done card and the selected card, in
+/// the gap between the panel's edge and its text. Selection matches the white
+/// ring in the office and wins where a done card is selected too.
+fn paint_card_bars(
+    canvas: &mut Canvas,
+    outlines: &[(u16, u16)],
+    selected: Option<(u16, u16)>,
+    panel_x: u32,
+    g: Grid,
+    sf: f64,
+) {
     let t = (sf.round() as u32).max(1);
     let w = (2 * t).max(g.cell_w / 3);
     // Centred in the cell before the text, clear of the panel's border.
     let x = i64::from(panel_x + g.cell_w + (g.cell_w - w) / 2);
-    for &(top, bottom) in outlines {
+    let bars = outlines
+        .iter()
+        .map(|&rows| (rows, DONE_BAR))
+        .chain(selected.map(|rows| (rows, SELECTED_INK)));
+    for ((top, bottom), ink) in bars {
         let y0 = i64::from(u32::from(top) * g.row_h + t);
         let y1 = i64::from((u32::from(bottom) + 1) * g.row_h - t);
-        canvas.fill(x, y0, w, u32::try_from(y1 - y0).unwrap_or(0), DONE_BAR);
+        canvas.fill(x, y0, w, u32::try_from(y1 - y0).unwrap_or(0), ink);
     }
 }
 
@@ -2889,7 +2963,7 @@ mod tests {
         };
         let panel_x = 100;
         let mut canvas = Canvas::new(400, 200, 0);
-        paint_done_bars(&mut canvas, &[(2, 4)], panel_x, g, 1.0);
+        paint_card_bars(&mut canvas, &[(2, 4)], None, panel_x, g, 1.0);
         let inked: Vec<(u32, u32)> = (0..canvas.h)
             .flat_map(|y| (0..canvas.w).map(move |x| (x, y)))
             .filter(|&(x, y)| canvas.px[(y * canvas.w + x) as usize] == DONE_BAR)
@@ -2915,6 +2989,60 @@ mod tests {
             inked.iter().any(|&(_, y)| y >= bottom - g.row_h),
             "to its last"
         );
+    }
+
+    /// Selection is visible in the panel and in the office in the same white,
+    /// including on an unread done card whose blue bar it temporarily replaces.
+    #[test]
+    fn a_selected_done_card_gets_the_white_focus_bar() {
+        let g = Grid {
+            px: 13,
+            cell_w: 8,
+            row_h: 18,
+        };
+        let mut canvas = Canvas::new(200, 120, 0);
+        paint_card_bars(&mut canvas, &[(2, 4)], Some((2, 4)), 100, g, 1.0);
+        let w = 2;
+        let x = 100 + g.cell_w + (g.cell_w - w) / 2;
+        let y = 2 * g.row_h + 1;
+        assert_eq!(canvas.px[(y * canvas.w + x) as usize], SELECTED_INK);
+        assert_eq!(
+            canvas.px[((4 * g.row_h + g.row_h - 2) * canvas.w + x) as usize],
+            SELECTED_INK,
+            "the focus bar reaches the card's last row"
+        );
+    }
+
+    /// A notch no longer teleports the list a whole card: each frame takes
+    /// one row, reversal uses the same queue, and both edges clear the queue.
+    #[test]
+    fn wheel_rows_ease_in_one_at_a_time_and_stop_at_both_edges() {
+        let mut state = crate::panel::PanelState {
+            scroll: 3,
+            ..crate::panel::PanelState::default()
+        };
+        let mut left = 0;
+        queue_scroll_rows(&mut left, -5);
+        queue_scroll_rows(&mut left, 1);
+        step_scroll(&mut state, &mut left);
+        assert_eq!(state.scroll, 2);
+        assert_eq!(left, -3, "only one of the four queued rows was drawn");
+        for _ in 0..4 {
+            step_scroll(&mut state, &mut left);
+        }
+        assert_eq!(state.scroll, 0);
+        assert_eq!(left, 0, "the top clears any rows still queued");
+        queue_scroll_rows(&mut left, -100);
+        assert_eq!(
+            left, -SCROLL_QUEUE_MAX,
+            "a stopped wheel cannot coast forever"
+        );
+        state.scroll_max = Some(6);
+        state.scroll = 6;
+        left = 4;
+        step_scroll(&mut state, &mut left);
+        assert_eq!(state.scroll, 6, "the known bottom is not passed");
+        assert_eq!(left, 0, "no quick frames are queued against that bottom");
     }
 
     fn area(x: i64, y: i64) -> Area {
