@@ -54,7 +54,6 @@ pub struct DispatchPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
     pub name: String,
-    pub after: crate::roles::After,
     /// The posts to hand on to, best first.
     pub suggested: Vec<crate::roles::Role>,
     pub task: String,
@@ -590,7 +589,9 @@ impl Core {
         let scene = self.scene();
         let views = self.views_rx.borrow().clone();
         let now = SystemTime::now();
-        let slot = match self.ui.selected {
+        // A selection whose session just left is no selection.
+        let selected = self.ui.selected.filter(|id| scene.agents.contains_key(id));
+        let slot = match selected {
             Some(id) => scene.agents.get(&id),
             None => scene
                 .agents
@@ -618,9 +619,7 @@ impl Core {
             );
             return None;
         }
-        // The repository it is seated with, a worktree's included.
-        let dir = pixtuoid_core::state::project_root(&slot.cwd).to_path_buf();
-        let relay = self.ui.selected.and_then(|_| {
+        let relay = selected.and_then(|_| {
             let view = views.get(&slot.agent_id);
             let read = panel::read_since_idle(slot, &self.ui.seen);
             let after = match panel::Group::of(slot, view, now, read) {
@@ -644,10 +643,18 @@ impl Core {
             Some(Relay {
                 suggested: crate::roles::next_posts(after, v.role),
                 name,
-                after,
                 task,
             })
         });
+        // A fresh session goes to the repository the worker is seated with,
+        // never into a worktree under its owner; a relay goes where the work
+        // it carries on is, since a worktree's changes are not in the main
+        // checkout.
+        let dir = if relay.is_some() {
+            slot.cwd.to_path_buf()
+        } else {
+            pixtuoid_core::state::project_root(&slot.cwd).to_path_buf()
+        };
         Some(DispatchPlan { dir, relay })
     }
 
