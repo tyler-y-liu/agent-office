@@ -12,6 +12,10 @@ window.__ModuleLoader__.load({
 	factory: () => {
 		var module = { exports: {} };
 		const inject = ["sessions", "uiWorkspace"];
+		// A page that was offline sees every Session made meanwhile as new; only
+		// one this fresh is a dispatch the user is waiting to see. A dispatch
+		// gives up after 10s, so a minute also covers clock skew on a remote page.
+		const FRESH_MS = 60_000;
 		function apply(ctx) {
 			const list = ctx.sessions.list;
 			// Everything the first loaded list holds predates this page: opening
@@ -33,7 +37,12 @@ window.__ModuleLoader__.load({
 					if (typeof preset !== "string") continue;
 					seen.add(id);
 					// A subagent belongs to its parent's view, not a dispatch.
-					if (preset.startsWith("office-") && row.origin !== "subagent" && row.parentId === undefined) open = id;
+					if (
+						preset.startsWith("office-")
+						&& row.origin !== "subagent"
+						&& row.parentId === undefined
+						&& Date.now() - row.updatedAt < FRESH_MS
+					) open = id;
 				}
 				if (open !== undefined) ctx.uiWorkspace.openSession(open);
 			};

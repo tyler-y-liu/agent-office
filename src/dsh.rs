@@ -252,9 +252,10 @@ pub fn connect() -> Result<()> {
     let web = web_dir(&dir);
     std::fs::create_dir_all(&web)
         .with_context(|| crate::tr!("建 {} 失败", "could not create {}", web.display()))?;
+    // A running DSH may serve these as they change: never half a bundle.
     for (name, text) in WEB_FILES {
         let path = web.join(name);
-        std::fs::write(&path, text)
+        crate::atomic::write_keeping_mode(&path, &web.join(format!("{name}.tmp")), text.as_bytes())
             .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
     }
     let before = read_patch(&home)?;
@@ -467,6 +468,8 @@ mod tests {
         assert!(TEMPLATE.contains("const agentPreset = `office-${request.role}`"));
         assert!(file("client.js").contains("preset.startsWith(\"office-\")"));
         assert!(file("client.js").contains("row.origin !== \"subagent\""));
+        // Nor an old dispatch a page sees only on reconnecting.
+        assert!(file("client.js").contains("Date.now() - row.updatedAt < FRESH_MS"));
     }
 
     /// A browser half left by an older build reads as not connected, so the
