@@ -43,7 +43,7 @@ AGENT_OFFICE_API_KEY=sk-...
 AGENT_OFFICE_MODEL=your-model
 ```
 
-Requests go to `<base>/v1/chat/completions`; the base works with or without a trailing `/v1`. Pick a fast model without long reasoning.
+Requests go to `<base>/v1/chat/completions`, or to `<base>/chat/completions` when the base already names an API version (`/v1`, `/api/v3`, `/v1beta/openai`, ...). Pick a fast model without long reasoning.
 
 If something looks wrong, run `agent-office doctor`. It checks the session directories, the hooks for each agent, the socket and the stuck thresholds, and makes one test call to the summary endpoint.
 

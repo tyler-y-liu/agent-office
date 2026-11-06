@@ -544,7 +544,7 @@ async fn run(
                     .outcome
                     .as_ref()
                     .is_some_and(|(_, line)| crate::i18n::is_ask(line));
-                if asks || !crate::core::idle_long(slot, SystemTime::now()) {
+                if asks || !idle_long_as_written(slot, e.tail.modified, SystemTime::now()) {
                     let basis = format!(
                         "{prompt}\u{1f}{}",
                         e.transcript.todo_active.as_deref().unwrap_or("")
@@ -588,6 +588,27 @@ async fn run(
     }
 }
 
+/// [`crate::core::idle_long`] dated the way the window dates it
+/// ([`crate::core::idle_since_written`]): a slot replayed at startup starts
+/// its idle stretch then, though its transcript went quiet hours ago, and the
+/// window already hides it.
+fn idle_long_as_written(
+    slot: &pixtuoid_core::AgentSlot,
+    written: Option<SystemTime>,
+    now: SystemTime,
+) -> bool {
+    match written.filter(|&at| at < slot.state_started_at) {
+        Some(at) => crate::core::idle_long(
+            &pixtuoid_core::AgentSlot {
+                state_started_at: at,
+                ..slot.clone()
+            },
+            now,
+        ),
+        None => crate::core::idle_long(slot, now),
+    }
+}
+
 /// `AGENT_OFFICE_DEBUG`: append each summary result to that file.
 fn debug_log(id: AgentId, kind: &str, out: &anyhow::Result<String>) {
     let Ok(path) = std::env::var("AGENT_OFFICE_DEBUG") else {
@@ -597,11 +618,22 @@ fn debug_log(id: AgentId, kind: &str, out: &anyhow::Result<String>) {
         "{id} {kind} {:?}\n",
         out.as_ref().map_err(|e| format!("{e:#}"))
     );
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    let _ = append_private(Path::new(&path), &line);
+}
+
+/// Append to `path`, creating it readable by you alone: it holds what your
+/// sessions are doing.
+fn append_private(path: &Path, line: &str) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut file = opts.open(path)?;
+    // `mode` applies only on creation: a file left by an older build stays
+    // world-readable unless tightened here.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    std::io::Write::write_all(&mut file, line.as_bytes())
 }
 
 fn project_of(cwd: &Path) -> String {
@@ -961,6 +993,58 @@ mod tests {
         slot.state = ActivityState::Idle;
         slot.state_started_at = since;
         slot
+    }
+
+    /// A session replayed at startup idles "since now", though its transcript
+    /// went quiet hours ago: the window hides it, so asking for its line only
+    /// spends money and sends its prompt out for nothing. One that idled a
+    /// while but is still drawn is asked as before.
+    #[test]
+    fn a_session_idle_for_hours_before_startup_is_not_summarized() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let hour = Duration::from_secs(60 * 60);
+        let replayed = idle_slot(t0);
+        let now = t0 + Duration::from_secs(60);
+        assert!(idle_long_as_written(&replayed, Some(t0 - 3 * hour), now));
+        assert!(!idle_long_as_written(&replayed, Some(t0 - hour / 2), now));
+        assert!(!idle_long_as_written(&replayed, None, now));
+        // A write after the idle began (its last lines landing) does not
+        // make it look fresher than the slot says.
+        let idle = idle_slot(t0);
+        assert!(idle_long_as_written(&idle, Some(t0 + hour), t0 + 2 * hour));
+    }
+
+    /// The debug file holds summaries of what your sessions do; others on
+    /// the machine must not read it.
+    #[cfg(unix)]
+    #[test]
+    fn the_debug_file_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("agent-office-debug-{}", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        append_private(&path, "a\n").unwrap();
+        append_private(&path, "b\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// A debug file written before it was made private keeps its summaries;
+    /// the next line must close it to others, not leave it as it was.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_open_debug_file_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("agent-office-debug-old-{}", std::process::id()));
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        append_private(&path, "new\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\nnew\n");
+        std::fs::remove_file(path).ok();
     }
 
     /// One request per finished turn: asked once the agent has stopped and

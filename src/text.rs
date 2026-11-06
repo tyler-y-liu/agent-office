@@ -115,6 +115,44 @@ mod tests {
         assert!(cmd.starts_with("Bash: cd") && cmd.ends_with('…'), "{cmd}");
     }
 
+    /// Hooks and transcripts carry absolute paths, often 50+ characters:
+    /// pixtuoid used to cut them to 40 before this saw them, so the card
+    /// showed a directory prefix and never the file. Through the real
+    /// decoder, the file name must survive both the cap and the fit.
+    #[test]
+    fn a_decoded_long_path_still_shows_its_file_name() {
+        use pixtuoid_core::AgentEvent;
+        // A session started in a scratchpad: its file's path runs past 200
+        // characters, and the session's own directory must still come off.
+        let cwd = "/tmp/demo-office/-home-demo-code-personal-blog--demo-worktrees-project-review-optim-000000/00000000-0000-0000-0000-000000000000/scratchpad/demo-review/repos/shop-web";
+        let path = format!("{cwd}/src/components/checkout/CouponField.tsx");
+        let v = serde_json::json!({
+            "hook_event_name": "PreToolUse", "session_id": "00000000-0000-0000-0000-000000000000",
+            "cwd": cwd, "tool_name": "Edit", "tool_use_id": "t1",
+            "tool_input": { "file_path": path },
+        });
+        let evs = pixtuoid_core::source::decoder::decode_hook_payload(v).unwrap();
+        let shown = evs
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::ToolUseStart { detail: Some(d), .. } => Some(d.display().to_owned()),
+                _ => None,
+            })
+            .expect("a tool call");
+        let cwd = std::path::Path::new(cwd);
+        assert_eq!(
+            fit_tool_line(&shown, cwd, 60),
+            "Edit: src/components/checkout/CouponField.tsx"
+        );
+        let narrow = fit_tool_line(&shown, cwd, 30);
+        assert!(narrow.ends_with("/CouponField.tsx"), "{narrow}");
+        assert!(cells(&narrow) <= 30, "{narrow}");
+        // A path outside the session's directory keeps its file name too.
+        let other = "/tmp/demo/-home-demo-code-personal-blog/00000000/scratchpad/notes/plan.md";
+        let line = fit_tool_line(&format!("Read: {other}"), cwd, 30);
+        assert!(line.ends_with("/plan.md"), "{line}");
+    }
+
     #[test]
     fn one_line_strips_escapes_and_newlines() {
         assert_eq!(one_line("a\n\x1b[31mb\t c"), "a [31mb c");
