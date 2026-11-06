@@ -2185,13 +2185,20 @@ fn paint_picker(
             } else {
                 ""
             };
-            (k, r, format!("{} {}{what}", r.post().glyph, r.name()), suggested.contains(&r))
+            (k, r, format!("{} {}{what}", r.chip(), r.name()), suggested.contains(&r))
         })
         .collect();
+    let chip_cells = crate::roles::ROSTER
+        .iter()
+        .map(|p| Faces::cells(p.role.chip()))
+        .max()
+        .unwrap_or(2);
     let line_h = px + px / 3;
     let widest = rows
         .iter()
-        .map(|(_, _, t, s)| 2 + Faces::cells(t) + if *s { Faces::cells(tag) } else { 0 })
+        .map(|(_, r, t, s)| {
+            2 + chip_cells - Faces::cells(r.chip()) + Faces::cells(t) + if *s { Faces::cells(tag) } else { 0 }
+        })
         .chain([Faces::cells(&head), Faces::cells(&sub)])
         .max()
         .unwrap_or(0);
@@ -2212,13 +2219,14 @@ fn paint_picker(
         }
         faces.draw(canvas, tx, ty + ascent, &key.to_string(), TEXT, px);
         let chip_x = tx + i64::from(2 * cell);
-        canvas.fill(chip_x - 1, ty, 2 * cell + 2, px + px / 6, to_u32(role.post().ink));
-        // Dark on the saturated chip, as the name badges are: light text
-        // on it fell short of a readable contrast.
-        let glyph = role.post().glyph;
-        faces.draw(canvas, chip_x, ty + ascent, glyph, PANEL_BG, px);
+        // The role's ink on a dark chip, as on the badges and cards.
+        let glyph = role.chip();
+        let chip_w = Faces::cells(glyph) * cell;
+        canvas.fill(chip_x - 1, ty, chip_w + 2, px + px / 6, to_u32(crate::roles::CHIP_BG));
+        faces.draw(canvas, chip_x, ty + ascent, glyph, to_u32(role.post().ink), px);
         let rest = &text[glyph.len()..];
-        let rest_x = chip_x + i64::from(Faces::cells(glyph) * cell);
+        // Every name starts in one column, whichever chip is widest.
+        let rest_x = chip_x + i64::from(chip_cells * cell);
         faces.draw(canvas, rest_x, ty + ascent, rest, TEXT, px);
         if *picked {
             let tag_x = rest_x + i64::from(Faces::cells(rest) * cell);
@@ -2426,7 +2434,7 @@ fn paint_first_waiting(
 
 /// A role chip's width on a badge: its glyph with a pad either side.
 fn role_chip_w(faces: &mut Faces, role: Role, name_px: u32, pad: u32) -> u32 {
-    Faces::cells(role.post().glyph) * faces.cell_w(name_px) + 2 * pad
+    Faces::cells(role.chip()) * faces.cell_w(name_px) + 2 * pad
 }
 
 /// `tags` with each name in its agent's panel group colour: pixtuoid inks a
@@ -2488,8 +2496,8 @@ fn paint_tags(
         if let Some(role) = t.role {
             let post = role.post();
             let w = role_chip_w(faces, role, name_px, pad);
-            canvas.fill(r.x + i64::from(pad), r.y, w, r.h, to_u32(post.ink));
-            faces.draw(canvas, r.x + i64::from(2 * pad), base, post.glyph, PANEL_BG, name_px);
+            canvas.fill(r.x + i64::from(pad), r.y, w, r.h, to_u32(crate::roles::CHIP_BG));
+            faces.draw(canvas, r.x + i64::from(2 * pad), base, role.chip(), to_u32(post.ink), name_px);
             x = r.x + i64::from(pad + w + pad);
         }
         faces.draw(canvas, x, base, &t.name, ink, name_px);

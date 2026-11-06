@@ -32,6 +32,8 @@ const WAIT_BG: Color = Color::Rgb(0x4a, 0x30, 0x1e);
 const WAIT_SELECTED_BG: Color = Color::Rgb(0x5e, 0x3e, 0x28);
 /// Secondary text on that warm ground, where [`DIM`] fell to 3.7:1.
 const DIM_ON_WAIT: Color = Color::Rgb(0xb8, 0xbc, 0xc4);
+/// A worker with a post: a neutral avatar, its chip says who it is.
+const ROLE_AVATAR: Color = Color::Rgb(0x6b, 0x71, 0x7e);
 /// The card under the pointer, which a click selects.
 const HOVER_BG: Color = Color::Rgb(0x1f, 0x23, 0x2b);
 /// How far an idle card's colours sink into the panel: it needs nothing,
@@ -609,9 +611,15 @@ fn card(
     };
     let pad = pad.as_str();
     let body_w = w.saturating_sub(pad.len() as u16);
-    let marker = ink.map_or(DIM, rgb);
     let (st, st_color) = status(slot, view, read, SystemTime::now());
     let role = view.and_then(|v| v.role).map(crate::roles::Role::post);
+    // A worker with a post is told apart by its chip: a coloured avatar
+    // beside it read as a second role.
+    let marker = if role.is_some() {
+        ROLE_AVATAR
+    } else {
+        ink.map_or(DIM, rgb)
+    };
     // A role's chip says what an `office-*` type would.
     let name = match view.and_then(|v| v.agent_type.as_deref()) {
         Some(t) if depth > 0 && role.is_none() && !look.name.contains(t) => {
@@ -627,7 +635,7 @@ fn card(
     };
     let chip = format!(" {st} ");
     let avatar = format!(" {} ", avatar_initial(&slot.label));
-    let role_chip = role.map(|p| format!("{} ", p.glyph));
+    let role_chip = role.map(|p| format!("{} ", p.role.chip()));
     let name_w = w.saturating_sub(
         indent.chars().count() as u16
             + crate::text::cells(&avatar)
@@ -650,8 +658,8 @@ fn card(
         first.push(Span::styled(
             c,
             Style::default()
-                .bg(rgb(p.ink))
-                .fg(CHIP_INK)
+                .bg(rgb(crate::roles::CHIP_BG))
+                .fg(rgb(p.ink))
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -1528,8 +1536,11 @@ mod tests {
         let first = &lines[0].spans;
         let chip = first
             .iter()
-            .find(|s| s.style.bg == Some(rgb(Role::Qa.post().ink)))
+            .find(|s| s.style.fg == Some(rgb(Role::Qa.post().ink)))
             .expect("a role chip");
+        // The role's ink is the text on a dark chip, not a block of colour
+        // that outweighs the status beside it.
+        assert_eq!(chip.style.bg, Some(rgb(crate::roles::CHIP_BG)));
         assert_eq!(chip.content.trim(), "测");
         assert!(!first.iter().any(|s| s.content.contains("office-qa")));
         let explore = TaskView {

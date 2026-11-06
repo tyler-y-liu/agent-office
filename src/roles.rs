@@ -26,12 +26,21 @@ pub struct Post {
     pub id: &'static str,
     pub zh: &'static str,
     pub en: &'static str,
-    /// The one character its chip shows.
+    /// The one character its chip shows in Chinese.
     pub glyph: &'static str,
+    /// What its chip shows in English: a CJK glyph means nothing to an
+    /// English reader.
+    pub abbr: &'static str,
     pub ink: Rgb,
     template: &'static str,
 }
 
+/// What a role's chip sits on, its ink the text: a block of the ink itself
+/// outweighed the status chip beside it.
+pub const CHIP_BG: Rgb = ink(0x25, 0x2a, 0x33);
+
+// Inks stay clear of the status colours (working green, stuck red, done
+// yellow, waiting orange), since a chip sits next to its status everywhere.
 const fn ink(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
 }
@@ -44,6 +53,7 @@ pub const ROSTER: &[Post] = &[
         zh: "产品",
         en: "Product",
         glyph: "产",
+        abbr: "PD",
         ink: ink(0xe0, 0x8f, 0x5a),
         template: include_str!("../roles/office-product.md"),
     },
@@ -53,7 +63,8 @@ pub const ROSTER: &[Post] = &[
         zh: "设计",
         en: "Design",
         glyph: "设",
-        ink: ink(0xd9, 0x6f, 0xb8),
+        abbr: "UX",
+        ink: ink(0xee, 0x86, 0xd0),
         template: include_str!("../roles/office-ux.md"),
     },
     Post {
@@ -62,7 +73,8 @@ pub const ROSTER: &[Post] = &[
         zh: "架构",
         en: "Architect",
         glyph: "架",
-        ink: ink(0x9a, 0x7c, 0xe0),
+        abbr: "AR",
+        ink: ink(0x7f, 0x8c, 0xf0),
         template: include_str!("../roles/office-architect.md"),
     },
     Post {
@@ -71,6 +83,7 @@ pub const ROSTER: &[Post] = &[
         zh: "前端",
         en: "Frontend",
         glyph: "前",
+        abbr: "FE",
         ink: ink(0x4f, 0xa8, 0xe8),
         template: include_str!("../roles/office-frontend.md"),
     },
@@ -80,7 +93,8 @@ pub const ROSTER: &[Post] = &[
         zh: "后端",
         en: "Backend",
         glyph: "后",
-        ink: ink(0x3f, 0xb8, 0x9c),
+        abbr: "BE",
+        ink: ink(0x3f, 0xa8, 0xb8),
         template: include_str!("../roles/office-backend.md"),
     },
     Post {
@@ -89,7 +103,8 @@ pub const ROSTER: &[Post] = &[
         zh: "测试",
         en: "QA",
         glyph: "测",
-        ink: ink(0x8c, 0xc0, 0x4f),
+        abbr: "QA",
+        ink: ink(0x5c, 0xc8, 0xd8),
         template: include_str!("../roles/office-qa.md"),
     },
     Post {
@@ -98,6 +113,7 @@ pub const ROSTER: &[Post] = &[
         zh: "运维",
         en: "DevOps",
         glyph: "运",
+        abbr: "OPS",
         ink: ink(0xc9, 0xa2, 0x3a),
         template: include_str!("../roles/office-devops.md"),
     },
@@ -107,6 +123,7 @@ pub const ROSTER: &[Post] = &[
         zh: "审查",
         en: "Reviewer",
         glyph: "审",
+        abbr: "RV",
         ink: ink(0x8a, 0x9b, 0xb0),
         template: include_str!("../roles/office-reviewer.md"),
     },
@@ -116,7 +133,8 @@ pub const ROSTER: &[Post] = &[
         zh: "项目经理",
         en: "PM",
         glyph: "管",
-        ink: ink(0xe8, 0x5d, 0x5d),
+        abbr: "PM",
+        ink: ink(0xc4, 0x9c, 0xf0),
         template: include_str!("../roles/office-pm.md"),
     },
 ];
@@ -143,6 +161,12 @@ impl Role {
     pub fn of_agent_type(t: &str) -> Option<Self> {
         let name = t.rsplit(':').next().unwrap_or(t);
         Self::of_id(name.strip_prefix(PREFIX)?)
+    }
+
+    /// What its chip shows, in the UI's language.
+    pub fn chip(self) -> &'static str {
+        let post = self.post();
+        crate::i18n::t(post.glyph, post.abbr)
     }
 
     /// Its post in the UI's language.
@@ -859,6 +883,41 @@ mod tests {
     /// `+` stays a plus, and a raw `&` or `#` would cut the prompt short.
     /// Finished work goes on to be checked, never back to its own post;
     /// stuck work to someone of its trade and to the architect.
+    /// A chip sits beside a status everywhere: its ink must read on the
+    /// chip (AA), and must not pass for working green or stuck red, which
+    /// the old QA green and PM red did.
+    #[test]
+    fn role_inks_read_on_their_chip_and_stay_clear_of_status_colours() {
+        fn lum(c: Rgb) -> f64 {
+            let f = |v: u8| {
+                let x = f64::from(v) / 255.0;
+                if x <= 0.039_28 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+        }
+        let dist = |a: Rgb, b: Rgb| {
+            let d = |x: u8, y: u8| (f64::from(x) - f64::from(y)).powi(2);
+            (d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b)).sqrt()
+        };
+        let working = ink(0x9e, 0xce, 0x6a);
+        let stuck = ink(0xf7, 0x76, 0x8e);
+        for p in ROSTER {
+            let contrast = (lum(p.ink) + 0.05) / (lum(CHIP_BG) + 0.05);
+            assert!(contrast >= 4.5, "{} {contrast:.2}", p.id);
+            assert!(dist(p.ink, working) > 60.0, "{} reads as working", p.id);
+            assert!(dist(p.ink, stuck) > 60.0, "{} reads as stuck", p.id);
+        }
+    }
+
+    /// An English UI shows a Latin chip: a CJK glyph means nothing there.
+    #[test]
+    fn every_role_has_a_latin_chip() {
+        for p in ROSTER {
+            assert!(p.abbr.chars().all(|c| c.is_ascii_uppercase()), "{}", p.id);
+            assert!((2..=3).contains(&p.abbr.len()), "{}", p.id);
+        }
+    }
+
     #[test]
     fn relay_suggests_the_next_post() {
         assert_eq!(next_posts(After::Done, None), vec![Role::Qa, Role::Reviewer]);
