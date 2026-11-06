@@ -17,7 +17,7 @@
 - **一键跳回**：双击小人或卡片，在 Claude 桌面 app 里打开那个会话，或者把它所在的终端切到前台。
 - **多种 agent**：Claude Code、Codex、Cursor（`cursor-agent`）和 DeepSeek Harness（dsh）。
 
-界面有简体中文和英文两种，默认跟随 macOS 的系统语言，也可以用 `AGENT_OFFICE_LANG` 指定。
+界面有简体中文和英文两种，默认跟随 macOS 的系统语言；在窗口里按 `l` 切换（下次启动也是这种语言），也可以用 `AGENT_OFFICE_LANG` 指定。
 
 ## 环境要求
 
@@ -91,6 +91,7 @@ AGENT_OFFICE_MODEL=your-model
 | `b` | 开关头顶标签 |
 | `[` `]`（或 `PageUp` `PageDown`） | 换楼层 |
 | `t` | 切换置顶 |
+| `l` | 中英文切换，记在 `~/.config/agent-office/env` |
 | `q` 按两次 | 退出 |
 
 鼠标点卡片或小人选中，滚轮在任务栏上滚动。弹过通知后回到窗口，会自动选中排在最前面的那个等你的会话，按 `o` 就过去。

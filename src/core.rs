@@ -40,6 +40,8 @@ pub enum Action {
     OpenWaiting,
     /// Open the session at the head of the waiting line.
     OpenNext,
+    /// Speak the other language, now and at the next start.
+    SwitchLang,
 }
 
 /// What `p` dispatches: into which repository, and whose work it carries
@@ -97,11 +99,10 @@ pub enum Tone {
 pub struct Core {
     pub ui: PanelState,
     pub head_labels: bool,
-    pub summary_note: String,
     /// Claude Code's hooks are in, as of the start: without them no prompt
     /// is seen, and your office stays empty however many wait.
     hooks: bool,
-    /// What the last key did, shown in place of `summary_note` a while.
+    /// What the last key did, shown in place of the summary note a while.
     note: Option<(String, Tone, Instant)>,
     /// When `q` was pressed once, waiting on a second.
     quit_armed: Option<Instant>,
@@ -345,12 +346,6 @@ impl Core {
     pub fn start(rt: &tokio::runtime::Runtime, buf_w: u16, buf_h: u16) -> Self {
         let summarizer = tasks::client::Summarizer::from_env();
         let summarizer_on = summarizer.is_some();
-        let summary_note = match &summarizer {
-            // The model's name is long and `doctor` already shows it.
-            Some(_) => crate::i18n::t("摘要 ✓", "summary ✓").to_owned(),
-            // Not switched off: no AGENT_OFFICE_API_* to summarize with.
-            None => crate::i18n::t("摘要未配置", "summary not set up").to_owned(),
-        };
         let socket = crate::hook::socket_path();
         let (pipe, views_rx, force_tx, outlook_rx) = rt.block_on(async {
             let pipe = pipeline::spawn(socket, buf_w, buf_h);
@@ -365,7 +360,6 @@ impl Core {
                 ..PanelState::default()
             },
             head_labels: true,
-            summary_note,
             hooks: crate::hook::installed(),
             note: None,
             quit_armed: None,
@@ -559,6 +553,23 @@ impl Core {
                 }
             }
             Action::ToggleLabels => self.head_labels = !self.head_labels,
+            Action::SwitchLang => {
+                let (now, saved) = crate::i18n::switch();
+                let note = match (saved, crate::i18n::pinned_by_env()) {
+                    (Err(e), _) => crate::tr!(
+                        "已换成中文，但没存下来，下次启动不算：{e}",
+                        "Switched to English, but could not save it for the next start: {e}"
+                    ),
+                    // The environment wins over the file at the next start.
+                    (Ok(()), Some(env)) if env != now => crate::i18n::t(
+                        "已换成中文；环境变量 AGENT_OFFICE_LANG 会在下次启动时改回去",
+                        "Switched to English; AGENT_OFFICE_LANG in the environment will undo it at the next start",
+                    )
+                    .to_owned(),
+                    (Ok(()), _) => crate::i18n::t("已换成中文", "Switched to English").to_owned(),
+                };
+                self.note(&note, Tone::Ok);
+            }
             Action::NextFloor => {
                 let last = floors.n_floors().saturating_sub(1);
                 let next = (floors.current_floor() + 1).min(last);
@@ -761,8 +772,19 @@ impl Core {
     fn status_note(&self) -> (String, Option<Tone>) {
         match &self.note {
             Some((text, tone, at)) if at.elapsed() < NOTE_FOR => (text.clone(), Some(*tone)),
-            _ if !self.hooks => (format!("{} · {}", hooks_out(), self.summary_note), None),
-            _ => (self.summary_note.clone(), None),
+            _ if !self.hooks => (format!("{} · {}", hooks_out(), self.summary_note()), None),
+            _ => (self.summary_note().to_owned(), None),
+        }
+    }
+
+    /// Asked each frame, not kept: the language can change while running.
+    fn summary_note(&self) -> &'static str {
+        if self.ui.summaries {
+            // The model's name is long and `doctor` already shows it.
+            crate::i18n::t("摘要 ✓", "summary ✓")
+        } else {
+            // Not switched off: no AGENT_OFFICE_API_* to summarize with.
+            crate::i18n::t("摘要未配置", "summary not set up")
         }
     }
 }
@@ -782,32 +804,7 @@ pub fn footer(
 ) {
     let dim = Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98));
     let key = Style::default().fg(Color::Rgb(0xe6, 0xe6, 0xe6));
-    let labels = if core.head_labels {
-        crate::i18n::t("隐藏任务", "hide tasks")
-    } else {
-        crate::i18n::t("显示任务", "show tasks")
-    };
-    // In the order shown; kept by `rank`, the lower the more needed.
-    let base = [
-        ("↑↓", crate::i18n::t("选中", "select"), 0),
-        ("Enter", crate::i18n::t("展开", "expand"), 3),
-        ("o", crate::i18n::t("打开会话", "open"), 0),
-        ("w", crate::i18n::t("等你的", "waiting"), 4),
-        ("n", crate::i18n::t("处理下一个", "next waiting"), 1),
-        ("p", crate::i18n::t("派活", "dispatch"), 5),
-        ("r", crate::i18n::t("重新总结", "resummarize"), 7),
-        ("b", labels, 6),
-    ];
-    let floors_hint =
-        (floors.n_floors() > 1).then_some(("[ ]", crate::i18n::t("换楼层", "floor"), 5));
-    // With no one in the office, the keys act on no one: only quitting.
-    let hints: Vec<(&str, &str, u8)> = base
-        .into_iter()
-        .filter(|_| !empty)
-        .chain(floors_hint.filter(|_| !empty))
-        .chain(extra.iter().filter(|_| !empty).map(|&(k, w)| (k, w, 8)))
-        .chain([("q", crate::i18n::t("退出", "quit"), 2)])
-        .collect();
+    let hints = key_hints(core.head_labels, floors.n_floors(), empty, extra);
     let mut right = Vec::new();
     if waiting > 0 {
         let wait = Style::default().fg(panel::WAIT);
@@ -874,6 +871,45 @@ fn hint_spans(k: &str, what: &str, cap: Style, dim: Style) -> Vec<Span<'static>>
         Span::styled(format!(" {k} "), cap),
         Span::styled(format!(" {what}  "), dim),
     ]
+}
+
+/// The footer's key hints (key, what it does, rank) in the order shown.
+fn key_hints<'a>(
+    head_labels: bool,
+    n_floors: usize,
+    empty: bool,
+    extra: &[(&'a str, &'a str)],
+) -> Vec<(&'a str, &'a str, u8)> {
+    let labels = if head_labels {
+        crate::i18n::t("隐藏任务", "hide tasks")
+    } else {
+        crate::i18n::t("显示任务", "show tasks")
+    };
+    // In the order shown; kept by `rank`, the lower the more needed.
+    let base = [
+        ("↑↓", crate::i18n::t("选中", "select"), 0),
+        ("Enter", crate::i18n::t("展开", "expand"), 3),
+        ("o", crate::i18n::t("打开会话", "open"), 0),
+        ("w", crate::i18n::t("等你的", "waiting"), 4),
+        ("n", crate::i18n::t("处理下一个", "next waiting"), 1),
+        ("p", crate::i18n::t("派活", "dispatch"), 5),
+        ("r", crate::i18n::t("重新总结", "resummarize"), 7),
+        ("b", labels, 6),
+    ];
+    let floors_hint =
+        (n_floors > 1).then_some(("[ ]", crate::i18n::t("换楼层", "floor"), 5));
+    // Named in the language it switches to, so a reader who cannot read
+    // the current one still finds it.
+    let lang = ("l", crate::i18n::t("English", "中文"), 4);
+    // With no one in the office, the keys act on no one: only switching
+    // the language the setup steps are in, and quitting.
+    base
+        .into_iter()
+        .filter(|_| !empty)
+        .chain(floors_hint.filter(|_| !empty))
+        .chain(extra.iter().filter(|_| !empty).map(|&(k, w)| (k, w, 8)))
+        .chain([lang, ("q", crate::i18n::t("退出", "quit"), 2)])
+        .collect()
 }
 
 /// The key hints (key, what it does, rank) that fit `room` cells, in their
@@ -999,6 +1035,27 @@ mod tests {
             "a gap before it"
         );
         assert_eq!(buf[(0, 0)].symbol(), "t", "the hints still start the row");
+    }
+
+    /// The language key is the one way to switch while running, so it must
+    /// be offered even to an empty office, whose setup steps are the words
+    /// most worth reading, and be named in the language it switches to: a
+    /// reader stuck in the wrong one cannot read a label in it.
+    #[test]
+    fn the_language_key_is_offered_in_the_language_it_switches_to() {
+        use crate::i18n::{Lang, with};
+        let lang_hint = |l| {
+            with(l, || {
+                key_hints(true, 1, true, &[])
+                    .into_iter()
+                    .find(|h| h.0 == "l")
+                    .map(|h| h.1)
+            })
+        };
+        assert_eq!(lang_hint(Lang::Zh), Some("English"));
+        assert_eq!(lang_hint(Lang::En), Some("中文"));
+        let busy = with(Lang::Zh, || key_hints(true, 1, false, &[]));
+        assert!(busy.iter().any(|h| h.0 == "l"), "and in a busy one");
     }
 
     /// A narrow window cut the hints mid-word and lost `q 退出` first; now

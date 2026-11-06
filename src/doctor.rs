@@ -44,8 +44,8 @@ pub fn run() -> Result<()> {
     println!(
         "[✓] {}",
         t(
-            "语言      简体中文（AGENT_OFFICE_LANG=en 换成英文）",
-            "language  English (AGENT_OFFICE_LANG=zh for Chinese)"
+            "语言      简体中文（窗口里按 l 或设 AGENT_OFFICE_LANG=en 换成英文）",
+            "language  English (press l in the window, or AGENT_OFFICE_LANG=zh, for Chinese)"
         )
     );
 
