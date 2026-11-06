@@ -570,6 +570,35 @@ fn wrap(text: &str, w: u16) -> Vec<String> {
     out
 }
 
+/// [`wrap`] at spaces where it can: a command split mid-word reads as two.
+/// A word wider than `w` (or a run of CJK, which has no spaces) is still
+/// cut by cells.
+fn wrap_words(text: &str, w: u16) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let candidate = if line.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{line} {word}")
+        };
+        if crate::text::cells(&candidate) <= w {
+            line = candidate;
+            continue;
+        }
+        if !line.is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        let mut parts = wrap(word, w);
+        line = parts.pop().unwrap_or_default();
+        out.extend(parts);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// What a stuck agent is marked with, on its chip and by its badge in the
 /// office alike, so the two read as one state.
 pub const STUCK_MARK: &str = "⚠";
@@ -836,22 +865,31 @@ fn card(
 /// An empty office says how to fill it: each step ticked when it is done,
 /// the command to run when it is not. A bare "no sessions" left a first
 /// run with nowhere to go.
-fn empty_lines(state: &PanelState) -> Vec<Line<'static>> {
+fn empty_lines(state: &PanelState, width: u16) -> Vec<Line<'static>> {
+    // Wrapped under its own text, so a command is never cut off the panel.
     let step = |done: bool, todo: String, ok: &str| {
         let (mark, text, color) = if done {
             ("✓", ok.to_owned(), DIM)
         } else {
             ("·", todo, TEXT)
         };
-        Line::from(vec![
-            Span::styled(format!("{mark} "), Style::default().fg(if done { WORK } else { DIM })),
-            Span::styled(text, Style::default().fg(color)),
-        ])
+        wrap_words(&text, width.saturating_sub(2).max(8))
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| {
+                let lead = if i == 0 { format!("{mark} ") } else { "  ".to_owned() };
+                Line::from(vec![
+                    Span::styled(lead, Style::default().fg(if done { WORK } else { DIM })),
+                    Span::styled(part, Style::default().fg(color)),
+                ])
+            })
+            .collect::<Vec<_>>()
     };
-    let dim = |t: &str| Line::from(Span::styled(t.to_owned(), Style::default().fg(DIM)));
-    vec![
+    let dim = |t: &str| vec![Line::from(Span::styled(t.to_owned(), Style::default().fg(DIM)))];
+    let gap = || vec![Line::default()];
+    [
         dim(crate::i18n::t("还没有 agent 会话在运行", "No agent sessions running yet")),
-        Line::default(),
+        gap(),
         step(
             state.hooks,
             crate::i18n::t("接上 hooks：agent-office connect", "Connect hooks: agent-office connect")
@@ -867,7 +905,7 @@ fn empty_lines(state: &PanelState) -> Vec<Line<'static>> {
             .to_owned(),
             "",
         ),
-        Line::default(),
+        gap(),
         dim(crate::i18n::t("可选：", "Optional:")),
         step(
             state.summaries,
@@ -888,6 +926,7 @@ fn empty_lines(state: &PanelState) -> Vec<Line<'static>> {
             crate::i18n::t("角色已装好，按 p 派活", "Roles installed: p dispatches"),
         ),
     ]
+    .concat()
 }
 
 /// Draw the panel: waiting cards on a warm ground, idle ones faded, and
@@ -936,7 +975,7 @@ pub fn render(
         height: inner.height.saturating_sub(1),
     };
     if order.is_empty() {
-        for (i, line) in empty_lines(state).into_iter().enumerate() {
+        for (i, line) in empty_lines(state, inner.width).into_iter().enumerate() {
             let y = inner.y + u16::try_from(i).unwrap_or(u16::MAX);
             if y >= inner.y + inner.height {
                 break;
@@ -1819,7 +1858,7 @@ mod tests {
     #[test]
     fn an_empty_office_lists_the_steps_still_to_take() {
         let text = |st: &PanelState| {
-            empty_lines(st)
+            empty_lines(st, 200)
                 .iter()
                 .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                 .collect::<Vec<_>>()
@@ -1863,6 +1902,15 @@ mod tests {
             "等你回复"
         );
         assert_eq!(waiting_on(Some("Something else"), None), "Something else");
+    }
+
+    #[test]
+    fn wrap_words_keeps_a_command_whole() {
+        assert_eq!(
+            wrap_words("Connect hooks: agent-office connect", 20),
+            vec!["Connect hooks:", "agent-office connect"]
+        );
+        assert_eq!(wrap_words("一二三四五六七", 6), vec!["一二三", "四五六", "七"]);
     }
 
     #[test]
