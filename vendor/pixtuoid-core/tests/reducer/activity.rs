@@ -29,9 +29,13 @@ fn a_tool_end_settles_the_slot_at_once() {
     let end = t0 + Duration::from_millis(100);
     tool_use_end(&mut r, &mut scene, id, Some("t1"), end, Transport::Hook);
 
+    // agent-office: a live CC hook call opens the turn its unseen prompt would
+    // have, so the call's end leaves the figure thinking until the turn ends.
     let slot = &scene.agents[&id];
-    assert_eq!(slot.state, ActivityState::Idle);
+    assert_eq!(slot.state, ActivityState::Running { item: None });
     assert_eq!(slot.state_started_at, end);
+    turn_end(&mut r, &mut scene, id, end, Transport::Hook);
+    assert_eq!(scene.agents[&id].state, ActivityState::Idle);
 }
 
 /// Parallel calls: the end of one that is not shown leaves the shown one
@@ -81,6 +85,19 @@ fn an_end_of_a_call_not_shown_keeps_the_shown_one() {
         id,
         Some("b"),
         t0 + Duration::from_millis(200),
+        Transport::Hook,
+    );
+    // agent-office: a live CC hook call opens the turn its unseen prompt would
+    // have, so the call's end leaves the figure thinking until the turn ends.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None }
+    );
+    turn_end(
+        &mut r,
+        &mut scene,
+        id,
+        t0 + Duration::from_millis(300),
         Transport::Hook,
     );
     assert_eq!(scene.agents[&id].state, ActivityState::Idle);
@@ -152,6 +169,19 @@ fn a_start_answers_only_a_request_holding_no_other_call() {
         id,
         Some("t2"),
         t2 + Duration::from_secs(3),
+        Transport::Hook,
+    );
+    // agent-office: a live CC hook call opens the turn its unseen prompt would
+    // have, so the call's end leaves the figure thinking until the turn ends.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None }
+    );
+    turn_end(
+        &mut r,
+        &mut scene,
+        id,
+        t2 + Duration::from_secs(4),
         Transport::Hook,
     );
     assert_eq!(scene.agents[&id].state, ActivityState::Idle);
@@ -408,11 +438,15 @@ fn a_member_end_while_requires_action_resolves_to_idle() {
 
     let end = t0 + Duration::from_millis(1000);
     tool_use_end(&mut r, &mut scene, id, Some("t1"), end, Transport::Hook);
-    assert!(
-        matches!(scene.agents.get(&id).unwrap().state, ActivityState::Idle),
-        "resolved permission must settle to Idle, got {:?}",
-        scene.agents.get(&id).unwrap().state
+    // agent-office: a live CC hook call opens the turn its unseen prompt would
+    // have, so the call's end leaves the figure thinking until the turn ends.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None },
+        "resolved permission must leave RequiresAction"
     );
+    turn_end(&mut r, &mut scene, id, end, Transport::Hook);
+    assert_eq!(scene.agents[&id].state, ActivityState::Idle);
 }
 
 /// CC's recorded prompt fires PermissionRequest (naming its tool) and then, if
@@ -468,11 +502,15 @@ fn a_keyless_second_raise_keeps_the_calls_the_first_bound() {
 
     let end = t0 + Duration::from_millis(1200);
     tool_use_end(&mut r, &mut scene, id, Some("t1"), end, Transport::Hook);
-    assert!(
-        matches!(scene.agents.get(&id).unwrap().state, ActivityState::Idle),
-        "the approved tool's end must still resolve the wait, got {:?}",
-        scene.agents.get(&id).unwrap().state
+    // agent-office: a live CC hook call opens the turn its unseen prompt would
+    // have, so the call's end leaves the figure thinking until the turn ends.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None },
+        "the approved tool's end must still resolve the wait"
     );
+    turn_end(&mut r, &mut scene, id, end, Transport::Hook);
+    assert_eq!(scene.agents[&id].state, ActivityState::Idle);
 }
 
 #[test]
@@ -854,6 +892,13 @@ fn an_answered_cc_prompt_shows_the_parallel_call_still_running() {
         &mut scene,
         json!({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_use_id": "tB"}),
     );
+    // agent-office: CC brackets its turns, so the last call's end leaves the
+    // figure thinking and only `Stop` idles it.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None }
+    );
+    hook(&mut r, &mut scene, json!({"hook_event_name": "Stop"}));
     assert_eq!(scene.agents[&id].state, ActivityState::Idle);
 }
 
@@ -1813,8 +1858,10 @@ fn a_bracketed_turn_runs_between_its_items_and_settles_at_its_end() {
 #[test]
 fn a_turn_start_on_a_source_that_does_not_bracket_its_turns_shows_nothing() {
     let (mut r, mut scene) = (Reducer::new(), SceneState::uniform(4));
-    let id = AgentId::from_parts("claude-code", "ses_cc");
-    start_as(&mut r, &mut scene, id, "claude-code");
+    // agent-office: claude-code brackets its turns here, so copilot stands in
+    // as the source that does not.
+    let id = AgentId::from_parts("copilot", "ses_cp");
+    start_as(&mut r, &mut scene, id, "copilot");
     let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     apply(
         &mut r,
@@ -2207,6 +2254,13 @@ fn a_cc_prompt_holds_its_tools_pending_call() {
         "another tool's end answers nothing"
     );
     feed(&mut r, &mut scene, cc_hook("PostToolUse", bash), t0);
+    // agent-office: CC brackets its turns, so the last call's end leaves the
+    // figure thinking and only `Stop` idles it.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None }
+    );
+    feed(&mut r, &mut scene, cc_hook("Stop", json!({})), t0);
     assert_eq!(scene.agents[&id].state, ActivityState::Idle);
 }
 
@@ -2245,6 +2299,13 @@ fn a_cc_pre_use_delivered_after_its_prompt_joins_it() {
         scene.agents[&id].state
     );
     feed(&mut r, &mut scene, cc_hook("PostToolUse", read), t0);
+    // agent-office: CC brackets its turns, so the last call's end leaves the
+    // figure thinking and only `Stop` idles it.
+    assert_eq!(
+        scene.agents[&id].state,
+        ActivityState::Running { item: None }
+    );
+    feed(&mut r, &mut scene, cc_hook("Stop", json!({})), t0);
     assert_eq!(scene.agents[&id].state, ActivityState::Idle);
 }
 
