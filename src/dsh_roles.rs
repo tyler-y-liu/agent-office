@@ -388,4 +388,28 @@ mod tests {
         assert_eq!(state_of(Some(&whitespace), &current), State::Stale);
         assert_eq!(state_of(Some("// mine\n"), &current), State::Foreign);
     }
+
+    /// The plugin evaluates only the `!!js` expressions it knows; any other
+    /// reads as a truthy `disabled` and silently drops that tool from every
+    /// role. A Standard preset copied from a newer DSH must not slip one in.
+    #[test]
+    fn every_disabled_expression_in_the_standard_preset_is_evaluated() {
+        fn walk(rows: &serde_json::Value, out: &mut Vec<String>) {
+            for row in rows.as_array().into_iter().flatten() {
+                if let Some(e) = row["disabled"]["__agentOfficeJs"].as_str() {
+                    out.push(e.to_owned());
+                }
+                walk(&row["config"], out);
+            }
+        }
+        let mut found = Vec::new();
+        walk(&serde_json::from_str(STANDARD_PLUGINS).unwrap(), &mut found);
+        assert!(!found.is_empty());
+        for expression in found {
+            assert!(
+                TEMPLATE.contains(&format!("if (expression === {}) return", serde_json::to_string(&expression).unwrap())),
+                "unhandled !!js expression: {expression}"
+            );
+        }
+    }
 }

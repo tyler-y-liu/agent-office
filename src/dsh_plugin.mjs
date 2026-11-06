@@ -395,7 +395,16 @@ export function apply(ctx) {
 
         const agentPreset = `office-${request.role}`
         ensureActive()
-        const created = await ctx.sessionController.create({ cwd: request.cwd, agentPreset })
+        // A Session joins a sidebar Workspace only when created by its id; by
+        // cwd alone it belongs to none, and is lost once you look away. The
+        // registry reuses the directory's Workspace or registers one, as Add
+        // workspace does. A Host without it still gets the Session by cwd.
+        const registry = ctx.get("workspaceRegistry")
+        const workspace = registry ? await registry.create(request.cwd) : undefined
+        ensureActive()
+        const created = await ctx.sessionController.create(
+          workspace ? { workspaceId: workspace.id, agentPreset } : { cwd: request.cwd, agentPreset },
+        )
         if (typeof created?.sessionId !== "string" || !created.sessionId) {
           throw new Error("DSH did not return a session id")
         }

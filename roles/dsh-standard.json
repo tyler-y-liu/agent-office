@@ -33,7 +33,10 @@
   },
   {
     "id": "tool-fs",
-    "name": "@deepseek-ai/dsh-tool-fs"
+    "name": "@deepseek-ai/dsh-tool-fs",
+    "config": {
+      "applyPatch": false
+    }
   },
   {
     "id": "tool-fs-search",
@@ -124,16 +127,13 @@
         "name": "@deepseek-ai/dsh-tool-subagent-control"
       },
       {
-        "id": "tool-subagent-list-agents",
-        "name": "@deepseek-ai/dsh-tool-subagent-control/list-agents"
-      },
-      {
         "id": "tool-subagent",
         "name": "@deepseek-ai/dsh-tool-subagent",
         "config": {
           "provider": "spawn",
           "toolName": "subagent",
-          "modelSelectionSettings": true
+          "modelSelection": true,
+          "modelDiscovery": true
         }
       },
       {
@@ -183,7 +183,9 @@
   {
     "id": "tool-plugin-manager",
     "name": "@deepseek-ai/dsh-plugin-manager/tools",
-    "disabled": true
+    "disabled": {
+      "__agentOfficeJs": "!ctx.get('profileContext')"
+    }
   },
   {
     "id": "tool-plugin-market",

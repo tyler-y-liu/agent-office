@@ -9,24 +9,25 @@ export const name = "agent-office-roles"
 // put preset-free profiles such as headless into a permanent pending state.
 export const inject = []
 
-function platformExpression(row) {
+function platformExpression(ctx, row) {
   const expression = row?.disabled?.__agentOfficeJs
   if (expression === "process.platform === 'win32'") return process.platform === "win32"
   if (expression === "process.platform !== 'win32'") return process.platform !== "win32"
+  if (expression === "!ctx.get('profileContext')") return !ctx.get("profileContext")
   return row?.disabled
 }
 
-function materialize(rows) {
+function materialize(ctx, rows) {
   return rows.map((original) => {
     const row = structuredClone(original)
-    if ("disabled" in row) row.disabled = platformExpression(row)
-    if (Array.isArray(row.config)) row.config = materialize(row.config)
+    if ("disabled" in row) row.disabled = platformExpression(ctx, row)
+    if (Array.isArray(row.config)) row.config = materialize(ctx, row.config)
     return row
   })
 }
 
-function pluginsFor(role) {
-  return materialize(role.plugins)
+function pluginsFor(ctx, role) {
+  return materialize(ctx, role.plugins)
 }
 
 export function apply(ctx) {
@@ -42,7 +43,7 @@ export function apply(ctx) {
             name: role.name,
             description: role.description,
             order: role.order,
-            plugins: pluginsFor(role),
+            plugins: pluginsFor(ctx, role),
           }))
         }
       } catch (error) {

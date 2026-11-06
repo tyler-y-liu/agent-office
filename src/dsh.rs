@@ -348,8 +348,12 @@ fn says_what_you_view(plugin: &str) -> bool {
     plugin.contains("const VIEWING = ")
 }
 
+/// One from before Workspaces creates Sessions no sidebar lists: once you
+/// look away from a dispatch, it is gone.
 fn supports_dispatch(plugin: &str) -> bool {
-    plugin.contains("const DISPATCH = ") && plugin.contains("sessionController.create")
+    plugin.contains("const DISPATCH = ")
+        && plugin.contains("sessionController.create")
+        && plugin.contains("workspaceId: workspace.id")
 }
 
 #[cfg(test)]
@@ -371,6 +375,8 @@ mod tests {
         // would only time out in the spool.
         assert!(supports_dispatch(TEMPLATE));
         assert!(!supports_dispatch(&TEMPLATE.replace("sessionController.create", "sessionController.nope")));
+        // Nor one that creates by cwd alone: its Sessions join no Workspace.
+        assert!(!supports_dispatch(&TEMPLATE.replace("workspaceId: workspace.id", "cwd: request.cwd")));
     }
 
     /// pixtuoid's row, the user's own rows and their comments must survive a
