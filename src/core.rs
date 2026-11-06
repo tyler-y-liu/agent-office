@@ -537,8 +537,19 @@ impl Core {
             Action::Down | Action::Up => {
                 let delta = if action == Action::Down { 1 } else { -1 };
                 let views = self.views_rx.borrow().clone();
-                let order = panel::order(&self.scene(), &views, SystemTime::now(), &self.ui.seen);
-                self.ui.selected = panel::step(&order, self.ui.selected, delta);
+                let (scene, now) = (self.scene(), SystemTime::now());
+                let order = panel::order(&scene, &views, now, &self.ui.seen);
+                // Through the rows as shown: a folded card is not stepped onto.
+                let (shown, _) = panel::fold(
+                    &order,
+                    &scene,
+                    &views,
+                    now,
+                    &self.ui.seen,
+                    self.ui.selected,
+                    self.ui.expanded,
+                );
+                self.ui.selected = panel::step(&shown, self.ui.selected, delta);
                 self.ui.reveal = true;
                 self.follow(floors);
             }

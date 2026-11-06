@@ -347,6 +347,65 @@ fn push_tree(cc: &[&AgentSlot], slot: &AgentSlot, depth: u8, out: &mut Vec<(Agen
     }
 }
 
+/// `order` as the panel lists it: in each tree, the subagents that are done
+/// (and whose own subagents are) fold into a line on the root's card, so a
+/// fan-out of a dozen finished helpers no longer buries the list. A tree
+/// opens while you look into it: its root selected and expanded, or one of
+/// its subagents selected. Returns the shown rows and how many each root
+/// folded.
+pub fn fold(
+    order: &[(AgentId, u8)],
+    scene: &SceneState,
+    views: &TaskViews,
+    now: SystemTime,
+    seen: &HashMap<AgentId, SystemTime>,
+    selected: Option<AgentId>,
+    expanded: bool,
+) -> (Vec<(AgentId, u8)>, HashMap<AgentId, usize>) {
+    let settled = |id: &AgentId| {
+        scene.agents.get(id).is_some_and(|s| {
+            matches!(
+                Group::of(s, views.get(id), now, read_since_idle(s, seen)),
+                Group::Done | Group::Idle
+            )
+        })
+    };
+    let mut shown = Vec::with_capacity(order.len());
+    let mut folded = HashMap::new();
+    let mut start = 0;
+    while start < order.len() {
+        let end = order[start + 1..]
+            .iter()
+            .position(|(_, d)| *d == 0)
+            .map_or(order.len(), |p| start + 1 + p);
+        let tree = &order[start..end];
+        let root = tree[0].0;
+        let open = selected
+            .is_some_and(|s| tree.iter().any(|(id, _)| *id == s) && (expanded || s != root));
+        let hidden: Vec<bool> = (0..tree.len())
+            .map(|i| {
+                let d = tree[i].1;
+                d > 0
+                    && tree[i..]
+                        .iter()
+                        .enumerate()
+                        .take_while(|(j, (_, dj))| *j == 0 || *dj > d)
+                        .all(|(_, (id, _))| settled(id))
+            })
+            .collect();
+        let n = hidden.iter().filter(|&&h| h).count();
+        // One folded card saves no row: its fold line would take its place.
+        if open || n < 2 {
+            shown.extend_from_slice(tree);
+        } else {
+            folded.insert(root, n);
+            shown.extend(tree.iter().zip(&hidden).filter(|(_, h)| !**h).map(|(r, _)| *r));
+        }
+        start = end;
+    }
+    (shown, folded)
+}
+
 /// Move the selection `delta` rows through `order`, starting at the top.
 pub fn step(order: &[(AgentId, u8)], cur: Option<AgentId>, delta: isize) -> Option<AgentId> {
     if order.is_empty() {
@@ -984,6 +1043,15 @@ pub fn render(
         }
         return Drawn::default();
     }
+    let (order, folded) = fold(
+        &order,
+        scene,
+        views,
+        now,
+        &state.seen,
+        state.selected,
+        state.expanded,
+    );
     let mut root_group = Group::Working;
     let cards: Vec<Card> = order
         .iter()
@@ -1012,6 +1080,19 @@ pub fn render(
                 if !sel {
                     lines.truncate(1);
                 }
+            }
+            if let Some(n) = folded.get(id) {
+                let text = crate::tr!(
+                    "└ {} 个子代理已做完 · 回车展开",
+                    "└ {} subagents done · Enter shows them",
+                    n
+                );
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", truncate_cells(&text, inner.width.saturating_sub(2))),
+                    Style::default().fg(DIM),
+                )));
+            }
+            if group == Group::Idle {
                 lines = lines.into_iter().map(faded).collect();
             }
             if group == Group::Waiting {
@@ -1297,6 +1378,62 @@ mod tests {
             o[2].1, 2,
             "a subagent's own subagent is listed, one level deeper"
         );
+    }
+
+    /// A workflow fanning out a dozen helpers made the list a page of
+    /// finished cards: the done ones fold into their root's card, the ones
+    /// still working stay in sight, and looking into the tree opens it.
+    #[test]
+    fn finished_subagents_fold_until_you_open_their_tree() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let a = start(&mut scene, &mut r, "a", None, t0);
+        let subs: Vec<AgentId> = (1..=4u64)
+            .map(|i| {
+                let at = t0 + Duration::from_secs(i);
+                start(&mut scene, &mut r, &format!("agent-s{i}"), Some(a), at)
+            })
+            .collect();
+        let busy = subs[3];
+        scene.agents.get_mut(&busy).unwrap().state = ActivityState::Running { item: None };
+        // A done subagent with a working one under it must stay, or the
+        // working one would hang under the wrong parent.
+        let at = t0 + Duration::from_secs(9);
+        let nested = start(&mut scene, &mut r, "agent-n", Some(subs[0]), at);
+        scene.agents.get_mut(&nested).unwrap().state = ActivityState::Running { item: None };
+        let views = TaskViews::default();
+        let now = t0 + Duration::from_secs(10);
+        let seen = HashMap::new();
+        let o = order(&scene, &views, now, &seen);
+        let ids = |rows: &[(AgentId, u8)]| rows.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+
+        let (shown, folded) = fold(&o, &scene, &views, now, &seen, None, false);
+        assert_eq!(ids(&shown), vec![a, subs[0], nested, busy]);
+        assert_eq!(folded.get(&a), Some(&2));
+        let area = Rect::new(0, 0, 60, 40);
+        let mut buf = Buffer::empty(area);
+        let mut state = PanelState::default();
+        let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
+        // A wide glyph's second cell holds a space.
+        let text: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .filter(|s| *s != " ")
+            .collect();
+        assert!(text.contains("2个子代理已做完"), "the fold says how many it hides: {text}");
+        assert!(!drawn.rows.iter().any(|(_, id)| *id == subs[1] || *id == subs[2]));
+        let next = step(&shown, Some(a), 1);
+        assert_eq!(next, Some(subs[0]), "folded cards are stepped over");
+
+        let (shown, _) = fold(&o, &scene, &views, now, &seen, Some(a), false);
+        assert_eq!(shown.len(), 4, "selecting the root alone keeps it folded");
+        let (shown, folded) = fold(&o, &scene, &views, now, &seen, Some(a), true);
+        assert_eq!(shown, o, "expanding the root shows every subagent");
+        assert!(folded.is_empty());
+        let (shown, _) = fold(&o, &scene, &views, now, &seen, Some(subs[1]), false);
+        assert_eq!(shown, o, "with one of its subagents selected the tree stays open");
     }
 
     /// More sessions than fit must be reachable by the wheel, not only by
