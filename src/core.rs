@@ -226,6 +226,37 @@ pub fn as_seen(
     Arc::new(drawn)
 }
 
+/// `scene` with each subagent named after its parent and its post: Claude
+/// Code labels every one "subagent", so a PM's helpers all read
+/// "subag…·1", "subag…·2", saying neither whose they are nor what they do.
+pub fn named_subagents(scene: &Arc<SceneState>, views: &tasks::TaskViews) -> Arc<SceneState> {
+    let names: Vec<(AgentId, String)> = scene
+        .agents
+        .values()
+        .filter(|s| &*s.label == "subagent")
+        .filter_map(|s| {
+            let parent = scene.agents.get(s.parent_id.as_ref()?)?;
+            let view = views.get(&s.agent_id);
+            let what = match view.and_then(|v| v.role) {
+                Some(r) => r.name().to_owned(),
+                None => view.and_then(|v| v.agent_type.clone())?,
+            };
+            let of = pixtuoid_scene::badge::shown_label(&parent.label);
+            Some((s.agent_id, format!("{of}›{what}")))
+        })
+        .collect();
+    if names.is_empty() {
+        return Arc::clone(scene);
+    }
+    let mut named = (**scene).clone();
+    for (id, name) in names {
+        if let Some(s) = named.agents.get_mut(&id) {
+            s.label = pixtuoid_core::state::SlotLabel::renamed(name);
+        }
+    }
+    Arc::new(named)
+}
+
 /// `scene` with each idle session's idle stretch starting no later than its
 /// transcript's last write. A session found already open when agent-office
 /// starts gets a fresh slot that reads idle since launch, however long ago it
@@ -346,7 +377,10 @@ impl Core {
 
     /// Every live session, as the transcripts date their idle stretches.
     fn live(&self, views: &tasks::TaskViews) -> Arc<SceneState> {
-        idle_since_written(&self.pipe.scene_rx.borrow().clone(), views)
+        named_subagents(
+            &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+            views,
+        )
     }
 
     /// The sessions the window shows: [`without_long_idle`] of the live ones.
@@ -846,6 +880,62 @@ fn set_hints_and_status(buf: &mut Buffer, area: Rect, hints: &Line, status: &Lin
 
 #[cfg(test)]
 mod tests {
+
+    /// Every Claude Code subagent is labelled "subagent": a PM's helpers
+    /// read "subag…·1", "subag…·2", saying neither whose they are nor what
+    /// they do. Named after the parent and the post, they say both.
+    #[test]
+    fn a_subagent_is_named_after_its_parent_and_post() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let mut start = |sid: &str, parent: Option<AgentId>| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/work/shop-app".into(),
+                    parent_id: parent,
+                },
+                t0,
+                Transport::Hook,
+            );
+            id
+        };
+        let pm = start("pm", None);
+        let fe = start("fe", Some(pm));
+        let explore = start("ex", Some(pm));
+        let plain = start("plain", Some(pm));
+        for id in [fe, explore, plain] {
+            scene.agents.get_mut(&id).unwrap().label =
+                pixtuoid_core::state::SlotLabel::renamed("subagent");
+        }
+        let views: tasks::TaskViews = Arc::new(HashMap::from([
+            (
+                fe,
+                tasks::TaskView {
+                    role: Some(crate::roles::Role::Frontend),
+                    ..tasks::TaskView::default()
+                },
+            ),
+            (
+                explore,
+                tasks::TaskView {
+                    agent_type: Some("Explore".into()),
+                    ..tasks::TaskView::default()
+                },
+            ),
+        ]));
+        let named = named_subagents(&Arc::new(scene), &views);
+        assert_eq!(&*named.agents[&fe].label, "shop-app›前端");
+        assert_eq!(&*named.agents[&explore].label, "shop-app›Explore");
+        // Nothing known of it yet: left as it was rather than guessed.
+        assert_eq!(&*named.agents[&plain].label, "subagent");
+        assert!(named.agents[&pm].label.ends_with("shop-app"));
+    }
     use super::*;
     use pixtuoid_core::Reducer;
     use pixtuoid_core::source::{AgentEvent, Transport};
