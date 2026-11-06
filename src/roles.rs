@@ -33,6 +33,7 @@ pub struct Post {
     pub abbr: &'static str,
     pub ink: Rgb,
     template: &'static str,
+    template_en: &'static str,
 }
 
 /// What a role's chip sits on, its ink the text: a block of the ink itself
@@ -56,6 +57,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "PD",
         ink: ink(0xe0, 0x8f, 0x5a),
         template: include_str!("../roles/office-product.md"),
+        template_en: include_str!("../roles/en/office-product.md"),
     },
     Post {
         role: Role::Ux,
@@ -66,6 +68,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "UX",
         ink: ink(0xee, 0x86, 0xd0),
         template: include_str!("../roles/office-ux.md"),
+        template_en: include_str!("../roles/en/office-ux.md"),
     },
     Post {
         role: Role::Architect,
@@ -76,6 +79,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "AR",
         ink: ink(0x7f, 0x8c, 0xf0),
         template: include_str!("../roles/office-architect.md"),
+        template_en: include_str!("../roles/en/office-architect.md"),
     },
     Post {
         role: Role::Frontend,
@@ -86,6 +90,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "FE",
         ink: ink(0x4f, 0xa8, 0xe8),
         template: include_str!("../roles/office-frontend.md"),
+        template_en: include_str!("../roles/en/office-frontend.md"),
     },
     Post {
         role: Role::Backend,
@@ -96,6 +101,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "BE",
         ink: ink(0x3f, 0xa8, 0xb8),
         template: include_str!("../roles/office-backend.md"),
+        template_en: include_str!("../roles/en/office-backend.md"),
     },
     Post {
         role: Role::Qa,
@@ -106,6 +112,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "QA",
         ink: ink(0x5c, 0xc8, 0xd8),
         template: include_str!("../roles/office-qa.md"),
+        template_en: include_str!("../roles/en/office-qa.md"),
     },
     Post {
         role: Role::Devops,
@@ -116,6 +123,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "OPS",
         ink: ink(0xc9, 0xa2, 0x3a),
         template: include_str!("../roles/office-devops.md"),
+        template_en: include_str!("../roles/en/office-devops.md"),
     },
     Post {
         role: Role::Reviewer,
@@ -126,6 +134,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "RV",
         ink: ink(0x8a, 0x9b, 0xb0),
         template: include_str!("../roles/office-reviewer.md"),
+        template_en: include_str!("../roles/en/office-reviewer.md"),
     },
     Post {
         role: Role::Pm,
@@ -136,6 +145,7 @@ pub const ROSTER: &[Post] = &[
         abbr: "PM",
         ink: ink(0xc4, 0x9c, 0xf0),
         template: include_str!("../roles/office-pm.md"),
+        template_en: include_str!("../roles/en/office-pm.md"),
     },
 ];
 
@@ -190,17 +200,40 @@ pub fn parse_marker(text: &str) -> Option<(Role, &str)> {
     Some((Role::of_id(id)?, rest))
 }
 
-/// The line a dispatched prompt's task starts on, after the role's card.
-pub const TASK_HEAD: &str = "任务：";
+/// The line a dispatched prompt's task starts on, after the role's card:
+/// Chinese, then English.
+const TASK_HEADS: [&str; 2] = ["任务：", "Task: "];
 /// What a prompt dispatched without a task says in its place.
-pub const NO_TASK: &str = "还没定，先问我要做什么。";
+const NO_TASKS: [&str; 2] = ["还没定，先问我要做什么。", "Not set yet: ask me what to do first."];
+
+fn task_head() -> &'static str {
+    crate::i18n::t(TASK_HEADS[0], TASK_HEADS[1])
+}
 
 /// The task in what follows a marker: past the card when the prompt was
 /// dispatched with one, else all of it; `None` when there is none yet.
+/// Either language's head counts: a transcript outlives a change of
+/// `AGENT_OFFICE_LANG`. The earliest one is the real head; a later one is
+/// inside the task, e.g. a relayed reply in the other language.
 pub fn task_of(rest: &str) -> Option<&str> {
-    let head = format!("\n{TASK_HEAD}");
-    let task = rest.split_once(&*head).map_or(rest, |(_, t)| t).trim();
-    (!task.is_empty() && task != NO_TASK).then_some(task)
+    let task = TASK_HEADS
+        .iter()
+        .filter_map(|h| {
+            let head = format!("\n{h}");
+            rest.find(&*head).map(|i| (i, i + head.len()))
+        })
+        .min()
+        .map_or(rest, |(_, end)| &rest[end..])
+        .trim();
+    (!task.is_empty() && !NO_TASKS.contains(&task)).then_some(task)
+}
+
+impl Post {
+    /// Its agent file in the UI's language, so a role answers in the
+    /// language its user reads.
+    fn template(&self) -> &'static str {
+        crate::i18n::t(self.template, self.template_en)
+    }
 }
 
 fn frontmatter_end(template: &str) -> usize {
@@ -213,7 +246,7 @@ fn frontmatter_end(template: &str) -> usize {
 /// The short part of a role's brief: what it does, without its checklist,
 /// for a prompt to carry in full.
 pub fn card(role: Role) -> &'static str {
-    let t = role.post().template;
+    let t = role.post().template();
     let body = &t[frontmatter_end(t)..];
     body.split("\n## ").next().unwrap_or(body).trim()
 }
@@ -224,7 +257,7 @@ const MARK: &str = "<!-- agent-office role=";
 /// A role's file as installed: its template and our mark, with a hash of
 /// the template so an edit by hand is told from a stale copy.
 fn rendered(post: &Post) -> String {
-    let body = post.template.trim_end();
+    let body = post.template().trim_end();
     let sha = crate::tasks::memo::key(&[body]);
     format!("{body}\n{MARK}{} sha={sha} -->\n", post.id)
 }
@@ -444,13 +477,23 @@ pub fn doctor_line() -> (bool, String) {
 pub fn prompt(role: Role, task: &str, with_card: bool) -> String {
     let post = role.post();
     let task = task.trim();
-    let task = if task.is_empty() { NO_TASK } else { task };
+    let task = if task.is_empty() {
+        crate::i18n::t(NO_TASKS[0], NO_TASKS[1])
+    } else {
+        task
+    };
     let card = if with_card {
         format!("\n{}\n", card(role))
     } else {
         String::new()
     };
-    format!("[office:{}] 角色：{}\n{card}\n{TASK_HEAD}{task}", post.id, post.zh)
+    let label = crate::i18n::t("角色：", "Role: ");
+    format!(
+        "[office:{}] {label}{}\n{card}\n{}{task}",
+        post.id,
+        role.name(),
+        task_head()
+    )
 }
 
 /// The card a relay picks up from: what the selected session came to.
@@ -497,24 +540,29 @@ pub fn relay_task(
     stuck: Option<&str>,
     cwd: &Path,
 ) -> String {
-    let mut out = format!("接着「{name}」的活往下做。\n");
+    let mut out = crate::tr!(
+        "接着「{}」的活往下做。\n",
+        "Pick up where \"{}\" left off.\n",
+        name
+    );
     if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
         let t: String = t.chars().take(RELAY_REPLY_CHARS).collect();
-        out.push_str(&format!("它的任务：{t}\n"));
+        out.push_str(&crate::tr!("它的任务：{}\n", "Its task: {}\n", t));
     }
     if let (After::Stuck, Some(why)) = (after, stuck) {
-        out.push_str(&format!("它卡住了：{why}\n"));
+        out.push_str(&crate::tr!("它卡住了：{}\n", "It got stuck: {}\n", why));
     }
     if let Some(c) = came_to.map(str::trim).filter(|c| !c.is_empty()) {
         let c: String = c.chars().take(RELAY_REPLY_CHARS).collect();
         let head = match after {
-            After::Done => "它的结论",
-            After::Stuck => "它最后说的",
+            After::Done => crate::i18n::t("它的结论：", "What it came to: "),
+            After::Stuck => crate::i18n::t("它最后说的：", "The last it said: "),
         };
-        out.push_str(&format!("{head}：{c}\n"));
+        out.push_str(&format!("{head}{c}\n"));
     }
-    out.push_str(&format!(
+    out.push_str(&crate::tr!(
         "它的改动在：{}\n先看它改了什么（git status / git diff），再做你这个角色该做的。",
+        "Its changes are in: {}\nLook at what it changed first (git status / git diff), then do your role's part.",
         cwd.display()
     ));
     out
@@ -741,23 +789,60 @@ mod tests {
     /// office's detection and a PM's `subagent_type` use `office-<id>`: a
     /// template named otherwise would install a role nobody can reach or
     /// recognise.
+    use crate::i18n::{with, Lang};
+
+    const LANGS: [Lang; 2] = [Lang::Zh, Lang::En];
+
     #[test]
     fn every_template_is_named_office_its_id_and_installs_with_our_mark() {
+        for lang in LANGS {
+            with(lang, || {
+                for post in ROSTER {
+                    let t = post.template();
+                    let name = format!("\nname: office-{}\n", post.id);
+                    assert!(t.starts_with("---\n"), "{} {lang:?}", post.id);
+                    assert!(t.contains(&name), "{} {lang:?}", post.id);
+                    assert!(t.contains("\ndescription: "), "{} {lang:?}", post.id);
+                    assert_eq!(
+                        state_of(post, Some(&rendered(post))),
+                        State::Ours { current: true },
+                        "{} {lang:?}",
+                        post.id
+                    );
+                    assert_eq!(
+                        Role::of_agent_type(&post.role.agent_name()),
+                        Some(post.role)
+                    );
+                }
+            });
+        }
+    }
+
+    /// The English file is a translation, not a different role: a reviewer
+    /// or architect that could edit in one language but not the other
+    /// would break the read-only promise for half the users, and a missing
+    /// section would leave a PM checking hand-backs that lack it.
+    #[test]
+    fn both_languages_grant_the_same_tools_and_keep_the_same_sections() {
+        let meta = |t: &'static str| -> Vec<&'static str> {
+            t[..frontmatter_end(t)]
+                .lines()
+                .filter(|l| !l.starts_with("description:"))
+                .collect()
+        };
+        let sections = |t: &str| t.matches("\n## ").count();
         for post in ROSTER {
-            let name = format!("\nname: office-{}\n", post.id);
-            assert!(post.template.starts_with("---\n"), "{}", post.id);
-            assert!(post.template.contains(&name), "{}", post.id);
-            assert!(post.template.contains("\ndescription: "), "{}", post.id);
+            assert_eq!(meta(post.template), meta(post.template_en), "{}", post.id);
             assert_eq!(
-                state_of(post, Some(&rendered(post))),
-                State::Ours { current: true },
+                sections(post.template),
+                sections(post.template_en),
                 "{}",
                 post.id
             );
-            assert_eq!(
-                Role::of_agent_type(&post.role.agent_name()),
-                Some(post.role)
-            );
+            // The last thing a role writes is what the PM and the next
+            // post read: every role says how to write it.
+            assert!(post.template.contains("\n## 交回格式\n"), "{}", post.id);
+            assert!(post.template_en.contains("\n## Hand-back format\n"), "{}", post.id);
         }
     }
 
@@ -765,12 +850,16 @@ mod tests {
     /// and not the checklist, and short enough not to eat the prompt's room.
     #[test]
     fn a_card_is_the_brief_without_frontmatter_or_checklist() {
-        for post in ROSTER {
-            let c = card(post.role);
-            assert!(!c.contains("name:"), "{}", post.id);
-            assert!(!c.contains("## "), "{}", post.id);
-            assert!(c.starts_with("你是这间办公室的"), "{}", post.id);
-            assert!(c.lines().count() <= 10, "{}", post.id);
+        for (lang, opening) in [(Lang::Zh, "你是这间办公室的"), (Lang::En, "You are the office's")] {
+            with(lang, || {
+                for post in ROSTER {
+                    let c = card(post.role);
+                    assert!(!c.contains("name:"), "{} {lang:?}", post.id);
+                    assert!(!c.contains("## "), "{} {lang:?}", post.id);
+                    assert!(c.starts_with(opening), "{} {lang:?}", post.id);
+                    assert!(c.lines().count() <= 10, "{} {lang:?}", post.id);
+                }
+            });
         }
     }
 
@@ -778,8 +867,82 @@ mod tests {
     /// it could only plan. A `tools:` list that forgot it would cut that off.
     #[test]
     fn the_pm_keeps_every_tool() {
-        let t = Role::Pm.post().template;
-        assert!(!t[..frontmatter_end(t)].contains("tools:"));
+        for t in [Role::Pm.post().template, Role::Pm.post().template_en] {
+            assert!(!t[..frontmatter_end(t)].contains("tools:"));
+        }
+    }
+
+    /// Roles installed in one language and the UI switched to the other:
+    /// `install` brings them over, since a role answers in the language of
+    /// its file, but a hand edit still stays.
+    #[test]
+    fn install_switches_the_roles_language_but_keeps_a_hand_edit() {
+        let dir = temp_dir("lang");
+        with(Lang::Zh, || install(&dir, false).unwrap());
+        let ux = path_of(&dir, Role::Ux.post());
+        std::fs::write(&ux, rendered(Role::Ux.post()).replace("设计师", "画师")).unwrap();
+        with(Lang::En, || {
+            let pm = Role::Pm.post();
+            assert_eq!(
+                state_of(pm, read(&path_of(&dir, pm)).unwrap().as_deref()),
+                State::Ours { current: false }
+            );
+            let out = install(&dir, false).unwrap();
+            assert_eq!(out.written.len(), ROSTER.len() - 1);
+            assert_eq!(out.kept_edited, ["ux"]);
+            let text = std::fs::read_to_string(path_of(&dir, pm)).unwrap();
+            assert!(text.contains("You are the office's project manager"));
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A transcript outlives a change of language: a session dispatched in
+    /// English still reads back as its role and task in a Chinese office,
+    /// and an English empty dispatch is still no task.
+    #[test]
+    fn a_prompt_in_either_language_reads_back_in_the_other() {
+        let (en, en_blank) = with(Lang::En, || {
+            (
+                prompt(Role::Backend, "add a /health endpoint", true),
+                prompt(Role::Qa, "", false),
+            )
+        });
+        assert!(en.starts_with("[office:backend] Role: Backend\n"), "{en}");
+        assert!(en.contains("You are the office's backend engineer"));
+        with(Lang::Zh, || {
+            let (role, rest) = parse_marker(&en).unwrap();
+            assert_eq!((role, task_of(rest)), (Role::Backend, Some("add a /health endpoint")));
+            let (_, rest) = parse_marker(&en_blank).unwrap();
+            assert_eq!(task_of(rest), None);
+        });
+        let zh = prompt(Role::Qa, "跑测试", true);
+        with(Lang::En, || {
+            let (_, rest) = parse_marker(&zh).unwrap();
+            assert_eq!(task_of(rest), Some("跑测试"));
+        });
+        // A relayed Chinese reply inside an English task is part of the task.
+        let mixed = with(Lang::En, || prompt(Role::Qa, "check it\n任务：上一棒的原话", true));
+        let (_, rest) = parse_marker(&mixed).unwrap();
+        assert_eq!(task_of(rest), Some("check it\n任务：上一棒的原话"));
+    }
+
+    /// An English relay must brief the next post as fully as a Chinese one.
+    #[test]
+    fn an_english_relay_carries_what_came_before() {
+        let task = with(Lang::En, || {
+            relay_task(
+                "api",
+                After::Stuck,
+                Some("fix login"),
+                Some("tried twice"),
+                Some("same test failed 5 times"),
+                Path::new("/work/api"),
+            )
+        });
+        for part in ["\"api\"", "fix login", "tried twice", "same test failed 5 times", "/work/api", "git diff"] {
+            assert!(task.contains(part), "{part} missing from {task}");
+        }
+        assert!(!task.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{task}");
     }
 
     #[test]
