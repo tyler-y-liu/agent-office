@@ -492,6 +492,59 @@ pub fn open_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `open_url`, waiting for `open` to say whether anything took the link:
+/// a dispatch must not report a session opened when no app claims
+/// `claude://`. Called from the window's thread, so the wait is bounded.
+pub fn open_url_checked(url: &str) -> Result<(), String> {
+    // Its output is dropped: stderr repeats the link, the whole prompt in it.
+    let child = std::process::Command::new("open")
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    opened(child.and_then(|c| exit_within(c, OPEN_WAIT)))
+}
+
+/// Long enough for `open` to fail on a link no app claims (it does so at
+/// once); a cold-starting app can hold it far longer.
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How `child` exited, or `None` if it is still running after `limit`; then
+/// it is reaped off this thread so it does not become a zombie.
+fn exit_within(
+    mut child: std::process::Child,
+    limit: std::time::Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if start.elapsed() >= limit {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// An `open` still running has found an app and is waiting on it to launch:
+/// the link has been taken, and the frame should not stall until it starts.
+fn opened(status: std::io::Result<Option<std::process::ExitStatus>>) -> Result<(), String> {
+    let status = status.map_err(|e| crate::tr!("open 失败：{e}", "open failed: {e}"))?;
+    match status {
+        None => Ok(()),
+        Some(s) if s.success() => Ok(()),
+        Some(s) => Err(crate::tr!(
+            "打不开 Claude 桌面 app（open {}）：装好它，或用 agent-office dispatch --terminal 在终端开",
+            "could not open the Claude desktop app (open {}): install it, or use agent-office dispatch --terminal",
+            s
+        )),
+    }
+}
+
 /// The live pid of CC session `session_id` and its registry entry.
 fn registry_entry(dir: &Path, session_id: &str) -> Result<(i32, serde_json::Value), String> {
     let live = live_cc_session_ids(dir).ok_or(crate::i18n::t(
@@ -543,6 +596,47 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// Without the desktop app nothing claims `claude://` and `open` exits
+    /// 1: a dispatch that called that success would say a session is
+    /// waiting when none is. The error must point to `--terminal` and must
+    /// not echo the link, which carries the whole prompt.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_nothing_opens_is_an_error_naming_the_way_round() {
+        use std::os::unix::process::ExitStatusExt;
+        let exit = |code: i32| Ok(Some(std::process::ExitStatus::from_raw(code << 8)));
+        assert_eq!(opened(exit(0)), Ok(()));
+        let err = opened(exit(1)).unwrap_err();
+        assert!(err.contains("--terminal"), "{err}");
+        let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(opened(missing).is_err());
+        // The real `open` on a scheme no app claims.
+        #[cfg(target_os = "macos")]
+        assert!(open_url_checked("agentofficenosuch://x").is_err());
+    }
+
+    /// `open` waits while a cold app starts: the window must not freeze
+    /// that long, and an `open` still running has taken the link, so it is
+    /// not reported as a failure. One that exits at once is still heard.
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_open_does_not_hold_the_caller() {
+        use std::time::{Duration, Instant};
+        let sh = |script: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap()
+        };
+        let start = Instant::now();
+        let slow = exit_within(sh("sleep 5"), Duration::from_millis(200)).unwrap();
+        assert!(slow.is_none());
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(opened(Ok(slow)), Ok(()));
+        let failed = exit_within(sh("exit 1"), Duration::from_secs(3)).unwrap();
+        assert!(opened(Ok(failed)).is_err());
+    }
 
     #[test]
     fn a_desktop_session_opens_by_its_host_id() {
