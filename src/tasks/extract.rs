@@ -52,9 +52,12 @@ pub struct Transcript {
     pub(super) cheering: Vec<(String, Cheer)>,
     /// The last thing worth cheering and when its result came in.
     pub cheer: Option<(Cheer, SystemTime)>,
-    /// The post its prompt's `[office:<id>]` marker gave it; a later prompt
-    /// without one keeps it, one with another changes it.
+    /// The post its prompt's `[office:<id>]` marker or DSH preset gave it; a
+    /// later prompt without one keeps it, one with another changes it.
     pub role: Option<Role>,
+    /// A DSH agent preset, including standard and other non-office presets.
+    /// An office preset wins over a marker; other presets still allow one.
+    pub agent_type: Option<String>,
     /// The last prompt was a role's marker with no task: the session was
     /// dispatched empty and can only ask what to do, so it waits on you
     /// whether or not a summary says it asked.
@@ -236,7 +239,14 @@ impl Transcript {
         let wanted = serde_json::from_str::<Kind>(line).is_ok_and(|k| {
             matches!(
                 k.kind.as_deref(),
-                Some("user" | "assistant" | "event_msg" | "response_item" | "last-prompt")
+                Some(
+                    "user"
+                        | "assistant"
+                        | "event_msg"
+                        | "response_item"
+                        | "last-prompt"
+                        | "agent-office",
+                )
             )
         });
         if !wanted {
@@ -249,6 +259,16 @@ impl Transcript {
             Some("user") => self.feed_user(&v),
             Some("assistant") => self.feed_assistant(&v),
             Some("event_msg" | "response_item") => self.feed_codex(&v),
+            Some("agent-office") => {
+                if let Some(t) = v.get("agentPreset").and_then(Value::as_str) {
+                    self.agent_type = Some(t.to_owned());
+                    // Only an office preset is itself a role. Standard still
+                    // permits the deliberate manual marker used before presets.
+                    if let Some(role) = Role::of_agent_type(t) {
+                        self.role = Some(role);
+                    }
+                }
+            }
             // Claude Code's own note of the last prompt: what a tail read
             // that starts past the prompt itself still finds.
             Some("last-prompt") => {
@@ -265,7 +285,10 @@ impl Transcript {
         // not its task: kept out of the summary and the raw-prompt line.
         let text = match crate::roles::parse_marker(text) {
             Some((role, rest)) => {
-                self.role = Some(role);
+                let typed = self.agent_type.as_deref().and_then(Role::of_agent_type);
+                if typed.is_none() {
+                    self.role = Some(role);
+                }
                 let Some(task) = crate::roles::task_of(rest) else {
                     self.needs_task = true;
                     return;
@@ -791,8 +814,10 @@ pub fn sub_meta(transcript: &Path) -> Option<SubMeta> {
 /// gave it: that prompt is among the first few lines.
 const HEAD_READ: u64 = 256 << 10;
 
-/// The role a transcript's head gives it, read apart from the tail.
-fn head_role(f: &mut File) -> Option<Role> {
+/// The role and preset a transcript's head gives it, read apart from the
+/// tail. Both must survive: without the preset a later marker would override
+/// the identity established at the head.
+fn head_identity(f: &mut File) -> Option<(Option<Role>, Option<String>)> {
     let mut head = Vec::new();
     f.seek(SeekFrom::Start(0)).ok()?;
     f.take(HEAD_READ).read_to_end(&mut head).ok()?;
@@ -803,7 +828,7 @@ fn head_role(f: &mut File) -> Option<Role> {
             t.feed(s);
         }
     }
-    t.role
+    Some((t.role, t.agent_type))
 }
 
 /// Reads what a transcript gained since the last poll.
@@ -850,8 +875,11 @@ impl Tail {
             return Ok(false);
         }
         if self.offset == 0 && len > FIRST_READ {
-            // The role is set by the first prompt, which a tail read skips.
-            t.role = head_role(&mut f);
+            // The role and preset are set at the head, which a tail skips.
+            if let Some((role, agent_type)) = head_identity(&mut f) {
+                t.role = role;
+                t.agent_type = agent_type;
+            }
             self.offset = len - FIRST_READ;
             // Mid-line: drop up to the first newline as a partial.
             self.skip_partial = true;
@@ -1403,6 +1431,36 @@ mod tests {
             (l.role, l.latest_prompt()),
             (Some(Role::Qa), Some("跑一遍测试"))
         );
+    }
+
+    /// An office preset outranks a marker, while Standard still accepts a
+    /// deliberate manual office marker. Both paths show the same role.
+    #[test]
+    fn a_dsh_preset_outranks_the_prompt_marker() {
+        let identity =
+            |preset: &str| json!({"type":"agent-office","agentPreset":preset}).to_string();
+        let mut t = Transcript::default();
+        t.feed(&identity("office-architect"));
+        t.feed(&user(json!("[office:qa]\n任务：检查方案")));
+        assert_eq!(t.agent_type.as_deref(), Some("office-architect"));
+        assert_eq!(t.role, Some(Role::Architect));
+        assert_eq!(t.latest_prompt(), Some("检查方案"));
+
+        t.feed(&identity("standard"));
+        t.feed(&user(json!("[office:backend]\n任务：写接口")));
+        assert_eq!(t.agent_type.as_deref(), Some("standard"));
+        assert_eq!(t.role, Some(Role::Backend));
+        assert_eq!(t.latest_prompt(), Some("写接口"));
+
+        // Identity can also arrive after a marker was read: it replaces the
+        // earlier guess, and later markers cannot take the preset's place.
+        let mut late = Transcript::default();
+        late.feed(&user(json!("[office:qa]\n任务：跑测试")));
+        assert_eq!(late.role, Some(Role::Qa));
+        late.feed(&identity("office-reviewer"));
+        assert_eq!(late.role, Some(Role::Reviewer));
+        late.feed(&user(json!("[office:pm]\n任务：拆需求")));
+        assert_eq!(late.role, Some(Role::Reviewer));
     }
 
     /// The role is the session's post for good: the user's follow-ups carry

@@ -21,6 +21,22 @@ pub enum Role {
     Reviewer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Claude,
+    Dsh,
+}
+
+impl Backend {
+    fn of_id(id: &str) -> Option<Self> {
+        match id {
+            "claude" | "claude-code" => Some(Self::Claude),
+            "dsh" => Some(Self::Dsh),
+            _ => None,
+        }
+    }
+}
+
 pub struct Post {
     pub role: Role,
     pub id: &'static str,
@@ -231,12 +247,12 @@ pub fn task_of(rest: &str) -> Option<&str> {
 impl Post {
     /// Its agent file in the UI's language, so a role answers in the
     /// language its user reads.
-    fn template(&self) -> &'static str {
+    pub(crate) fn template(&self) -> &'static str {
         crate::i18n::t(self.template, self.template_en)
     }
 }
 
-fn frontmatter_end(template: &str) -> usize {
+pub(crate) fn frontmatter_end(template: &str) -> usize {
     template
         .strip_prefix("---\n")
         .and_then(|t| t.find("\n---\n"))
@@ -425,8 +441,37 @@ fn report(dir: &Path, verb: &str, out: &Outcome) {
     println!("目录：{}", dir.display());
 }
 
-/// `agent-office roles [install|remove] [--force]`.
+/// Pull the optional host out without disturbing the command's other words.
+/// Omitting it keeps every pre-DSH invocation on Claude Code.
+fn take_backend<'a>(args: &'a [&'a str]) -> Result<(Backend, Vec<&'a str>)> {
+    let mut backend = Backend::Claude;
+    let mut seen = false;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut it = args.iter().copied();
+    while let Some(arg) = it.next() {
+        let id = if arg == "--agent" {
+            Some(it.next().context("--agent 需要 claude 或 dsh")?)
+        } else {
+            arg.strip_prefix("--agent=")
+        };
+        if let Some(id) = id {
+            anyhow::ensure!(!seen, "--agent 只能给一个");
+            backend = Backend::of_id(id).with_context(|| format!("不认识 agent {id}：可选 claude、dsh"))?;
+            seen = true;
+        } else {
+            rest.push(arg);
+        }
+    }
+    Ok((backend, rest))
+}
+
+/// `agent-office roles [install|remove] [--force] [--agent claude|dsh]`.
 pub fn cli(args: &[&str]) -> Result<()> {
+    let (backend, args) = take_backend(args)?;
+    if backend == Backend::Dsh {
+        return crate::dsh_roles::cli(&args);
+    }
+    let args: &[&str] = &args;
     let dir = agents_dir()?;
     match args {
         [] => {
@@ -660,6 +705,7 @@ pub fn repo_root(dir: &Path) -> PathBuf {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Dispatch {
     pub role: Role,
+    pub backend: Backend,
     pub dir: Option<PathBuf>,
     pub task: String,
     pub terminal: bool,
@@ -670,12 +716,16 @@ fn roster_ids() -> String {
 }
 
 const DISPATCH_USAGE: &str =
-    "用法：agent-office dispatch (--role <角色> | --auto) [--dir <目录>] [--terminal] [任务…]";
+    "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh] [--dir <目录>] [--terminal] [任务…]";
 
 /// `dispatch`'s arguments: a role or `--auto` (the PM), and the words left
 /// over are the task.
 pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
-    let (mut role, mut dir, mut terminal, mut words) = (None, None, false, Vec::new());
+    // After `--`, even a word shaped like one of our flags is task text.
+    let options_end = args.iter().position(|a| *a == "--").unwrap_or(args.len());
+    let task_tail: Vec<&str> = args[options_end..].iter().skip(1).copied().collect();
+    let (backend, args) = take_backend(&args[..options_end])?;
+    let (mut role, mut dir, mut terminal, mut words) = (None, None, false, task_tail);
     let mut it = args.iter();
     while let Some(&a) = it.next() {
         match a {
@@ -699,6 +749,7 @@ pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
     let role = role.with_context(|| format!("{DISPATCH_USAGE}\n角色：{}", roster_ids()))?;
     Ok(Dispatch {
         role,
+        backend,
         dir,
         task: words.join(" "),
         terminal,
@@ -708,7 +759,27 @@ pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
 /// Why `role` cannot be dispatched yet, if it cannot: the PM hands work to
 /// the other roles as agents, which must be installed; a terminal session
 /// loads its own role as one.
-pub fn not_ready(role: Role, terminal: bool) -> Option<String> {
+pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String> {
+    if backend == Backend::Dsh {
+        if terminal {
+            return Some(crate::i18n::t(
+                "DSH 派活通过正在运行的 Host 创建会话，不支持 --terminal；去掉它再试",
+                "DSH dispatch creates a session through a running Host; omit --terminal",
+            ).into());
+        }
+        if !crate::dsh::installed() {
+            return Some(crate::i18n::t(
+                "DSH 事件插件还没接好：先运行 agent-office connect dsh，再重启 DSH",
+                "DSH events are not connected: run agent-office connect dsh and restart DSH",
+            ).into());
+        }
+        return (!crate::dsh_roles::installed()).then(|| {
+            crate::i18n::t(
+                "DSH 角色还没装好：先运行 agent-office roles install --agent dsh，再重启 DSH",
+                "DSH roles are not installed: run agent-office roles install --agent dsh and restart DSH",
+            ).into()
+        });
+    }
     let dir = agents_dir().ok()?;
     let states = status(&dir).ok()?;
     let missing = |r: Role| {
@@ -764,12 +835,53 @@ fn claude_bin() -> Option<PathBuf> {
     on_path.chain(known).find(|p| p.is_file())
 }
 
-/// Start a session as `role` on `task` in `dir`: in the desktop app, its new
-/// session opened with the prompt filled in; or here in the terminal.
-pub fn dispatch(role: Role, dir: &Path, task: &str, terminal: bool) -> Result<String> {
+/// Start a session as `role` on `task` in `dir`: in the selected host. DSH
+/// creates through its running Host; Claude opens its desktop app or terminal.
+pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: bool) -> Result<String> {
     folder_ready(dir)?;
-    if let Some(why) = not_ready(role, terminal) {
+    if let Some(why) = not_ready(backend, role, terminal) {
         anyhow::bail!(why);
+    }
+    if backend == Backend::Dsh {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let id = format!(
+            "{}-{stamp}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            role.post().id,
+        );
+        let submit = !task.trim().is_empty();
+        let result = crate::dsh_bridge::dispatch(
+            crate::dsh_bridge::DispatchRequest {
+                id,
+                role: role.post().id.into(),
+                cwd: dir.to_path_buf(),
+                prompt: prompt(role, task, false),
+                submit,
+            },
+            std::time::Duration::from_secs(10),
+        )?;
+        return Ok(if submit {
+            crate::tr!(
+                "已在 DeepSeek Harness 创建并提交「{}」会话（{}，{}）",
+                "created and submitted a {} relay in DeepSeek Harness ({}, {})",
+                role.name(),
+                dir.display(),
+                result.session_id,
+            ).to_owned()
+        } else {
+            crate::tr!(
+                "已在 DeepSeek Harness 建好「{}」空白会话（{}），在会话列表打开后写任务",
+                "created a blank {} session in DeepSeek Harness ({}); open it from the session list and write its task",
+                role.name(),
+                result.session_id,
+            ).to_owned()
+        });
     }
     if terminal {
         let bin = claude_bin().context("找不到 claude 命令：装好 Claude Code 或去掉 --terminal")?;
@@ -821,7 +933,7 @@ pub fn dispatch_cli(args: &[&str]) -> Result<()> {
             .with_context(|| format!("没有 {} 这个目录", p.display()))?,
         None => repo_root(&std::env::current_dir()?),
     };
-    println!("{}", dispatch(d.role, &dir, &d.task, d.terminal)?);
+    println!("{}", dispatch(d.backend, d.role, &dir, &d.task, d.terminal)?);
     Ok(())
 }
 
@@ -1284,6 +1396,7 @@ mod tests {
             d,
             Dispatch {
                 role: Role::Qa,
+                backend: Backend::Claude,
                 dir: Some("/x".into()),
                 task: "跑 测试".into(),
                 terminal: false
@@ -1291,6 +1404,12 @@ mod tests {
         );
         let auto = parse_dispatch(&["--auto", "--terminal", "做个功能"]).unwrap();
         assert_eq!((auto.role, auto.terminal), (Role::Pm, true));
+        let dsh = parse_dispatch(&["--role", "reviewer", "--agent", "dsh", "审查"]).unwrap();
+        assert_eq!((dsh.role, dsh.backend, dsh.task.as_str()), (Role::Reviewer, Backend::Dsh, "审查"));
+        assert!(parse_dispatch(&["--role", "qa", "--agent"]).is_err());
+        assert!(parse_dispatch(&["--role", "qa", "--agent", "other"]).is_err());
+        let literal = parse_dispatch(&["--role", "qa", "--", "--agent", "dsh"]).unwrap();
+        assert_eq!((literal.backend, literal.task.as_str()), (Backend::Claude, "--agent dsh"));
         assert!(parse_dispatch(&["--role", "qa", "--auto"]).is_err());
         let unknown = parse_dispatch(&["--role", "tester"]).unwrap_err().to_string();
         assert!(unknown.contains("qa") && unknown.contains("frontend"), "{unknown}");

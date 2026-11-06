@@ -37,6 +37,11 @@ pub fn viewing_dir() -> Option<PathBuf> {
     our_dir().map(|d| d.join("viewing"))
 }
 
+/// Local requests from `dispatch --agent dsh` to a running DSH host.
+pub fn dispatch_dir() -> Option<PathBuf> {
+    our_dir().map(|d| d.join("dispatch"))
+}
+
 fn plugin_path(dir: &Path) -> PathBuf {
     dir.join("agent-office-dsh.mjs")
 }
@@ -45,13 +50,14 @@ fn patch_path(home: &Path) -> PathBuf {
     home.join("cordis.patch.yml")
 }
 
-fn plugin_source(exe: &Path, transcripts: &Path, viewing: &Path) -> Result<String> {
+fn plugin_source(exe: &Path, transcripts: &Path, viewing: &Path, dispatch: &Path) -> Result<String> {
     // JSON string literals are valid JS string literals.
     let js = |p: &Path| serde_json::to_string(&p.display().to_string());
     Ok(TEMPLATE
         .replace("__HOOK_EXE__", &js(exe)?)
         .replace("__TRANSCRIPTS__", &js(transcripts)?)
-        .replace("__VIEWING__", &js(viewing)?))
+        .replace("__VIEWING__", &js(viewing)?)
+        .replace("__DISPATCH__", &js(dispatch)?))
 }
 
 /// The patch file's top-level sequence items, each with the comment lines
@@ -87,13 +93,17 @@ fn items(text: &str) -> Vec<String> {
 /// Whether an item is about our plugin alone: the insert row we wrote, or a
 /// row dsh's plugin manager added to disable it. An item that also names
 /// another plugin is not ours to drop.
-fn is_ours(item: &str) -> bool {
+fn is_plugin(item: &str, wanted: &str) -> bool {
     let ids: Vec<&str> = item
         .lines()
         .filter_map(|l| l.trim_start().trim_start_matches("- ").strip_prefix("id:"))
         .map(|v| v.trim().trim_matches('"'))
         .collect();
-    !ids.is_empty() && ids.iter().all(|id| *id == PLUGIN_ID)
+    !ids.is_empty() && ids.iter().all(|id| *id == wanted)
+}
+
+fn is_ours(item: &str) -> bool {
+    is_plugin(item, PLUGIN_ID)
 }
 
 /// A non-empty flow sequence (`[ {id: x} ]`, which dsh's yaml writer keeps
@@ -104,18 +114,18 @@ fn is_flow(text: &str) -> bool {
     t.starts_with('[') && text.trim() != "[]"
 }
 
-fn without_ours(text: &str) -> String {
+fn without_plugin(text: &str, wanted: &str) -> String {
     // We only ever write block items, so a flow sequence holds none of ours.
     if is_flow(text) {
         return text.to_owned();
     }
-    items(text).into_iter().filter(|i| !is_ours(i)).collect()
+    items(text).into_iter().filter(|i| !is_plugin(i, wanted)).collect()
 }
 
 /// What disconnect leaves: dsh's plugin manager refuses a patch that is not
 /// a sequence, and a file with no items left is null, not `[]`.
-fn after_disconnect(text: &str) -> String {
-    let kept = without_ours(text);
+fn after_unmount(text: &str, wanted: &str) -> String {
+    let kept = without_plugin(text, wanted);
     let no_items = kept
         .lines()
         .all(|l| l.trim().is_empty() || l.starts_with('#'));
@@ -126,7 +136,11 @@ fn after_disconnect(text: &str) -> String {
     }
 }
 
-fn with_ours(text: &str, plugin: &Path) -> Result<String> {
+fn after_disconnect(text: &str) -> String {
+    after_unmount(text, PLUGIN_ID)
+}
+
+fn with_plugin(text: &str, wanted: &str, plugin: &Path) -> Result<String> {
     anyhow::ensure!(
         !is_flow(text),
         crate::i18n::t(
@@ -135,14 +149,18 @@ fn with_ours(text: &str, plugin: &Path) -> Result<String> {
         )
     );
     let name = serde_json::to_string(&plugin.display().to_string())?;
-    let mut out = without_ours(text);
+    let mut out = without_plugin(text, wanted);
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(&format!(
-        "- insert:\n    - id: {PLUGIN_ID}\n      name: {name}\n"
+        "- insert:\n    - id: {wanted}\n      name: {name}\n"
     ));
     Ok(out)
+}
+
+fn with_ours(text: &str, plugin: &Path) -> Result<String> {
+    with_plugin(text, PLUGIN_ID, plugin)
 }
 
 fn read_patch(home: &Path) -> Result<String> {
@@ -163,6 +181,24 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
         .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))
 }
 
+pub(crate) fn plugin_mounted(home: &Path, wanted: &str) -> bool {
+    read_patch(home).is_ok_and(|text| items(&text).iter().any(|item| is_plugin(item, wanted)))
+}
+
+pub(crate) fn mount_plugin(home: &Path, wanted: &str, plugin: &Path) -> Result<()> {
+    let before = read_patch(home)?;
+    write_atomic(&patch_path(home), &with_plugin(&before, wanted, plugin)?)
+}
+
+pub(crate) fn unmount_plugin(home: &Path, wanted: &str) -> Result<()> {
+    let before = read_patch(home)?;
+    let after = after_unmount(&before, wanted);
+    if after != before {
+        write_atomic(&patch_path(home), &after)?;
+    }
+    Ok(())
+}
+
 /// `agent-office connect dsh`.
 pub fn connect() -> Result<()> {
     let home = home().context(crate::i18n::t(
@@ -181,11 +217,15 @@ pub fn connect() -> Result<()> {
         "找不到 dsh 目录",
         "cannot find the dsh directory",
     ))?;
+    let dispatch = dispatch_dir().context(crate::i18n::t(
+        "找不到 dsh 目录",
+        "cannot find the dsh directory",
+    ))?;
     std::fs::create_dir_all(&transcripts)
         .with_context(|| crate::tr!("建 {} 失败", "could not create {}", transcripts.display()))?;
     let exe = crate::hook::exe_for_hooks()?;
     let plugin = plugin_path(&dir);
-    std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing)?)
+    std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing, &dispatch)?)
         .with_context(|| crate::tr!("写 {} 失败", "could not write {}", plugin.display()))?;
     let before = read_patch(&home)?;
     write_atomic(&patch_path(&home), &with_ours(&before, &plugin)?)?;
@@ -236,7 +276,7 @@ pub fn installed() -> bool {
         return false;
     };
     std::fs::read_to_string(plugin_path(&dir))
-        .is_ok_and(|t| forwards_turn_start(&t) && says_what_you_view(&t))
+        .is_ok_and(|t| forwards_turn_start(&t) && says_what_you_view(&t) && supports_dispatch(&t))
         && read_patch(&home).is_ok_and(|t| items(&t).iter().any(|i| is_ours(i)))
 }
 
@@ -246,6 +286,10 @@ fn forwards_turn_start(plugin: &str) -> bool {
 
 fn says_what_you_view(plugin: &str) -> bool {
     plugin.contains("const VIEWING = ")
+}
+
+fn supports_dispatch(plugin: &str) -> bool {
+    plugin.contains("const DISPATCH = ") && plugin.contains("sessionController.create")
 }
 
 #[cfg(test)]
@@ -263,6 +307,10 @@ mod tests {
         assert!(!says_what_you_view(
             &TEMPLATE.replace("const VIEWING = ", "const X = ")
         ));
+        // Nor one from before dispatch: accepting work it cannot receive
+        // would only time out in the spool.
+        assert!(supports_dispatch(TEMPLATE));
+        assert!(!supports_dispatch(&TEMPLATE.replace("sessionController.create", "sessionController.nope")));
     }
 
     /// pixtuoid's row, the user's own rows and their comments must survive a
@@ -276,7 +324,7 @@ mod tests {
         assert_eq!(once, twice);
         assert_eq!(twice.matches("id: agent-office").count(), 1);
         assert!(twice.contains("name: \"/h/.dsh/agent-office/agent-office-dsh.mjs\""));
-        assert_eq!(without_ours(&twice), original);
+        assert_eq!(without_plugin(&twice, PLUGIN_ID), original);
     }
 
     /// dsh writes `[]` for an empty patch; appending a row after it would be
@@ -305,14 +353,23 @@ mod tests {
     fn a_flow_style_patch_is_refused_and_left_alone() {
         let flow = "[ { id: web, disabled: true } ]\n";
         assert!(with_ours(flow, Path::new("/x.mjs")).is_err());
-        assert_eq!(without_ours(flow), flow);
+        assert_eq!(without_plugin(flow, PLUGIN_ID), flow);
     }
 
     /// Disconnect must not take another plugin's row with it.
     #[test]
     fn an_insert_shared_with_another_plugin_is_kept() {
         let text = "- insert:\n    - id: pixtuoid\n      name: /p.mjs\n    - id: agent-office\n      name: /x.mjs\n";
-        assert_eq!(without_ours(text), text);
+        assert_eq!(without_plugin(text, PLUGIN_ID), text);
+    }
+
+    /// Roles and event forwarding have independent lifetimes: removing the
+    /// role presets must not disconnect the office's session events.
+    #[test]
+    fn removing_role_presets_keeps_the_event_plugin() {
+        let base = with_ours("", Path::new("/events.mjs")).unwrap();
+        let both = with_plugin(&base, "agent-office-roles", Path::new("/roles.mjs")).unwrap();
+        assert_eq!(after_unmount(&both, "agent-office-roles"), base);
     }
 
     /// Paths with quotes or backslashes must not break out of the JS string.
@@ -322,12 +379,14 @@ mod tests {
             Path::new("/a \"b\"/agent-office"),
             Path::new("/t"),
             Path::new("/v"),
+            Path::new("/d"),
         )
         .unwrap();
         assert!(src.contains(r#"const HOOK_EXE = "/a \"b\"/agent-office""#));
         assert!(src.contains(r#"const TRANSCRIPTS = "/t""#));
         assert!(src.contains(r#"const VIEWING = "/v""#));
+        assert!(src.contains(r#"const DISPATCH = "/d""#));
         assert!(!src.contains("__HOOK_EXE__") && !src.contains("__TRANSCRIPTS__"));
-        assert!(!src.contains("__VIEWING__"));
+        assert!(!src.contains("__VIEWING__") && !src.contains("__DISPATCH__"));
     }
 }
