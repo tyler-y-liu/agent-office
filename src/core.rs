@@ -49,6 +49,7 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchPlan {
     pub dir: std::path::PathBuf,
+    pub backend: crate::roles::Backend,
     pub relay: Option<Relay>,
 }
 
@@ -120,6 +121,8 @@ pub struct Core {
     /// `ps`, tmux, `open`), their results back here: who, the scene asked
     /// against, and what happened.
     jumps: Jumps,
+    /// DSH dispatch waits for a Host without freezing the office's event loop.
+    dispatches: Dispatches,
     /// When the empty office last looked again at what is set up.
     setup_checked: Option<Instant>,
 }
@@ -134,6 +137,21 @@ struct Jumps {
 }
 
 impl Default for Jumps {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx, out: false }
+    }
+}
+
+type Dispatched = (crate::roles::Role, bool, anyhow::Result<String>);
+
+struct Dispatches {
+    tx: std::sync::mpsc::Sender<Dispatched>,
+    rx: std::sync::mpsc::Receiver<Dispatched>,
+    out: bool,
+}
+
+impl Default for Dispatches {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self { tx, rx, out: false }
@@ -423,6 +441,7 @@ impl Core {
             notifier: notify::Notifier::default(),
             banners: notify::banners_on(),
             jumps: Jumps::default(),
+            dispatches: Dispatches::default(),
         }
     }
 
@@ -447,6 +466,7 @@ impl Core {
     /// The state to draw now; drops a selection whose agent left.
     pub fn frame(&mut self) -> Frame {
         self.land_jumps();
+        self.land_dispatches();
         let views = self.views_rx.borrow().clone();
         let live = self.live(&views);
         let now = SystemTime::now();
@@ -699,6 +719,25 @@ impl Core {
         }
     }
 
+    /// DSH waits off-thread; only its short outcome lands in the office frame.
+    fn land_dispatches(&mut self) {
+        while let Ok((role, relay, done)) = self.dispatches.rx.try_recv() {
+            self.dispatches.out = false;
+            let kind = if relay { "relay" } else { "fresh" };
+            self.watch.tally(&match &done {
+                Ok(_) => format!("dispatch.{kind}.{}", role.post().id),
+                Err(_) => "dispatch.failed".to_owned(),
+            });
+            match done {
+                Ok(message) => self.note(&message, Tone::Ok),
+                Err(e) => self.note(
+                    &crate::tr!("派活失败：{}", "dispatch failed: {}", e),
+                    Tone::Failed,
+                ),
+            }
+        }
+    }
+
     /// A jump's outcome, a failure saying it was the jump that failed.
     fn note_result(&mut self, done: Result<&str, String>) {
         match done {
@@ -791,14 +830,45 @@ impl Core {
         } else {
             "picker.open.fresh"
         });
-        Some(DispatchPlan { dir, relay })
+        let backend = if &*slot.source == crate::dsh::SOURCE {
+            crate::roles::Backend::Dsh
+        } else {
+            crate::roles::Backend::Claude
+        };
+        Some(DispatchPlan { dir, backend, relay })
     }
 
     /// Send `plan` to `role`: a relay with its task written, else a fresh
     /// session for you to give one.
     pub fn dispatch(&mut self, plan: &DispatchPlan, role: crate::roles::Role) {
         let task = plan.relay.as_ref().map_or("", |r| r.task.as_str());
-        let done = crate::roles::dispatch(role, &plan.dir, task, false);
+        if plan.backend == crate::roles::Backend::Dsh {
+            if self.dispatches.out {
+                self.note(
+                    crate::i18n::t(
+                        "上一次 DSH 派活还没完成，等它出结果再派",
+                        "wait for the current DSH dispatch before starting another",
+                    ),
+                    Tone::Failed,
+                );
+                return;
+            }
+            self.dispatches.out = true;
+            self.note(
+                crate::i18n::t("正在让 DSH 创建角色会话…", "asking DSH to create the role session…"),
+                Tone::Ok,
+            );
+            let tx = self.dispatches.tx.clone();
+            let dir = plan.dir.clone();
+            let task = task.to_owned();
+            let relay = plan.relay.is_some();
+            std::thread::spawn(move || {
+                let done = crate::roles::dispatch(crate::roles::Backend::Dsh, role, &dir, &task, false);
+                let _ = tx.send((role, relay, done));
+            });
+            return;
+        }
+        let done = crate::roles::dispatch(plan.backend, role, &plan.dir, task, false);
         let kind = if plan.relay.is_some() { "relay" } else { "fresh" };
         self.watch.tally(&match &done {
             Ok(_) => format!("dispatch.{kind}.{}", role.post().id),

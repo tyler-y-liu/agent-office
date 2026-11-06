@@ -87,6 +87,7 @@ AGENT_OFFICE_MODEL=your-model
 | `o` / 双击 | 打开会话 |
 | `n` / 点「你的办公室」门牌 | 处理下一个（打开坐访客椅的那个） |
 | `w` / 点任务栏标题 | 在 Claude 桌面 app 里打开「等你输入」的会话列表 |
+| `p` | 给角色派活（见「角色」） |
 | `r` | 重新总结 |
 | `b` | 开关头顶标签 |
 | `[` `]`（或 `PageUp` `PageDown`） | 换楼层 |
@@ -97,6 +98,19 @@ AGENT_OFFICE_MODEL=your-model
 鼠标点卡片或小人选中，滚轮在任务栏上滚动。弹过通知后回到窗口，会自动选中排在最前面的那个等你的会话，按 `o` 就过去。
 
 `agent-office --shot out.png` 跑 20 秒后把画面存成 PNG 并退出。
+
+### 角色
+
+`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。
+
+按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
+
+- 在完成或卡住的卡片上发起是接力：建议接手的角色排在前面，任务里带上一棒原来的任务、结论和改动目录。
+- 其他情况是开新会话：目录用这个小人的仓库，没选中时用最近活动小人的仓库；打开后等你给任务，没给前就在等候区。
+
+DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提交；新会话则创建空白的角色会话，由你从 DSH 会话列表打开后给任务。目前不会自动聚焦 DSH 窗口，也不支持 `--terminal`。只有还没被 Host 认领的请求才会在超时后撤回；已经认领的请求会继续等最终结果和会话 ID，不会把晚到的结果丢掉。Host 中途退出时结果未知，先检查 DSH 会话列表再决定是否重试。如果错误带会话 ID，先打开原会话继续。还没开始处理就已过期的请求会被拒绝，不会在下次启动时补跑。
+
+终端里用 `agent-office dispatch --role qa "跑全量测试"`（`--dir`、`--terminal`，PM 用 `--auto`）；派给 DeepSeek Harness 时加 `--agent dsh`。`agent-office roles remove [--agent dsh]` 只移除对应宿主的角色，不影响另一个宿主。
 
 ## 配置
 

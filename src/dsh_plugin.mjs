@@ -3,7 +3,7 @@
 // No @deepseek-ai imports: everything arrives through `ctx`, so this single
 // file mounts from any absolute path.
 //
-// Three outputs, all best-effort:
+// Four outputs, all best-effort:
 // - The hook socket, through `agent-office hook --source dsh`: the payloads
 //   pixtuoid-core's dsh decoder reads (ids, cwd, tool names, approvals), which
 //   move the figures. Never prompts or tool arguments.
@@ -16,12 +16,26 @@
 // - A file per host under VIEWING: the ids of the sessions a dsh client shows
 //   now, so the office can tell a reply you watched land from one unread.
 //   Per host, since the app and a CLI can share one DSH_HOME.
+// - A local file bridge under DISPATCH: agent-office asks this Host to create
+//   a Session under an office-* preset, optionally submitting its first task.
 const HOOK_EXE = __HOOK_EXE__
 const TRANSCRIPTS = __TRANSCRIPTS__
 const VIEWING = __VIEWING__
+const DISPATCH = __DISPATCH__
 
 import { spawn } from "node:child_process"
-import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  watch,
+  writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 
 export const name = "agent-office"
@@ -78,6 +92,7 @@ export function apply(ctx) {
   const base = (header) => ({
     sessionId: String(header.id),
     ...(header.cwd ? { cwd: header.cwd } : {}),
+    ...(header.agentPreset ? { agentPreset: String(header.agentPreset) } : {}),
     ...(header.origin === "subagent" && header.parentSession
       ? { parentSession: String(header.parentSession) }
       : {}),
@@ -90,6 +105,9 @@ export function apply(ctx) {
       if (started.has(String(header.id))) return
       started.add(String(header.id))
       send({ type: "session_start", ...base(header) })
+      if (header.agentPreset) {
+        log(String(header.id), { type: "agent-office", agentPreset: String(header.agentPreset) })
+      }
     } catch {}
   }
   const sendEnd = (agent) => {
@@ -299,6 +317,160 @@ export function apply(ctx) {
       if (history.follow === wrapped) history.follow = follow
       try {
         rmSync(file, { force: true })
+      } catch {}
+    })
+  })
+
+  // The dispatch bridge polls as well as watches: watchers can miss a rename,
+  // and requests written while this Host was down are picked up on startup.
+  // Requests run one at a time so a create and its optional first prompt stay
+  // in order. Every failure is a result file, never an escaped rejection.
+  ctx.inject(["sessionController"], (ctx) => {
+    const roles = new Set([
+      "product",
+      "ux",
+      "architect",
+      "frontend",
+      "backend",
+      "qa",
+      "devops",
+      "reviewer",
+      "pm",
+    ])
+    const queued = new Set()
+    let dispatchQueue = Promise.resolve()
+    let closed = false
+
+    const writeResult = (id, result) => {
+      const file = join(DISPATCH, `${id}.result.json`)
+      const tmp = `${file}.${process.pid}.tmp`
+      try {
+        rmSync(tmp, { force: true })
+        writeFileSync(tmp, JSON.stringify({ id, ...result }) + "\n", { mode: 0o600, flag: "wx" })
+        renameSync(tmp, file)
+        return true
+      } catch {
+        try {
+          rmSync(tmp, { force: true })
+        } catch {}
+        return false
+      }
+    }
+
+    // Only a result safely written to disk releases the claim. A failed write
+    // leaves it in place: another Host must not execute the request again.
+    const finish = (id, claim, result) => {
+      if (!writeResult(id, result)) return
+      try {
+        rmSync(claim, { force: true })
+      } catch {}
+    }
+
+    const process = async (name, claim) => {
+      const id = name.slice(0, -".json".length)
+      const path = join(DISPATCH, name)
+      let createdIdentity
+      try {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) || id.endsWith(".result")) {
+          throw new Error("invalid dispatch id")
+        }
+        const request = JSON.parse(readFileSync(path, "utf8"))
+        if (!request || typeof request !== "object" || Array.isArray(request)) {
+          throw new Error("dispatch request must be an object")
+        }
+        if (request.id !== id) throw new Error("dispatch id does not match its file name")
+        if (!roles.has(request.role)) throw new Error("unknown dispatch role")
+        if (typeof request.cwd !== "string" || !request.cwd.trim()) {
+          throw new Error("dispatch cwd must be a non-empty string")
+        }
+        if (typeof request.prompt !== "string") throw new Error("dispatch prompt must be a string")
+        if (typeof request.submit !== "boolean") throw new Error("dispatch submit must be a boolean")
+        if (!Number.isFinite(request.expiresAt) || !Number.isSafeInteger(request.expiresAt)) {
+          throw new Error("dispatch expiresAt must be a finite safe integer")
+        }
+        const ensureActive = () => {
+          if (Date.now() >= request.expiresAt) throw new Error("dispatch request expired")
+          if (!existsSync(path)) throw new Error("dispatch request was cancelled")
+        }
+
+        const agentPreset = `office-${request.role}`
+        ensureActive()
+        const created = await ctx.sessionController.create({ cwd: request.cwd, agentPreset })
+        if (typeof created?.sessionId !== "string" || !created.sessionId) {
+          throw new Error("DSH did not return a session id")
+        }
+        createdIdentity = {
+          sessionId: created.sessionId,
+          agentPreset: created.agentPreset ?? agentPreset,
+        }
+        if (request.submit) {
+          // create has committed, but prompt must not follow an expired or
+          // cancelled request. The error result keeps the created identity.
+          ensureActive()
+          await ctx.sessionController.prompt(
+            {
+              requestId: `agent-office-${id}`,
+              sessionId: created.sessionId,
+              mode: "queue",
+              content: [{ type: "text", text: request.prompt }],
+            },
+            new AbortController().signal,
+          )
+        }
+        finish(id, claim, { ok: true, ...createdIdentity })
+      } catch (error) {
+        let message = "unknown dispatch error"
+        try {
+          message = String(error instanceof Error ? error.message : error)
+        } catch {}
+        finish(id, claim, { ok: false, error: message.slice(0, 2000), ...createdIdentity })
+      }
+    }
+
+    const scan = () => {
+      if (closed) return
+      try {
+        for (const name of readdirSync(DISPATCH).sort()) {
+          if (
+            !name.endsWith(".json")
+            || name.endsWith(".result.json")
+            || name.endsWith(".claim.json")
+            || queued.has(name)
+          ) continue
+          const id = name.slice(0, -".json".length)
+          if (existsSync(join(DISPATCH, `${id}.result.json`))) continue
+          // A pre-existing claim is never taken over, even if its owner died.
+          // Request ids are fresh, so an old claim must not start a duplicate.
+          queued.add(name)
+          const claim = join(DISPATCH, `${id}.claim.json`)
+          try {
+            writeFileSync(claim, JSON.stringify({ pid: process.pid }) + "\n", {
+              mode: 0o600,
+              flag: "wx",
+            })
+          } catch {
+            continue
+          }
+          dispatchQueue = dispatchQueue.then(() => process(name, claim)).catch(() => {})
+        }
+      } catch {}
+    }
+
+    let watcher
+    try {
+      mkdirSync(DISPATCH, { recursive: true, mode: 0o700 })
+      chmodSync(DISPATCH, 0o700)
+      watcher = watch(DISPATCH, scan)
+      watcher.on("error", () => {})
+      scan()
+    } catch {}
+    const timer = setInterval(scan, 250)
+    timer.unref?.()
+    ctx.effect(() => () => {
+      closed = true
+      clearInterval(timer)
+      try {
+        watcher?.close()
       } catch {}
     })
   })

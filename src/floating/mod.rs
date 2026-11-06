@@ -2264,10 +2264,17 @@ fn paint_picker(
         ),
         None => (
             crate::tr!("派活到 {repo}：", "Dispatch into {repo}:"),
-            crate::i18n::t(
-                "开一个新会话，任务在 Claude 里写（其他键取消）",
-                "a new session; write its task in Claude (any other key cancels)",
-            )
+            if plan.backend == crate::roles::Backend::Dsh {
+                crate::i18n::t(
+                    "开一个新 DSH 会话，在会话列表打开后写任务（其他键取消）",
+                    "a new DSH session; open it from the session list and write its task (any other key cancels)",
+                )
+            } else {
+                crate::i18n::t(
+                    "开一个新会话，任务在 Claude 里写（其他键取消）",
+                    "a new session; write its task in Claude (any other key cancels)",
+                )
+            }
             .to_owned(),
         ),
     };

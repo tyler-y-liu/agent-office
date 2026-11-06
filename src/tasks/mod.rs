@@ -680,10 +680,14 @@ fn summary_input(t: &Transcript, cwd: &Path) -> SummaryInput {
     }
 }
 
-/// A subagent's type is what it was started as; a marker in the prompt a PM
-/// wrote it is only text, so the type wins.
+/// A subagent's type, or DSH's recorded preset, is what it was started as; a
+/// marker in the prompt a PM wrote it is only text, so the typed identity wins.
 fn role_of(e: &Entry) -> Option<crate::roles::Role> {
-    let typed = e.sub.as_ref().and_then(|s| s.agent_type.as_deref());
+    let typed = e
+        .sub
+        .as_ref()
+        .and_then(|s| s.agent_type.as_deref())
+        .or(e.transcript.agent_type.as_deref());
     typed
         .and_then(crate::roles::Role::of_agent_type)
         .or(e.transcript.role)
@@ -712,7 +716,11 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         prompt: t.latest_prompt().map(str::to_owned),
         todo: t.todo_active.clone(),
         recent_tools: t.recent_tools.iter().cloned().collect(),
-        agent_type: e.sub.as_ref().and_then(|s| s.agent_type.clone()),
+        agent_type: e
+            .sub
+            .as_ref()
+            .and_then(|s| s.agent_type.clone())
+            .or_else(|| e.transcript.agent_type.clone()),
         role: role_of(e),
         todos: t.todos.clone(),
         phase: t.phase,
@@ -924,6 +932,13 @@ mod tests {
         assert_eq!((v.role, v.agent_type.as_deref()), (None, Some("Explore")));
         e.sub = None;
         e.transcript.role = Some(Role::Ux);
+        assert_eq!(view(&e, true, Instant::now()).role, Some(Role::Ux));
+        // A DSH preset is the same typed identity: a quoted marker cannot
+        // relabel the composition that actually runs.
+        e.transcript.agent_type = Some("office-architect".into());
+        let v = view(&e, true, Instant::now());
+        assert_eq!((v.role, v.agent_type.as_deref()), (Some(Role::Architect), Some("office-architect")));
+        e.transcript.agent_type = Some("standard".into());
         assert_eq!(view(&e, true, Instant::now()).role, Some(Role::Ux));
     }
 

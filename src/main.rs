@@ -8,6 +8,8 @@ mod cursor;
 mod desktop;
 mod doctor;
 mod dsh;
+mod dsh_bridge;
+mod dsh_roles;
 mod floating;
 mod fun;
 mod hook;
