@@ -413,11 +413,24 @@ fn forwards_turn_start(plugin: &str) -> bool {
 fn says_what_you_view(plugin: &str) -> bool {
     plugin.contains("const VIEWING = ")
         && derives_process_start_marker(plugin)
+        && wraps_direct_follow(plugin)
         && plugin.contains("START_MARKER === undefined")
         && plugin.contains(concat!(
             "JSON.stringify({ pid: process.pid, startMarker: START_MARKER, ",
             "sessions: [...open.keys()] })"
         ))
+}
+
+fn wraps_direct_follow(plugin: &str) -> bool {
+    [
+        "const controller = ctx.sessionController",
+        "const follow = controller?.follow",
+        "controller.follow = wrapped",
+        "if (wrapped !== undefined && controller?.follow === wrapped) controller.follow = follow",
+        "yield* follow.call(this, request, signal)",
+    ]
+    .into_iter()
+    .all(|code| plugin.contains(code))
 }
 
 fn derives_process_start_marker(plugin: &str) -> bool {
@@ -497,6 +510,25 @@ mod tests {
         ] {
             assert!(!says_what_you_view(&source), "accepted {version}");
         }
+    }
+
+    /// Current DSH exposes follow directly on SessionController. A hybrid with
+    /// new marker writes but the old history-only wrapper still produces no
+    /// viewing updates, so doctor must require reconnecting it.
+    #[test]
+    fn viewing_requires_direct_session_controller_follow() {
+        assert!(wraps_direct_follow(TEMPLATE));
+        assert!(says_what_you_view(TEMPLATE));
+        let history_only = TEMPLATE
+            .replace(
+                "const controller = ctx.sessionController\n    const follow = controller?.follow",
+                "const history = ctx.sessionController?.history\n    const follow = history?.follow",
+            )
+            .replace("controller?.follow", "history?.follow")
+            .replace("controller.follow", "history.follow");
+        assert!(derives_process_start_marker(&history_only));
+        assert!(!wraps_direct_follow(&history_only));
+        assert!(!says_what_you_view(&history_only));
     }
 
     /// pixtuoid's row, the user's own rows and their comments must survive a

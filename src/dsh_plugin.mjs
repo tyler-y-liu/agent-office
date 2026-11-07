@@ -289,9 +289,8 @@ export function apply(ctx) {
   // yields, untouched, and the counting never throws into it. A dsh without
   // the controller, or with follow shaped otherwise, is left as it was.
   ctx.inject(["sessionController"], (ctx) => {
-    const history = ctx.sessionController?.history
-    const follow = history?.follow
-    if (typeof follow !== "function") return
+    const controller = ctx.sessionController
+    const follow = controller?.follow
     const open = new Map()
     // Streams it wrapped can outlive it (a reload swaps the plugin under open
     // streams); their ends must not rewrite the file the new one keeps.
@@ -318,11 +317,24 @@ export function apply(ctx) {
       else open.delete(id)
       write()
     }
-    const wrapped = async function* (request, signal) {
+    let wrapped
+    ctx.effect(() => () => {
+      disposed = true
+      // Another plugin may have wrapped ours since: theirs stays.
+      if (wrapped !== undefined && controller?.follow === wrapped) controller.follow = follow
+      try {
+        rmSync(file, { force: true })
+      } catch {}
+    })
+    if (typeof follow !== "function") {
+      write()
+      return
+    }
+    wrapped = async function* (request, signal) {
       let id
       try {
         const address = request?.address
-        const raw = address?.childSessionId ?? address?.sessionId
+        const raw = address?.kind === "subagent" ? undefined : address?.childSessionId ?? address?.sessionId
         if (raw != null) {
           id = String(raw)
           track(id, 1)
@@ -334,16 +346,8 @@ export function apply(ctx) {
         if (id !== undefined) track(id, -1)
       }
     }
-    history.follow = wrapped
+    controller.follow = wrapped
     write()
-    ctx.effect(() => () => {
-      disposed = true
-      // Another plugin may have wrapped ours since: theirs stays.
-      if (history.follow === wrapped) history.follow = follow
-      try {
-        rmSync(file, { force: true })
-      } catch {}
-    })
   })
 
   // The dispatch bridge polls as well as watches: watchers can miss a rename,
