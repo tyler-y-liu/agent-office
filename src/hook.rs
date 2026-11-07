@@ -189,7 +189,7 @@ fn is_ours(command: &str) -> bool {
     command.contains("agent-office") && command.ends_with(" hook")
 }
 
-/// Drop our groups from every event, and the events only ours were under.
+/// Drop our commands, then the groups and events only ours were under.
 fn remove_ours(settings: &mut Value) {
     let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
         return;
@@ -200,11 +200,17 @@ fn remove_ours(settings: &mut Value) {
             continue;
         };
         let before = groups.len();
-        groups.retain(|g| {
-            !g["hooks"].as_array().is_some_and(|hs| {
-                hs.iter()
-                    .any(|h| h["command"].as_str().is_some_and(is_ours))
-            })
+        groups.retain_mut(|g| {
+            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let had_ours = hs
+                .iter()
+                .any(|h| h["command"].as_str().is_some_and(is_ours));
+            if had_ours {
+                hs.retain(|h| !h["command"].as_str().is_some_and(is_ours));
+            }
+            !had_ours || !hs.is_empty()
         });
         if groups.is_empty() && before > 0 {
             emptied.push(event.clone());
@@ -388,6 +394,100 @@ mod tests {
         assert_eq!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"], cmd);
         remove_ours(&mut s);
         assert_eq!(s, original);
+    }
+
+    /// A group is a matcher plus a list of commands, not a single ownership
+    /// unit. Removing the whole mixed group would silently disable the user's
+    /// guards; empty groups the user wrote must survive for the same reason.
+    #[test]
+    fn remove_ours_filters_commands_without_dropping_unrelated_groups() {
+        let ours = json!({
+            "type": "command",
+            "command": "'/usr/local/bin/agent-office' hook",
+            "timeout": 5,
+        });
+        let guard = json!({"type": "command", "command": "guard.py", "timeout": 12});
+        let audit = json!({"type": "command", "command": "audit.sh", "async": true});
+        let unrelated = json!({
+            "matcher": "Write",
+            "hooks": [{"type": "command", "command": "format.py"}],
+        });
+        let unrelated_empty = json!({"matcher": "Custom", "hooks": []});
+        let mut s = json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [ours.clone(), guard.clone(), audit.clone()],
+                        "keep": "group metadata",
+                    },
+                    unrelated.clone(),
+                ],
+                "PostToolUse": [{"matcher": "", "hooks": [ours]}],
+                "Notification": [unrelated_empty.clone()],
+                "PreCompact": [],
+            },
+            "other": {"keep": true},
+        });
+        let expected = json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [guard, audit],
+                        "keep": "group metadata",
+                    },
+                    unrelated,
+                ],
+                "Notification": [unrelated_empty],
+                "PreCompact": [],
+            },
+            "other": {"keep": true},
+        });
+        remove_ours(&mut s);
+        assert_eq!(s, expected);
+    }
+
+    /// Reconnecting removes the previous executable path before adding the
+    /// current one. That cleanup must be repeatable without consuming user
+    /// commands sharing its old group, and disconnect must leave them intact.
+    #[test]
+    fn reconnecting_a_mixed_group_is_idempotent_and_disconnect_preserves_users() {
+        let cmd = "'/usr/local/bin/agent-office' hook";
+        let mixed = json!({
+            "matcher": "Bash",
+            "hooks": [
+                {"type": "command", "command": cmd, "timeout": 5},
+                {"type": "command", "command": "guard.py", "timeout": 12},
+                {"type": "command", "command": "audit.sh", "async": true},
+            ],
+            "keep": "group metadata",
+        });
+        let user_only = json!({
+            "matcher": "Bash",
+            "hooks": [
+                {"type": "command", "command": "guard.py", "timeout": 12},
+                {"type": "command", "command": "audit.sh", "async": true},
+            ],
+            "keep": "group metadata",
+        });
+        let mut once = json!({"model": "opus", "hooks": {"PreToolUse": [mixed]}});
+        remove_ours(&mut once);
+        add_ours(&mut once, cmd).unwrap();
+        assert_eq!(once["hooks"]["PreToolUse"][0], user_only);
+
+        let mut twice = once.clone();
+        remove_ours(&mut twice);
+        add_ours(&mut twice, cmd).unwrap();
+        assert_eq!(twice, once);
+
+        remove_ours(&mut twice);
+        assert_eq!(
+            twice,
+            json!({"model": "opus", "hooks": {"PreToolUse": [user_only]}})
+        );
     }
 
     /// settings.json's env often holds an API key: connect and disconnect

@@ -21,7 +21,7 @@ use crate::pipeline::{CC_SOURCE, CODEX_SOURCE, CURSOR_SOURCE, is_shown_source};
 use crate::text::truncate_cells;
 use client::{OutcomeInput, SUMMARY_CELLS, Summarizer, SummaryInput};
 pub use extract::{Cheer, Phase};
-use extract::{SubMeta, Tail, Transcript};
+use extract::{ReplyId, SubMeta, Tail, Transcript};
 use trigger::Trigger;
 
 /// What the panel and the head labels show for one agent.
@@ -165,7 +165,7 @@ fn stuck(t: &Transcript, working: bool, quiet: Duration, limits: &StuckLimits) -
     } else {
         limits.quiet
     };
-    (working && quiet >= limit).then(|| Stuck::Quiet(quiet.as_secs() / 60))
+    (working && quiet >= limit).then_some(Stuck::Quiet(quiet.as_secs() / 60))
 }
 
 /// Whether `id` going quiet can mean it is stuck: it is working, and no
@@ -205,14 +205,16 @@ pub type TaskViews = Arc<HashMap<AgentId, TaskView>>;
 
 #[derive(Debug)]
 struct Entry {
+    /// This incarnation of the agent id; callbacks outlive the map entry.
+    generation: u64,
     tail: Tail,
     transcript: Transcript,
     sub: Option<SubMeta>,
     trigger: Trigger,
     /// The model's line and the prompt it was asked for.
     summary: Option<(String, String)>,
-    /// The outcome line and the reply it was read from.
-    outcome: Option<(String, String)>,
+    /// The outcome line and the reply identity it was read from.
+    outcome: Option<(ReplyId, String)>,
     outcome_in_flight: bool,
     /// After a failed outcome request, when to try again.
     outcome_retry_at: Option<Instant>,
@@ -222,6 +224,24 @@ struct Entry {
     sub_meta_at: Instant,
     /// When the transcript last gained a line.
     grew_at: Instant,
+}
+
+#[derive(Debug)]
+struct SummaryDone {
+    id: AgentId,
+    generation: u64,
+    key: String,
+    prompt: String,
+    out: Option<String>,
+}
+
+#[derive(Debug)]
+struct OutcomeDone {
+    id: AgentId,
+    generation: u64,
+    reply: ReplyId,
+    key: String,
+    out: Option<String>,
 }
 
 #[derive(Debug)]
@@ -417,6 +437,7 @@ async fn run(
     let dsh_dir = crate::dsh::transcripts_dir();
     let cursor_dir = crate::cursor::transcripts_dir();
     let mut entries: HashMap<AgentId, Entry> = HashMap::new();
+    let mut next_generation = 0u64;
     let codex_root = pixtuoid_core::source::codex::codex_home().join("sessions");
     let mut locator = Locator::new(scan);
     let mut codex_locator = Locator::new(scan_codex);
@@ -426,44 +447,20 @@ async fn run(
         }
         memo::Memo::load()
     });
-    // Each reply with the memo key and the prompt of the request it answers.
-    let (done_tx, mut done_rx) =
-        mpsc::unbounded_channel::<(AgentId, String, String, Option<String>)>();
-    // Each outcome reply with the agent reply it was asked for, and its key.
-    let (outcome_tx, mut outcome_rx) =
-        mpsc::unbounded_channel::<(AgentId, String, String, Option<String>)>();
+    // Each summary reply names its Entry generation, memo key and prompt.
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SummaryDone>();
+    // Each outcome reply names its Entry generation and exact ReplyId too.
+    let (outcome_tx, mut outcome_rx) = mpsc::unbounded_channel::<OutcomeDone>();
     let mut tick = tokio::time::interval(Duration::from_millis(700));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = tick.tick() => {}
-            Some((id, key, prompt, out)) = done_rx.recv() => {
-                if let Some(line) = &out {
-                    memo.insert(key, line.clone());
-                }
-                if let Some(e) = entries.get_mut(&id) {
-                    summary_done(e, prompt, out, Instant::now());
-                }
+            Some(done) = done_rx.recv() => {
+                summary_received(&mut entries, &mut memo, done, Instant::now());
             }
-            Some((id, reply, key, out)) = outcome_rx.recv() => {
-                if let Some(line) = &out {
-                    memo.insert(key, line.clone());
-                }
-                if let Some(e) = entries.get_mut(&id) {
-                    e.outcome_in_flight = false;
-                    match out {
-                        Some(line) => {
-                            e.outcome = Some((reply, line));
-                            e.outcome_retry_at = None;
-                            e.outcome_failures = 0;
-                        }
-                        None => {
-                            e.outcome_failures += 1;
-                            e.outcome_retry_at =
-                                Some(Instant::now() + trigger::retry_after(e.outcome_failures));
-                        }
-                    }
-                }
+            Some(done) = outcome_rx.recv() => {
+                outcome_received(&mut entries, &mut memo, done, Instant::now());
             }
             Some(id) = force_rx.recv() => {
                 if let Some(e) = entries.get_mut(&id) {
@@ -498,9 +495,14 @@ async fn run(
                         continue;
                     };
                     let sub = extract::sub_meta(&path);
+                    let generation = next_generation;
+                    next_generation = next_generation
+                        .checked_add(1)
+                        .expect("entry generation exhausted");
                     entries.insert(
                         *id,
                         Entry {
+                            generation,
                             tail: Tail::new(path),
                             transcript: Transcript::default(),
                             sub,
@@ -524,21 +526,30 @@ async fn run(
                 if let Some(s) = &summarizer
                     && let Some(reply) = outcome_due(e, slot, SystemTime::now(), now)
                 {
+                    let reply_id = e
+                        .transcript
+                        .reply_id()
+                        .expect("a due outcome has a reply identity");
+                    let generation = e.generation;
                     let input = OutcomeInput {
                         project: project_of(&slot.cwd),
                         task: e.transcript.latest_prompt().map(str::to_owned),
                         reply: reply.clone(),
                     };
                     let key = s.outcome_key(&input);
-                    if let Some(line) = memo.get(&key) {
-                        e.outcome = Some((reply, line.to_owned()));
-                    } else {
+                    if !outcome_from_memo(e, &memo, &key, reply_id) {
                         e.outcome_in_flight = true;
                         let (s, tx, id) = (s.clone(), outcome_tx.clone(), *id);
                         tokio::spawn(async move {
                             let out = s.summarize_outcome(&input).await;
                             debug_log(id, "outcome", &out);
-                            let _ = tx.send((id, reply, key, out.ok()));
+                            let _ = tx.send(OutcomeDone {
+                                id,
+                                generation,
+                                reply: reply_id,
+                                key,
+                                out: out.ok(),
+                            });
                         });
                     }
                 }
@@ -580,10 +591,17 @@ async fn run(
                         continue;
                     }
                     let (s, tx, id) = (s.clone(), done_tx.clone(), *id);
+                    let generation = e.generation;
                     tokio::spawn(async move {
                         let out = s.summarize(&input).await;
                         debug_log(id, "task", &out);
-                        let _ = tx.send((id, key, input.latest_prompt, out.ok()));
+                        let _ = tx.send(SummaryDone {
+                            id,
+                            generation,
+                            key,
+                            prompt: input.latest_prompt,
+                            out: out.ok(),
+                        });
                     });
                 }
             }
@@ -623,6 +641,65 @@ fn idle_long_as_written(
             now,
         ),
         None => crate::core::idle_long(slot, now),
+    }
+}
+
+fn summary_received(
+    entries: &mut HashMap<AgentId, Entry>,
+    memo: &mut memo::Memo,
+    done: SummaryDone,
+    now: Instant,
+) {
+    // A result that outlived its entry has no current success to cache: the
+    // same key may already belong to the reply from a newer incarnation.
+    let Some(e) = entries
+        .get_mut(&done.id)
+        .filter(|e| e.generation == done.generation)
+    else {
+        return;
+    };
+    if let Some(line) = &done.out {
+        memo.insert(done.key, line.clone());
+    }
+    summary_done(e, done.prompt, done.out, now);
+}
+
+fn outcome_from_memo(e: &mut Entry, memo: &memo::Memo, key: &str, reply: ReplyId) -> bool {
+    let Some(line) = memo.get(key) else {
+        return false;
+    };
+    e.outcome = Some((reply, line.to_owned()));
+    true
+}
+
+fn outcome_received(
+    entries: &mut HashMap<AgentId, Entry>,
+    memo: &mut memo::Memo,
+    done: OutcomeDone,
+    now: Instant,
+) {
+    // The memo update is part of accepting the result, not an independent
+    // side effect: an old incarnation cannot overwrite a newer one's line.
+    let Some(e) = entries
+        .get_mut(&done.id)
+        .filter(|e| e.generation == done.generation)
+    else {
+        return;
+    };
+    if let Some(line) = &done.out {
+        memo.insert(done.key, line.clone());
+    }
+    e.outcome_in_flight = false;
+    match done.out {
+        Some(line) => {
+            e.outcome = Some((done.reply, line));
+            e.outcome_retry_at = None;
+            e.outcome_failures = 0;
+        }
+        None => {
+            e.outcome_failures += 1;
+            e.outcome_retry_at = Some(now + trigger::retry_after(e.outcome_failures));
+        }
     }
 }
 
@@ -681,6 +758,7 @@ fn outcome_due(
     now: Instant,
 ) -> Option<String> {
     let reply = e.transcript.last_reply.as_ref()?;
+    let reply_id = e.transcript.reply_id()?;
     let settled = wall
         .duration_since(slot.state_started_at)
         .is_ok_and(|d| d >= trigger::DEBOUNCE);
@@ -688,7 +766,7 @@ fn outcome_due(
         && slot.exiting_at.is_none()
         && settled
         && !e.outcome_in_flight
-        && e.outcome.as_ref().is_none_or(|(r, _)| r != reply)
+        && e.outcome.as_ref().is_none_or(|(id, _)| *id != reply_id)
         && e.outcome_retry_at.is_none_or(|t| now >= t);
     due.then(|| reply.clone())
 }
@@ -724,9 +802,9 @@ fn role_of(e: &Entry) -> Option<crate::roles::Role> {
 
 fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
     let t = &e.transcript;
-    // An outcome read from an earlier reply describes an earlier turn.
+    // Equal words in a new turn cannot inherit the previous turn's outcome.
     let outcome = t.last_reply.as_ref().map(|r| match &e.outcome {
-        Some((of, line)) if of == r => (line.clone(), true),
+        Some((of, line)) if Some(*of) == t.reply_id() => (line.clone(), true),
         _ => (truncate_cells(r, SUMMARY_CELLS), false),
     });
     let desc = e.sub.as_ref().and_then(|s| s.description.clone());
@@ -922,6 +1000,22 @@ mod tests {
         );
     }
 
+    /// Parallel Claude calls share one record, but three failed results are
+    /// still three failures and must trip the default stuck limit together.
+    #[test]
+    fn three_parallel_errors_in_one_record_are_stuck() {
+        let mut t = Transcript::default();
+        t.feed(
+            &serde_json::json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"p1","is_error":true},
+                {"type":"tool_result","tool_use_id":"p2","is_error":true},
+                {"type":"tool_result","tool_use_id":"p3","is_error":true}
+            ]}})
+            .to_string(),
+        );
+        assert_eq!(stuck(&t, true, Duration::ZERO, &D), Some(Stuck::Failing(3)));
+    }
+
     #[test]
     fn errors_in_a_row_are_stuck_even_when_the_transcript_moves() {
         let t = Transcript {
@@ -933,6 +1027,7 @@ mod tests {
 
     fn entry() -> Entry {
         Entry {
+            generation: 0,
             tail: Tail::new(PathBuf::new()),
             transcript: Transcript::default(),
             sub: None,
@@ -1098,6 +1193,214 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// Equal words in a later turn are a new answer, not the answer whose
+    /// outcome is already cached on the entry. Until its own result arrives,
+    /// the card must show those words rather than the earlier turn's result.
+    #[test]
+    fn a_new_turn_with_the_same_reply_gets_a_new_outcome() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let settled = t0 + trigger::DEBOUNCE;
+        let now = Instant::now();
+        let slot = idle_slot(t0);
+        let mut e = entry();
+        let prompt =
+            |text: &str| serde_json::json!({"type":"user","message":{"content":text}}).to_string();
+        let say = |text: &str| {
+            serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"text","text":text}
+            ]}})
+            .to_string()
+        };
+        e.transcript.feed(&prompt("第一轮"));
+        e.transcript.feed(&say("相同的回复"));
+        e.outcome = Some((e.transcript.reply_id().unwrap(), "第一轮结论".into()));
+        assert_eq!(outcome_due(&e, &slot, settled, now), None);
+        e.transcript.feed(&prompt("第二轮"));
+        e.transcript.feed(&say("相同的回复"));
+        let v = view(&e, false, now);
+        assert_eq!(v.outcome.as_deref(), Some("相同的回复"));
+        assert!(!v.outcome_summarized);
+        assert_eq!(
+            outcome_due(&e, &slot, settled, now).as_deref(),
+            Some("相同的回复")
+        );
+    }
+
+    /// Repeating an untimed prompt and reply repeats the exact model input,
+    /// so its memo remains useful. The hit is attached to the new ReplyId:
+    /// before that lookup, the old turn's line must not leak into the view.
+    #[test]
+    fn an_untimed_repeat_reuses_memo_only_for_its_new_reply_identity() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let settled = t0 + trigger::DEBOUNCE;
+        let now = Instant::now();
+        let slot = idle_slot(t0);
+        let mut e = entry();
+        let prompt =
+            serde_json::json!({"type":"user","message":{"content":"再试一次"}}).to_string();
+        let say = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"text","text":"相同的回复"}
+        ]}})
+        .to_string();
+        let summarizer = Summarizer::new("https://x", "k".into(), "m".into());
+        let key = |e: &Entry| {
+            summarizer.outcome_key(&OutcomeInput {
+                project: "repo".into(),
+                task: e.transcript.latest_prompt().map(str::to_owned),
+                reply: e.transcript.last_reply.clone().unwrap(),
+            })
+        };
+        e.transcript.feed(&prompt);
+        e.transcript.feed(&say);
+        let first_key = key(&e);
+        let mut memo = memo::Memo::default();
+        memo.insert(first_key.clone(), "同输入结论".into());
+        let reply_id = e.transcript.reply_id().unwrap();
+        assert!(outcome_from_memo(&mut e, &memo, &first_key, reply_id));
+        e.transcript.feed(&prompt);
+        e.transcript.feed(&say);
+        assert_eq!(e.transcript.turn_started, None);
+        assert_eq!(key(&e), first_key, "turn identity is not a memo input");
+        let v = view(&e, false, now);
+        assert_eq!(v.outcome.as_deref(), Some("相同的回复"));
+        assert!(!v.outcome_summarized);
+        assert!(outcome_due(&e, &slot, settled, now).is_some());
+        let reply_id = e.transcript.reply_id().unwrap();
+        assert!(outcome_from_memo(&mut e, &memo, &first_key, reply_id));
+        let v = view(&e, false, now);
+        assert_eq!(v.outcome.as_deref(), Some("同输入结论"));
+        assert!(v.outcome_summarized);
+    }
+
+    /// A slow summary belongs to the entry incarnation that asked for it.
+    /// When A is removed and B reuses its id and input key, B can land first:
+    /// A's late result must neither touch B's request nor replace B's memo
+    /// line, which a later turn with that same input would display.
+    #[test]
+    fn a_recreated_entry_ignores_the_previous_entrys_summary_callback() {
+        let id = AgentId::from_parts(CC_SOURCE, "reused");
+        let a = entry();
+        let key = "same-summary-input";
+        let stale = SummaryDone {
+            id,
+            generation: a.generation,
+            key: key.into(),
+            prompt: "相同的任务".into(),
+            out: Some("A 的旧摘要".into()),
+        };
+        let mut entries = HashMap::new();
+        entries.insert(id, a);
+        entries.remove(&id);
+        let mut b = entry();
+        b.generation = 1;
+        b.transcript.prompts.push_back("相同的任务".into());
+        let started = Instant::now();
+        b.trigger.observe("相同的任务", 0, started);
+        assert!(b.trigger.take_due(0, started + trigger::DEBOUNCE));
+        entries.insert(id, b);
+        let mut memo = memo::Memo::default();
+
+        // The current B request completes before A, and its line is reusable.
+        summary_received(
+            &mut entries,
+            &mut memo,
+            SummaryDone {
+                id,
+                generation: 1,
+                key: key.into(),
+                prompt: "相同的任务".into(),
+                out: Some("B 的新摘要".into()),
+            },
+            started,
+        );
+        assert_eq!(memo.get(key), Some("B 的新摘要"));
+
+        summary_received(&mut entries, &mut memo, stale, started);
+        let b = &entries[&id];
+        assert!(!b.trigger.in_flight(), "A must not change B's request");
+        assert_eq!(
+            b.summary.as_ref().map(|(_, line)| line.as_str()),
+            Some("B 的新摘要"),
+            "A must not write B's summary"
+        );
+        let v = view(b, false, started);
+        assert_eq!(v.line.as_deref(), Some("B 的新摘要"));
+        assert!(v.summarized);
+        assert_eq!(
+            memo.get(key),
+            Some("B 的新摘要"),
+            "A's late result must not poison the shared memo key"
+        );
+    }
+
+    /// Outcome callbacks have the same incarnation boundary as summaries:
+    /// B's success, including its cleared flight and backoff, survives A's
+    /// late success for the same key and cannot be replaced in later reuse.
+    #[test]
+    fn a_recreated_entry_ignores_the_previous_entrys_outcome_callback() {
+        let id = AgentId::from_parts(CC_SOURCE, "reused");
+        let say = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"text","text":"相同的回复"}
+        ]}})
+        .to_string();
+        let key = "same-outcome-input";
+        let mut a = entry();
+        a.transcript.feed(&say);
+        let stale = OutcomeDone {
+            id,
+            generation: a.generation,
+            reply: a.transcript.reply_id().unwrap(),
+            key: key.into(),
+            out: Some("A 的旧结论".into()),
+        };
+        let mut entries = HashMap::new();
+        entries.insert(id, a);
+        entries.remove(&id);
+        let now = Instant::now();
+        let retry_at = now + Duration::from_secs(60);
+        let mut b = entry();
+        b.generation = 1;
+        b.transcript.feed(&say);
+        b.outcome_in_flight = true;
+        b.outcome_failures = 2;
+        b.outcome_retry_at = Some(retry_at);
+        let reply = b.transcript.reply_id().unwrap();
+        entries.insert(id, b);
+        let mut memo = memo::Memo::default();
+
+        outcome_received(
+            &mut entries,
+            &mut memo,
+            OutcomeDone {
+                id,
+                generation: 1,
+                reply,
+                key: key.into(),
+                out: Some("B 的新结论".into()),
+            },
+            now,
+        );
+        assert_eq!(memo.get(key), Some("B 的新结论"));
+
+        outcome_received(&mut entries, &mut memo, stale, now);
+        let b = &entries[&id];
+        assert!(!b.outcome_in_flight, "A must not change B's request");
+        assert_eq!(b.outcome_failures, 0, "A must not change B's failures");
+        assert_eq!(b.outcome_retry_at, None, "A must not change B's backoff");
+        assert_eq!(
+            b.outcome.as_ref().map(|(_, line)| line.as_str()),
+            Some("B 的新结论")
+        );
+        let v = view(b, false, now);
+        assert_eq!(v.outcome.as_deref(), Some("B 的新结论"));
+        assert!(v.outcome_summarized);
+        assert_eq!(
+            memo.get(key),
+            Some("B 的新结论"),
+            "A's late result must not poison the shared memo key"
+        );
+    }
+
     /// One request per finished turn: asked once the agent has stopped and
     /// its last lines are in, never while it works or for a reply already
     /// read, and a failed one waits before it is tried again.
@@ -1129,9 +1432,17 @@ mod tests {
             "one out already"
         );
         e.outcome_in_flight = false;
-        e.outcome = Some(("已修好".into(), "登录页已修好".into()));
+        e.outcome = Some((e.transcript.reply_id().unwrap(), "登录页已修好".into()));
         assert_eq!(outcome_due(&e, &slot, settled, now), None, "already read");
-        e.transcript.last_reply = Some("要删旧接口吗？".into());
+        e.transcript.feed(
+            &serde_json::json!({"type":"user","message":{"content":"接下来怎么办"}}).to_string(),
+        );
+        e.transcript.feed(
+            &serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"text","text":"要删旧接口吗？"}
+            ]}})
+            .to_string(),
+        );
         assert!(
             outcome_due(&e, &slot, settled, now).is_some(),
             "a new turn's reply"
@@ -1151,11 +1462,18 @@ mod tests {
     fn an_outcome_shows_only_for_the_reply_it_was_read_from() {
         let mut e = entry();
         e.transcript.last_reply = Some("已修好，补了测试".into());
-        e.outcome = Some(("已修好，补了测试".into(), "登录页已修好".into()));
+        e.outcome = Some((e.transcript.reply_id().unwrap(), "登录页已修好".into()));
         let v = view(&e, false, Instant::now());
         assert_eq!(v.outcome.as_deref(), Some("登录页已修好"));
         assert!(v.outcome_summarized);
-        e.transcript.last_reply = Some("要删旧接口吗？".into());
+        e.transcript
+            .feed(&serde_json::json!({"type":"user","message":{"content":"下一步"}}).to_string());
+        e.transcript.feed(
+            &serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"text","text":"要删旧接口吗？"}
+            ]}})
+            .to_string(),
+        );
         let v = view(&e, false, Instant::now());
         assert_eq!(v.outcome.as_deref(), Some("要删旧接口吗？"));
         assert!(!v.outcome_summarized);

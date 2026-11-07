@@ -1002,7 +1002,7 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
     }
     if terminal {
         let bin = claude_bin().context("找不到 claude 命令：装好 Claude Code 或去掉 --terminal")?;
-        std::env::set_current_dir(&dir)
+        std::env::set_current_dir(dir)
             .with_context(|| format!("进不了 {}", dir.display()))?;
         #[cfg(unix)]
         {
@@ -1015,7 +1015,7 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
         #[cfg(not(unix))]
         anyhow::bail!("--terminal 只支持 macOS / Linux");
     }
-    let link = desktop_link(&dir, &prompt(role, task, true))?;
+    let link = desktop_link(dir, &prompt(role, task, true))?;
     crate::jump::open_url_checked(&link).map_err(anyhow::Error::msg)?;
     Ok(format!(
         "已在 Claude 打开新会话（{}，{}），确认后发送",

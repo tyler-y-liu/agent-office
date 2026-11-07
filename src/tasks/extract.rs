@@ -23,6 +23,13 @@ const KEEP_TOOLS: usize = 5;
 /// How much of the agent's last reply is kept, in characters.
 const KEEP_REPLY: usize = 3000;
 
+/// Which reply in which human turn an asynchronous outcome belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReplyId {
+    pub(super) turn: u64,
+    pub(super) sequence: u64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Transcript {
     /// Oldest first; the last is what the agent works on now.
@@ -48,6 +55,9 @@ pub struct Transcript {
     /// The agent's last words to the human since they last spoke: once the
     /// turn is over, its answer, its report, or its question.
     pub last_reply: Option<String>,
+    /// Human turns and replies read so far: equal text can still be new work.
+    pub(super) turn: u64,
+    pub(super) replies: u64,
     /// Calls out that earn a cheer if they succeed, as `(tool_use id, cheer)`.
     pub(super) cheering: Vec<(String, Cheer)>,
     /// The last thing worth cheering and when its result came in.
@@ -226,6 +236,13 @@ impl Transcript {
         self.prompts.back().map(String::as_str)
     }
 
+    pub(super) fn reply_id(&self) -> Option<ReplyId> {
+        self.last_reply.as_ref().map(|_| ReplyId {
+            turn: self.turn,
+            sequence: self.replies,
+        })
+    }
+
     /// Fold one JSONL line in; unparseable lines are skipped, as a partial
     /// write or a format change must not stop the rest.
     pub fn feed(&mut self, line: &str) {
@@ -337,10 +354,12 @@ impl Transcript {
                     let failed = |b: &&Value| {
                         b.get("is_error").and_then(Value::as_bool) == Some(true) && !rejected(b)
                     };
-                    if results.iter().any(failed) {
-                        self.fail_streak += 1;
-                    } else if results.iter().all(|b| !rejected(b)) {
-                        self.fail_streak = 0;
+                    for b in &results {
+                        if failed(b) {
+                            self.fail_streak += 1;
+                        } else if !rejected(b) {
+                            self.fail_streak = 0;
+                        }
                     }
                     let settled: Vec<(&str, bool)> = results
                         .iter()
@@ -372,6 +391,7 @@ impl Transcript {
     fn human_spoke(&mut self, v: &Value) {
         self.fail_streak = 0;
         self.last_reply = None;
+        self.turn = self.turn.checked_add(1).expect("turn sequence exhausted");
         // Set even when the words repeat the last prompt: it is a new turn.
         self.turn_started = v
             .get("timestamp")
@@ -386,6 +406,10 @@ impl Transcript {
         }
         // The end of a long report is where it concludes.
         let n = t.chars().count();
+        self.replies = self
+            .replies
+            .checked_add(1)
+            .expect("reply sequence exhausted");
         self.last_reply = Some(t.chars().skip(n.saturating_sub(KEEP_REPLY)).collect());
     }
 
@@ -866,8 +890,13 @@ impl Tail {
         }
         let mut f = File::open(&self.path)?;
         if len < self.offset {
-            // Rewritten from scratch: start over.
-            *t = Transcript::default();
+            // Rewritten from scratch, but identities still follow requests
+            // already sent for the earlier contents of this entry.
+            *t = Transcript {
+                turn: t.turn,
+                replies: t.replies,
+                ..Transcript::default()
+            };
             self.offset = 0;
             self.partial.clear();
         }
@@ -1129,6 +1158,31 @@ mod tests {
         assert!(kept.ends_with("结论"));
     }
 
+    /// A repeated prompt can be a deliberate second attempt, and an untimed
+    /// log line is still a human turn. Its equal reply must therefore carry a
+    /// new identity rather than inherit the first attempt's outcome.
+    #[test]
+    fn untimed_repeated_prompts_and_replies_advance_their_identity() {
+        let say = |text: &str| {
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":text}]}})
+                .to_string()
+        };
+        let mut t = Transcript::default();
+        t.feed(&user(json!("再试一次")));
+        t.feed(&say("结果相同"));
+        let first = t.reply_id().unwrap();
+        t.feed(&user(json!("再试一次")));
+        assert_eq!(t.turn_started, None, "these prompts carry no timestamp");
+        assert_eq!(t.last_reply, None, "the new turn has no reply yet");
+        t.feed(&say("结果相同"));
+        let second = t.reply_id().unwrap();
+        assert!(second.turn > first.turn, "repeated words are a new turn");
+        assert!(
+            second.sequence > first.sequence,
+            "repeated words are a new reply"
+        );
+    }
+
     #[test]
     fn the_task_is_the_humans_last_words_not_the_harness_injections() {
         let mut t = Transcript::default();
@@ -1324,6 +1378,75 @@ mod tests {
         }
         assert_eq!(t.fail_streak, 3);
         t.feed(&result("t3", false, "ok"));
+        assert_eq!(t.fail_streak, 0);
+    }
+
+    /// Claude returns parallel tool results in one user record. Each result
+    /// still represents a separate call: three together must reach the same
+    /// stuck threshold as three in separate records, and all calls must settle.
+    #[test]
+    fn three_failures_in_one_parallel_result_record_count_individually() {
+        let mut t = Transcript::default();
+        for id in ["p1", "p2", "p3"] {
+            t.feed(&call(id, "Bash", json!({"command":"false"})));
+        }
+        t.feed(&user(json!([
+            {"type":"tool_result","tool_use_id":"p1","is_error":true,"content":"one"},
+            {"type":"tool_result","tool_use_id":"p2","is_error":true,"content":"two"},
+            {"type":"tool_result","tool_use_id":"p3","is_error":true,"content":"three"}
+        ])));
+        assert_eq!(t.fail_streak, 3);
+        assert!(t.outstanding.is_empty(), "every parallel call settled");
+    }
+
+    /// Success breaks a failing run exactly where it appears in the result
+    /// array: looking only for any error loses both that reset and later errors.
+    #[test]
+    fn mixed_parallel_results_fold_in_array_order() {
+        let mut t = Transcript {
+            fail_streak: 2,
+            ..Transcript::default()
+        };
+        t.feed(&user(json!([
+            {"type":"tool_result","tool_use_id":"m1","is_error":true,"content":"no"},
+            {"type":"tool_result","tool_use_id":"m2","is_error":false,"content":"ok"}
+        ])));
+        assert_eq!(t.fail_streak, 0, "the last result succeeded");
+        t.feed(&user(json!([
+            {"type":"tool_result","tool_use_id":"m3","is_error":false,"content":"ok"},
+            {"type":"tool_result","tool_use_id":"m4","is_error":true,"content":"no"},
+            {"type":"tool_result","tool_use_id":"m5","is_error":true,"content":"no"}
+        ])));
+        assert_eq!(
+            t.fail_streak, 2,
+            "the two trailing failures are consecutive"
+        );
+    }
+
+    /// A rejection is neutral in a run of real outcomes: in a parallel record
+    /// it neither adds a failure nor hides an earlier one, while a later
+    /// ordinary success still clears the run even with a rejection beside it.
+    #[test]
+    fn rejections_do_not_change_a_parallel_result_streak() {
+        let rejected = |id: &str| {
+            json!({"type":"tool_result","tool_use_id":id,"is_error":true,
+                "content":"The user doesn't want to proceed with this tool use"})
+        };
+        let mut t = Transcript {
+            fail_streak: 2,
+            ..Transcript::default()
+        };
+        t.feed(&user(json!([rejected("r1"), rejected("r2")])));
+        assert_eq!(t.fail_streak, 2);
+        t.feed(&user(json!([
+            {"type":"tool_result","tool_use_id":"r3","is_error":true,"content":"no"},
+            rejected("r4")
+        ])));
+        assert_eq!(t.fail_streak, 3);
+        t.feed(&user(json!([
+            rejected("r5"),
+            {"type":"tool_result","tool_use_id":"r6","is_error":false,"content":"ok"}
+        ])));
         assert_eq!(t.fail_streak, 0);
     }
 
@@ -1579,6 +1702,35 @@ mod tests {
             !t.prompts.iter().any(|p| p == "很早以前的任务"),
             "the head was skipped"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Rewriting a transcript resets its parsed text, not the identity of
+    /// requests already sent by its Entry. The next equal reply must remain
+    /// distinguishable from the old file's answer.
+    #[test]
+    fn a_rewritten_tail_does_not_reuse_reply_identity() {
+        let dir = std::env::temp_dir().join(format!("agent-office-rewrite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let say = json!({"type":"assistant","message":{"content":[
+            {"type":"text","text":"相同的回复"}
+        ]}})
+        .to_string();
+        std::fs::write(
+            &path,
+            format!("{}\n{say}\n", user(json!("长".repeat(1024)))),
+        )
+        .unwrap();
+        let mut tl = Tail::new(path.clone());
+        let mut t = Transcript::default();
+        assert!(tl.poll(&mut t).unwrap());
+        let first = t.reply_id().unwrap();
+        std::fs::write(&path, format!("{}\n{say}\n", user(json!("新任务")))).unwrap();
+        assert!(tl.poll(&mut t).unwrap());
+        let second = t.reply_id().unwrap();
+        assert!(second.turn > first.turn);
+        assert!(second.sequence > first.sequence);
         std::fs::remove_dir_all(dir).ok();
     }
 

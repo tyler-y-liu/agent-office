@@ -12,9 +12,9 @@ use pixtuoid_core::source::claude_code::ClaudeCodeSource;
 use pixtuoid_core::source::codex::CodexSource;
 use pixtuoid_core::source::hook::HookRouter;
 use pixtuoid_core::source::jsonl::ChildEndUnclaims;
-use pixtuoid_core::source::manager::SourceManager;
+use pixtuoid_core::source::manager::{SourceDeath, SourceManager};
 use pixtuoid_core::state::MAX_FLOORS;
-use pixtuoid_core::{AgentEvent, Reducer, SceneState, TaggedReceiver, Transport};
+use pixtuoid_core::{AgentEvent, Reducer, SceneState, TaggedReceiver, TaggedSender, Transport};
 use tokio::sync::{mpsc, watch};
 
 pub const CC_SOURCE: &str = "claude-code";
@@ -43,6 +43,9 @@ pub struct Floors {
 pub struct Pipeline {
     pub scene_rx: watch::Receiver<Arc<SceneState>>,
     pub floor_caps: FloorCaps,
+    /// Fatal source exits, retained for Core to show instead of a healthy
+    /// hooks/summary footer after its input has stopped.
+    pub deaths_rx: watch::Receiver<Vec<SourceDeath>>,
 }
 
 /// Must run inside a tokio runtime: it spawns the reducer and the sources.
@@ -66,16 +69,27 @@ pub fn spawn(socket_path: PathBuf, buf_w: u16, buf_h: u16) -> Pipeline {
     let mut codex = CodexSource::default_paths();
     codex.child_end_unclaims = Some(unclaims.clone());
     let router = HookRouter::new(socket_path).with_child_end_unclaims(Some(unclaims));
-    SourceManager::new()
-        .with_source(Box::new(router))
-        .with_source(Box::new(cc))
-        .with_source(Box::new(codex))
-        .spawn(tx);
+    let deaths_rx = spawn_sources(
+        SourceManager::new()
+            .with_source(Box::new(router))
+            .with_source(Box::new(cc))
+            .with_source(Box::new(codex)),
+        tx,
+    );
 
     Pipeline {
         scene_rx,
         floor_caps,
+        deaths_rx,
     }
+}
+
+/// Start sources with their fatal exits retained on a receiver. Keeping this
+/// channel in `Pipeline` is what lets the UI distinguish stale data from health.
+fn spawn_sources(manager: SourceManager, tx: TaggedSender) -> watch::Receiver<Vec<SourceDeath>> {
+    let (deaths_tx, deaths_rx) = watch::channel(Vec::new());
+    manager.spawn_with_health(tx, deaths_tx);
+    deaths_rx
 }
 
 /// The most events folded into one publish.
@@ -521,6 +535,34 @@ mod tests {
     }
 
     use super::*;
+
+    struct DyingSource;
+
+    impl pixtuoid_core::Source for DyingSource {
+        fn name(&self) -> &str {
+            CC_SOURCE
+        }
+
+        async fn run(self: Box<Self>, _tx: TaggedSender) -> anyhow::Result<()> {
+            anyhow::bail!("listener exploded\n\x1b[31m")
+        }
+    }
+
+    /// Once a source dies the scene is only stale history. The retained health
+    /// receiver must carry its name and fatal error all the way to the footer
+    /// status helper, rather than dropping them in tracing and looking healthy.
+    #[tokio::test]
+    async fn a_fatal_source_exit_reaches_the_user_visible_status() {
+        let (tx, _rx) = mpsc::channel(1);
+        let manager = SourceManager::new().with_source(Box::new(DyingSource));
+        let mut deaths_rx = spawn_sources(manager, tx);
+        deaths_rx.changed().await.unwrap();
+        let deaths = deaths_rx.borrow_and_update().clone();
+        let visible = crate::core::source_death_note(&deaths).expect("death is visible");
+        assert!(visible.contains(CC_SOURCE), "{visible}");
+        assert!(visible.contains("listener exploded"), "{visible}");
+        assert!(!visible.contains(['\n', '\x1b']), "one safe footer line: {visible:?}");
+    }
 
     fn start(source: &str) -> AgentEvent {
         AgentEvent::SessionStart {

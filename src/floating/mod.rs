@@ -35,7 +35,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::core::{Action, Core, Floors};
 use crate::roles::Role;
@@ -242,6 +242,48 @@ fn step_scroll(state: &mut crate::panel::PanelState, left: &mut isize) {
     } else {
         *left -= delta;
     }
+}
+
+/// A delayed answer belongs only to the gesture that scheduled it.
+fn begin_left_click(pending_poke: &mut Option<(AgentId, Instant)>) {
+    *pending_poke = None;
+}
+
+/// `Some(expanded)` means a double click opens the agent, restoring the card's
+/// previous expanded state; `None` means this is its first click.
+fn update_agent_click(
+    last_click: &mut Option<(AgentId, Instant, bool)>,
+    pending_poke: &mut Option<(AgentId, Instant)>,
+    id: AgentId,
+    now: Instant,
+    expanded: bool,
+    schedule_poke: bool,
+) -> Option<bool> {
+    let first = (*last_click).filter(|&(prev, at, _)| prev == id && now - at < DOUBLE_CLICK);
+    if let Some((_, _, expanded)) = first {
+        *last_click = None;
+        // The first click's toggle and poke were on the way to this.
+        *pending_poke = None;
+        Some(expanded)
+    } else {
+        *last_click = Some((id, now, expanded));
+        if schedule_poke {
+            *pending_poke = Some((id, now));
+        }
+        None
+    }
+}
+
+fn take_due_poke(
+    pending_poke: &mut Option<(AgentId, Instant)>,
+    now: Instant,
+) -> Option<AgentId> {
+    let &(id, at) = pending_poke.as_ref()?;
+    if now.saturating_duration_since(at) < DOUBLE_CLICK {
+        return None;
+    }
+    *pending_poke = None;
+    Some(id)
 }
 
 /// Where the last frame put things, in physical pixels.
@@ -509,12 +551,8 @@ impl ApplicationHandler for Floating<'_> {
                         return;
                     }
                     Key::Character("t") => {
-                        win.on_top = !win.on_top;
-                        win.window.set_window_level(if win.on_top {
-                            WindowLevel::AlwaysOnTop
-                        } else {
-                            WindowLevel::Normal
-                        });
+                        win.window
+                            .set_window_level(toggle_window_level(&mut win.on_top));
                         return;
                     }
                     _ => return,
@@ -595,13 +633,29 @@ fn match_frame_color_space() {
 #[cfg(not(target_os = "macos"))]
 fn match_frame_color_space() {}
 
+/// The window's initial attributes and the matching state for its pin key.
+fn startup_window() -> (WindowAttributes, bool) {
+    let attrs = Window::default_attributes()
+        .with_title("agent-office")
+        .with_window_level(WindowLevel::AlwaysOnTop)
+        .with_inner_size(LogicalSize::new(1180, 620))
+        .with_min_inner_size(LogicalSize::new(720, 360));
+    let on_top = matches!(attrs.window_level, WindowLevel::AlwaysOnTop);
+    (attrs, on_top)
+}
+
+fn toggle_window_level(on_top: &mut bool) -> WindowLevel {
+    *on_top = !*on_top;
+    if *on_top {
+        WindowLevel::AlwaysOnTop
+    } else {
+        WindowLevel::Normal
+    }
+}
+
 impl Floating<'_> {
     fn open(&self, el: &ActiveEventLoop) -> Result<Win> {
-        let attrs = Window::default_attributes()
-            .with_title("agent-office")
-            .with_window_level(WindowLevel::Normal)
-            .with_inner_size(LogicalSize::new(1180, 620))
-            .with_min_inner_size(LogicalSize::new(720, 360));
+        let (attrs, on_top) = startup_window();
         let window = Rc::new(el.create_window(attrs)?);
         // The smallest window whose office still lays out beside the panel
         // at this display's text scale (pixtuoid's `min_window`, plus ours).
@@ -630,7 +684,7 @@ impl Floating<'_> {
                     name: cat_name().to_string(),
                 }],
             },
-            on_top: false,
+            on_top,
             cursor: PhysicalPosition::default(),
             wheel_px: 0.0,
             scroll_left: 0,
@@ -1019,6 +1073,7 @@ impl Win {
     /// The office at the pack's density into [`Self::art`] with its signs and
     /// bubbles, ready to upscale, and the badges to set over it once it is;
     /// `None` when the floor showing could not lay out.
+    #[expect(clippy::too_many_arguments, reason = "one frame's office, drawn once")]
     fn render_office(
         &mut self,
         scene: &SceneState,
@@ -1222,6 +1277,7 @@ impl Win {
     /// its session, and one on the panel's title the sessions waiting. A sign
     /// toggles what its zone is for; any other click puts that away.
     fn click(&mut self) {
+        begin_left_click(&mut self.pending_poke);
         let Some(last) = &self.last else { return };
         let (x, y) = (self.cursor.x.max(0.0) as u32, self.cursor.y.max(0.0) as u32);
         let shown = self.about.take();
@@ -1322,42 +1378,37 @@ impl Win {
         };
         let Some(id) = id else { return };
         let now = Instant::now();
-        let first = self
-            .last_click
-            .filter(|&(prev, at, _)| prev == id && now - at < DOUBLE_CLICK);
-        if let Some((_, _, expanded)) = first {
-            self.last_click = None;
-            // The first click's toggle and poke were on the way to this.
-            self.pending_poke = None;
+        // An idle worker clicked in the office has something to say for
+        // itself, once it is clear this is no double click; one at work
+        // is left to it.
+        let idle = self.core.scene().agents.get(&id).is_some_and(|s| {
+            s.exiting_at.is_none() && matches!(s.state, pixtuoid_core::ActivityState::Idle)
+        });
+        let expanded = update_agent_click(
+            &mut self.last_click,
+            &mut self.pending_poke,
+            id,
+            now,
+            self.core.ui.expanded,
+            in_office && idle,
+        );
+        if let Some(expanded) = expanded {
             self.core.ui.expanded = expanded;
             self.core.ui.selected = Some(id);
             self.core.act(Action::Open, &mut self.office);
         } else {
-            self.last_click = Some((id, now, self.core.ui.expanded));
             self.core.select(id, &mut self.office);
-            // An idle worker clicked in the office has something to say for
-            // itself, once it is clear this is no double click; one at work
-            // is left to it.
-            let idle = self.core.scene().agents.get(&id).is_some_and(|s| {
-                s.exiting_at.is_none() && matches!(s.state, pixtuoid_core::ActivityState::Idle)
-            });
-            if in_office && idle {
-                self.pending_poke = Some((id, now));
-            }
         }
     }
 
     /// The pending poke's answer, once a second click can no longer make it
     /// a double click.
     fn land_poke(&mut self) {
-        let Some((id, at)) = self.pending_poke else {
+        let waiting = self.pending_poke.is_some();
+        let Some(id) = take_due_poke(&mut self.pending_poke, Instant::now()) else {
+            self.quick |= waiting;
             return;
         };
-        if at.elapsed() < DOUBLE_CLICK {
-            self.quick = true;
-            return;
-        }
-        self.pending_poke = None;
         let n = self.pokes.entry(id).or_default();
         let poke = crate::fun::poke(id, *n);
         *n += 1;
@@ -1391,6 +1442,18 @@ struct OfficeExtras {
 /// How long one chitchat line stays before the speaker says the next.
 const CHITCHAT_TURN_MS: u64 = 4_000;
 
+fn paint_night_lights(
+    canvas: &mut Canvas,
+    stage: lively::Stage,
+    tags: &[Tag],
+    late: bool,
+    overtime: &[AgentId],
+) {
+    if late {
+        lively::night_lights(canvas, stage, tags, overtime);
+    }
+}
+
 impl Win {
     /// What goes under the readable text: the late-night dark, the festival's dress, and what stands by each
     /// figure (supper, a briefcase, its mood, the cat, confetti); where the
@@ -1412,9 +1475,7 @@ impl Win {
             .filter(|s| crate::fun::overtime(s, frame.views.get(&s.agent_id), &clock, now))
             .map(|s| s.agent_id)
             .collect();
-        if clock.late() && !overtime.is_empty() {
-            lively::night_lights(canvas, stage, tags, &overtime);
-        }
+        paint_night_lights(canvas, stage, tags, clock.late(), &overtime);
         if let Some(f) = clock.festival() {
             lively::festival(canvas, &mut self.faces, stage, f, signs);
         }
@@ -2950,6 +3011,170 @@ fn paint_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window is promised to open pinned, and its state must match what
+    /// was requested: otherwise the first `t` pins it again instead of
+    /// unpinning it, and the footer tells the user the opposite of the truth.
+    #[test]
+    fn the_window_starts_on_top_and_the_first_toggle_unpins_it() {
+        let (attrs, mut on_top) = startup_window();
+        assert_eq!(attrs.window_level, WindowLevel::AlwaysOnTop);
+        assert!(on_top, "the pin key starts in the window's actual state");
+        assert_eq!(toggle_window_level(&mut on_top), WindowLevel::Normal);
+        assert!(!on_top, "the first `t` records that the window is unpinned");
+        assert_eq!(toggle_window_level(&mut on_top), WindowLevel::AlwaysOnTop);
+        assert!(on_top, "the next `t` pins it again");
+    }
+
+    /// With nobody working overtime there are no pools of light, but a late
+    /// clock must still darken the whole floor: skipping this call left an
+    /// all-idle office looking exactly as bright as it did by day.
+    #[test]
+    fn a_late_office_without_overtime_still_dims_the_whole_floor() {
+        let stage = lively::Stage {
+            u: 1,
+            unit: 1,
+            scale_factor: 1.0,
+            w: 40,
+            h: 40,
+            floor_top: 10,
+            ms: 0,
+        };
+        let original = 0x0080_8080;
+        let mut day = Canvas::new(40, 40, original);
+        paint_night_lights(&mut day, stage, &[], false, &[]);
+        assert!(
+            day.px.iter().all(|&p| p == original),
+            "day stays unchanged"
+        );
+
+        let mut night = Canvas::new(40, 40, original);
+        paint_night_lights(&mut night, stage, &[], true, &[]);
+        let at = |x: u32, y: u32| night.px[(y * night.w + x) as usize];
+        assert_eq!(at(5, 5), original, "the windows' band stays lit");
+        assert_ne!(at(20, 30), original, "an empty floor still goes dark");
+    }
+
+    type TestClickState = (
+        Option<(AgentId, Instant, bool)>,
+        Option<(AgentId, Instant)>,
+    );
+
+    fn first_idle_click(id: AgentId, at: Instant) -> TestClickState {
+        let mut last_click = None;
+        let mut pending_poke = None;
+        assert_eq!(
+            update_agent_click(
+                &mut last_click,
+                &mut pending_poke,
+                id,
+                at,
+                false,
+                true,
+            ),
+            None,
+            "the first click selects rather than opens"
+        );
+        (last_click, pending_poke)
+    }
+
+    /// The delayed answer belongs to the click that scheduled it. Letting A
+    /// react after a later blank click would attribute stale feedback to an
+    /// unrelated gesture, after the user has already moved on.
+    #[test]
+    fn a_blank_click_cancels_the_previous_agents_pending_poke() {
+        let a = AgentId::from_parts("claude-code", "a");
+        let start = Instant::now();
+        let (_last_click, mut pending_poke) = first_idle_click(a, start);
+        begin_left_click(&mut pending_poke);
+        assert_eq!(take_due_poke(&mut pending_poke, start + DOUBLE_CLICK), None);
+        assert!(pending_poke.is_none());
+    }
+
+    /// Whether B schedules no poke (at work or on a panel card) or its own
+    /// (idle in the office), A's older answer must not arrive after B.
+    #[test]
+    fn another_agent_click_cancels_the_previous_agents_pending_poke() {
+        let a = AgentId::from_parts("claude-code", "a");
+        let b = AgentId::from_parts("claude-code", "b");
+        let start = Instant::now();
+        for schedule_poke in [false, true] {
+            let (mut last_click, mut pending_poke) = first_idle_click(a, start);
+            begin_left_click(&mut pending_poke);
+            assert_eq!(
+                update_agent_click(
+                    &mut last_click,
+                    &mut pending_poke,
+                    b,
+                    start + Duration::from_millis(50),
+                    false,
+                    schedule_poke,
+                ),
+                None
+            );
+            assert_eq!(
+                take_due_poke(&mut pending_poke, start + Duration::from_millis(500)),
+                schedule_poke.then_some(b),
+                "B's click may leave B's own answer, never A's stale one"
+            );
+        }
+    }
+
+    /// Signs, the board, the cat, and panel controls return before agent
+    /// selection, so their common gesture boundary is what must cancel A's
+    /// delayed answer; otherwise it can overlay whichever action they did.
+    #[test]
+    fn a_sign_or_other_region_click_cancels_the_pending_poke() {
+        let a = AgentId::from_parts("claude-code", "a");
+        let start = Instant::now();
+        let (_last_click, mut pending_poke) = first_idle_click(a, start);
+        begin_left_click(&mut pending_poke);
+        assert_eq!(take_due_poke(&mut pending_poke, start + DOUBLE_CLICK), None);
+        assert!(pending_poke.is_none());
+    }
+
+    /// A rapid second click on A is different: it opens A and restores the
+    /// card's prior state, while still suppressing the first click's poke.
+    #[test]
+    fn a_double_click_opens_without_landing_the_first_poke() {
+        let a = AgentId::from_parts("claude-code", "a");
+        let start = Instant::now();
+        let (mut last_click, mut pending_poke) = first_idle_click(a, start);
+        begin_left_click(&mut pending_poke);
+        assert_eq!(
+            update_agent_click(
+                &mut last_click,
+                &mut pending_poke,
+                a,
+                start + Duration::from_millis(50),
+                true,
+                true,
+            ),
+            Some(false),
+            "the open path restores the expansion from before the first click"
+        );
+        assert!(last_click.is_none(), "the double-click pair is consumed");
+        assert_eq!(take_due_poke(&mut pending_poke, start + DOUBLE_CLICK), None);
+    }
+
+    /// Cancellation must not disable the feature itself: with no intervening
+    /// gesture, the same click waits out the double-click window and answers.
+    #[test]
+    fn an_uninterrupted_single_click_still_lands_its_poke() {
+        let a = AgentId::from_parts("claude-code", "a");
+        let start = Instant::now();
+        let (_last_click, mut pending_poke) = first_idle_click(a, start);
+        assert_eq!(
+            take_due_poke(
+                &mut pending_poke,
+                start + DOUBLE_CLICK - Duration::from_millis(1),
+            ),
+            None,
+            "a possible second click still gets the full window"
+        );
+        assert!(pending_poke.is_some());
+        assert_eq!(take_due_poke(&mut pending_poke, start + DOUBLE_CLICK), Some(a));
+    }
 
     /// A box round each unread done card read as the card being selected,
     /// two at once as two selected. Its mark is a bar in the gap left of the

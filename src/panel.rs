@@ -130,7 +130,7 @@ pub fn waits_on_you(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> Op
                 && view.is_some_and(|v| {
                     v.needs_task
                         || v.outcome_summarized
-                            && v.outcome.as_deref().is_some_and(|o| crate::i18n::is_ask(o))
+                            && v.outcome.as_deref().is_some_and(crate::i18n::is_ask)
                 }) =>
         {
             Some(Wait::Reply)
@@ -332,24 +332,28 @@ pub fn next_waiting(
     now: SystemTime,
     seen: &HashMap<AgentId, SystemTime>,
 ) -> Option<AgentId> {
-    let waiting: Vec<&AgentSlot> = order(scene, views, now, seen)
+    let mut waiting: Vec<(&AgentSlot, Wait)> = order(scene, views, now, seen)
         .into_iter()
-        .filter(|(_, depth)| *depth == 0)
-        .map(|(id, _)| &scene.agents[&id])
-        .filter(|s| waits_on_you(s, views.get(&s.agent_id), read_since_idle(s, seen)).is_some())
+        .filter_map(|(id, _)| {
+            let slot = scene.agents.get(&id)?;
+            let wait = waits_on_you(slot, views.get(&id), read_since_idle(slot, seen))?;
+            Some((slot, wait))
+        })
         .collect();
+    // `order` is by roots, so a waiting child under a working root would
+    // otherwise follow every waiting root. The waiting line is global.
+    waiting.sort_by_key(|(slot, wait)| (*wait, slot.state_started_at));
     let lined_up = |s: &&AgentSlot| {
         now.duration_since(s.state_started_at)
             .unwrap_or_default()
             .as_millis()
             >= u128::from(pixtuoid_scene::waiting::LINE_UP_AFTER_MS)
     };
-    waiting
+    let next = waiting
         .iter()
-        .copied()
-        .find(lined_up)
-        .or(waiting.first().copied())
-        .map(|s| s.agent_id)
+        .position(|(slot, _)| lined_up(slot))
+        .unwrap_or(0);
+    waiting.get(next).map(|(slot, _)| slot.agent_id)
 }
 
 /// `slot` then its subagents, theirs under them, oldest first at each level.
@@ -1142,7 +1146,7 @@ pub fn render(
         .iter()
         .filter(|(_, d)| *d == 0)
         .filter_map(|(id, _)| scene.agents.get(id))
-        .map(|s| group_of(s))
+        .map(&group_of)
         .collect();
     // The scroll mark takes the title row's right end when cards overflow.
     let room = usize::from(area.width).saturating_sub(1 + 4);
@@ -1466,6 +1470,7 @@ fn bar_labels(width: u16) -> Option<Vec<Vec<(crate::roles::Role, &'static str)>>
 /// The hosts are a list, not "this one and the other": adding Cursor to
 /// [`crate::roles::Backend::ALL`] puts a third chip here with no new layout,
 /// which a `⇄` that names one alternative could never do.
+#[expect(clippy::too_many_arguments, reason = "one role bar's layout and drawing state")]
 fn role_bar(
     x: u16,
     y: u16,
@@ -2118,6 +2123,51 @@ mod tests {
             "nothing left to deal with"
         );
         assert_eq!(next_waiting(&answered, &views, now, &none), Some(asked));
+    }
+
+    /// A running parent's only waiting child still needs an answer. The badge
+    /// already counts it, so the next-waiting key must be able to reach it;
+    /// adding roots must not put the child back behind an older reply or a
+    /// younger prompt in another tree.
+    #[test]
+    fn a_waiting_subagent_is_next_in_the_global_waiting_order() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let parent = start(&mut scene, &mut r, "parent", None, t0);
+        let child = start(&mut scene, &mut r, "agent-child", Some(parent), t0);
+        scene.agents.get_mut(&parent).unwrap().state = ActivityState::Running { item: None };
+        let child_slot = scene.agents.get_mut(&child).unwrap();
+        child_slot.state = ActivityState::RequiresAction { reason: None };
+        child_slot.state_started_at = now - Duration::from_secs(60);
+        let mut views = TaskViews::default();
+        let seen = HashMap::new();
+        let rows = order(&scene, &views, now, &seen);
+        assert_eq!(waiting(&scene, &views, &rows, &seen), [child]);
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child));
+
+        // Prompts outrank replies across trees, not just among root sessions.
+        let reply = start(&mut scene, &mut r, "reply", None, t0);
+        let reply_slot = scene.agents.get_mut(&reply).unwrap();
+        reply_slot.state = ActivityState::Idle;
+        reply_slot.state_started_at = now - Duration::from_secs(600);
+        views = std::sync::Arc::new(HashMap::from([(
+            reply,
+            TaskView {
+                outcome: Some("问：可以合并吗？".into()),
+                outcome_summarized: true,
+                ..TaskView::default()
+            },
+        )]));
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child));
+
+        // Within prompts the oldest state_started_at wins globally too.
+        let younger = start(&mut scene, &mut r, "younger", None, t0);
+        let younger_slot = scene.agents.get_mut(&younger).unwrap();
+        younger_slot.state = ActivityState::RequiresAction { reason: None };
+        younger_slot.state_started_at = now - Duration::from_secs(30);
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child));
     }
 
     /// A card leads with its repository's initial on the repository's colour

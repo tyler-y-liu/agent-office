@@ -75,10 +75,7 @@ const HOST_CACHE_FOR: Duration = Duration::from_secs(2);
 
 /// The session a dispatch goes from: the selected one, else the one that
 /// started its state last — the worker whose repository and work it carries.
-fn dispatch_worker<'a>(
-    scene: &'a SceneState,
-    selected: Option<AgentId>,
-) -> Option<&'a AgentSlot> {
+fn dispatch_worker(scene: &SceneState, selected: Option<AgentId>) -> Option<&AgentSlot> {
     let selected = selected.filter(|id| scene.agents.contains_key(id));
     match selected {
         Some(id) => scene.agents.get(&id),
@@ -96,6 +93,16 @@ fn host_of(slot: &AgentSlot) -> crate::roles::Backend {
         crate::roles::Backend::Dsh
     } else {
         crate::roles::Backend::Claude
+    }
+}
+
+/// Where a dispatch goes: fresh work belongs to the main checkout, while a
+/// relay must stay beside the changes it picks up.
+fn dispatch_dir(cwd: &std::path::Path, relay: bool) -> std::path::PathBuf {
+    if relay {
+        cwd.to_path_buf()
+    } else {
+        crate::roles::repo_root(cwd)
     }
 }
 
@@ -126,6 +133,23 @@ fn hooks_out() -> &'static str {
     )
 }
 
+/// A dead input makes the scene stale, so its source and fatal error outrank the
+/// ordinary healthy footer. Only the error chain is shown, never a transcript.
+pub(crate) fn source_death_note(
+    deaths: &[pixtuoid_core::source::manager::SourceDeath],
+) -> Option<String> {
+    let death = deaths.last()?;
+    let source = crate::text::one_line(&death.source);
+    let error = crate::text::one_line(&death.error);
+    let note = crate::tr!(
+        "数据源 {} 已停止：{}",
+        "source {} stopped: {}",
+        source,
+        error
+    );
+    Some(crate::text::truncate_cells(&note, 120))
+}
+
 /// How often an empty office looks again at the hooks and roles.
 const SETUP_RECHECK: Duration = Duration::from_secs(3);
 /// How long a note on what a key did stays in the footer.
@@ -151,6 +175,9 @@ pub struct Core {
     hooks: bool,
     /// What the last key did, shown in place of the summary note a while.
     note: Option<(String, Tone, Instant)>,
+    /// The latest fatal source exit, refreshed every frame. A recent action
+    /// note takes precedence briefly; the retained warning returns afterwards.
+    source_warning: Option<String>,
     /// When `q` was pressed once, waiting on a second.
     quit_armed: Option<Instant>,
     pub pipe: pipeline::Pipeline,
@@ -167,7 +194,9 @@ pub struct Core {
     /// `ps`, tmux, `open`), their results back here: who, the scene asked
     /// against, and what happened.
     jumps: Jumps,
-    /// DSH dispatch waits for a Host without freezing the office's event loop.
+    /// The real jump by default; tests substitute one that never opens an app.
+    open_agent: fn(&SceneState, AgentId) -> Result<&'static str, String>,
+    /// Dispatch waits for a desktop app or Host without freezing the event loop.
     dispatches: Dispatches,
     /// When the role bar's host was last worked out, and what it was: the
     /// answer walks the role files, and the bar is drawn every beat.
@@ -196,18 +225,47 @@ impl Default for Jumps {
     }
 }
 
-type Dispatched = (crate::roles::Role, bool, anyhow::Result<String>);
+type Dispatched = (
+    crate::roles::Backend,
+    crate::roles::Role,
+    bool,
+    anyhow::Result<String>,
+);
 
 struct Dispatches {
     tx: std::sync::mpsc::Sender<Dispatched>,
     rx: std::sync::mpsc::Receiver<Dispatched>,
-    out: bool,
+    /// The host actually in flight: a rejected new plan may name the other one.
+    out: Option<crate::roles::Backend>,
 }
 
 impl Default for Dispatches {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        Self { tx, rx, out: false }
+        Self { tx, rx, out: None }
+    }
+}
+
+/// A host's own result for DSH, whose text includes where the session went;
+/// Claude's GUI note keeps its relay/fresh wording in either language.
+fn dispatch_success(
+    backend: crate::roles::Backend,
+    role: crate::roles::Role,
+    relay: bool,
+    message: String,
+) -> String {
+    match backend {
+        crate::roles::Backend::Dsh => message,
+        crate::roles::Backend::Claude if relay => crate::tr!(
+            "已在 Claude 开好「{}」接力会话，看一眼就发送",
+            "opened a {} relay in Claude: check it and send",
+            role.name()
+        ),
+        crate::roles::Backend::Claude => crate::tr!(
+            "已在 Claude 开好「{}」的新会话，写上任务发送",
+            "opened a new {} session in Claude: write the task and send",
+            role.name()
+        ),
     }
 }
 
@@ -483,6 +541,7 @@ impl Core {
             head_labels: true,
             hooks: crate::hook::installed(),
             note: None,
+            source_warning: None,
             quit_armed: None,
             pipe,
             views_rx,
@@ -494,6 +553,7 @@ impl Core {
             notifier: notify::Notifier::default(),
             banners: notify::banners_on(),
             jumps: Jumps::default(),
+            open_agent: jump::open_agent,
             dispatches: Dispatches::default(),
             host_at: None,
             picked_host: None,
@@ -520,6 +580,7 @@ impl Core {
 
     /// The state to draw now; drops a selection whose agent left.
     pub fn frame(&mut self) -> Frame {
+        self.source_warning = source_death_note(&self.pipe.deaths_rx.borrow());
         self.land_jumps();
         self.land_dispatches();
         let views = self.views_rx.borrow().clone();
@@ -737,8 +798,9 @@ impl Core {
                     self.note(crate::i18n::t("正在打开…", "opening…"), Tone::Ok);
                     let scene = self.scene();
                     let tx = self.jumps.tx.clone();
+                    let open = self.open_agent;
                     std::thread::spawn(move || {
-                        let done = jump::open_agent(&scene, id);
+                        let done = open(&scene, id);
                         let _ = tx.send((id, scene, done));
                     });
                 }
@@ -747,10 +809,7 @@ impl Core {
                     Tone::Failed,
                 ),
             },
-            Action::OpenWaiting => self.note_result(
-                jump::open_url(jump::NEEDS_INPUT)
-                    .map(|()| crate::i18n::t("已在 Claude 打开", "opened in Claude")),
-            ),
+            Action::OpenWaiting => self.note_result(jump::open_desktop(jump::NEEDS_INPUT)),
         }
         false
     }
@@ -774,17 +833,19 @@ impl Core {
         }
     }
 
-    /// DSH waits off-thread; only its short outcome lands in the office frame.
+    /// Both hosts wait off-thread; only their short outcomes land in a frame.
     fn land_dispatches(&mut self) {
-        while let Ok((role, relay, done)) = self.dispatches.rx.try_recv() {
-            self.dispatches.out = false;
+        while let Ok((backend, role, relay, done)) = self.dispatches.rx.try_recv() {
+            self.dispatches.out = None;
             let kind = if relay { "relay" } else { "fresh" };
             self.watch.tally(&match &done {
                 Ok(_) => format!("dispatch.{kind}.{}", role.post().id),
                 Err(_) => "dispatch.failed".to_owned(),
             });
             match done {
-                Ok(message) => self.note(&message, Tone::Ok),
+                Ok(message) => {
+                    self.note(&dispatch_success(backend, role, relay, message), Tone::Ok)
+                }
                 Err(e) => self.note(
                     &crate::tr!("派活失败：{}", "dispatch failed: {}", e),
                     Tone::Failed,
@@ -867,11 +928,7 @@ impl Core {
         // never into a worktree under its owner; a relay goes where the work
         // it carries on is, since a worktree's changes are not in the main
         // checkout.
-        let dir = if relay.is_some() {
-            slot.cwd.to_path_buf()
-        } else {
-            pixtuoid_core::state::project_root(&slot.cwd).to_path_buf()
-        };
+        let dir = dispatch_dir(&slot.cwd, relay.is_some());
         self.watch.tally(if relay.is_some() {
             "picker.open.relay"
         } else {
@@ -891,8 +948,8 @@ impl Core {
 
     /// What the role bar shows: the host a click dispatches into, and whether
     /// the other one could take a dispatch too. `None` hides the bar: one
-    /// that only ever answers "not set up" would be furniture. Cheap enough
-    /// to ask each frame, unlike a whole plan — no relay text, no repository.
+    /// that only ever answers "not set up" would be furniture. The cache above
+    /// bounds `repo_root`'s git lookup to one miss per 2s, never one per frame.
     pub fn dispatch_bar(&mut self) -> Option<DispatchBar> {
         if let Some((at, bar)) = &self.host_at
             && at.elapsed() < HOST_CACHE_FOR
@@ -964,7 +1021,7 @@ impl Core {
     fn worker_host(&self) -> Option<(crate::roles::Backend, std::path::PathBuf)> {
         let scene = self.scene();
         let slot = dispatch_worker(&scene, self.ui.selected)?;
-        let dir = pixtuoid_core::state::project_root(&slot.cwd).to_path_buf();
+        let dir = dispatch_dir(&slot.cwd, false);
         Some((host_of(slot), dir))
     }
 
@@ -984,74 +1041,83 @@ impl Core {
     /// Send `plan` to `role`: a relay with its task written, else a fresh
     /// session for you to give one.
     pub fn dispatch(&mut self, plan: &DispatchPlan, role: crate::roles::Role) {
-        let task = plan.relay.as_ref().map_or("", |r| r.task.as_str());
-        if plan.backend == crate::roles::Backend::Dsh {
-            if self.dispatches.out {
-                self.note(
-                    crate::i18n::t(
-                        "上一次 DSH 派活还没完成，等它出结果再派",
-                        "wait for the current DSH dispatch before starting another",
-                    ),
-                    Tone::Failed,
-                );
-                return;
-            }
-            self.dispatches.out = true;
+        self.dispatch_with(plan, role, crate::roles::dispatch);
+    }
+
+    /// The injectable runner keeps dispatch timing and its landing testable
+    /// without opening a real desktop session.
+    fn dispatch_with(
+        &mut self,
+        plan: &DispatchPlan,
+        role: crate::roles::Role,
+        dispatch: impl FnOnce(
+            crate::roles::Backend,
+            crate::roles::Role,
+            &std::path::Path,
+            &str,
+            bool,
+        ) -> anyhow::Result<String>
+        + Send
+        + 'static,
+    ) {
+        let backend = plan.backend;
+        if let Some(in_flight) = self.dispatches.out {
             self.note(
-                crate::i18n::t("正在让 DSH 创建角色会话…", "asking DSH to create the role session…"),
-                Tone::Ok,
+                &crate::tr!(
+                    "上一次 {} 派活还没完成，等它出结果再派",
+                    "wait for the current {} dispatch before starting another",
+                    in_flight.short()
+                ),
+                Tone::Failed,
             );
-            let tx = self.dispatches.tx.clone();
-            let dir = plan.dir.clone();
-            let task = task.to_owned();
-            let relay = plan.relay.is_some();
-            std::thread::spawn(move || {
-                let done = crate::roles::dispatch(crate::roles::Backend::Dsh, role, &dir, &task, false);
-                let _ = tx.send((role, relay, done));
-            });
             return;
         }
-        let done = crate::roles::dispatch(plan.backend, role, &plan.dir, task, false);
-        let kind = if plan.relay.is_some() { "relay" } else { "fresh" };
-        self.watch.tally(&match &done {
-            Ok(_) => format!("dispatch.{kind}.{}", role.post().id),
-            Err(_) => "dispatch.failed".to_owned(),
+        self.dispatches.out = Some(backend);
+        self.note(
+            match backend {
+                crate::roles::Backend::Dsh => crate::i18n::t(
+                    "正在让 DSH 创建角色会话…",
+                    "asking DSH to create the role session…",
+                ),
+                crate::roles::Backend::Claude => crate::i18n::t(
+                    "正在让 Claude 打开会话…",
+                    "asking Claude to open the session…",
+                ),
+            },
+            Tone::Ok,
+        );
+        let tx = self.dispatches.tx.clone();
+        let dir = plan.dir.clone();
+        let task = plan
+            .relay
+            .as_ref()
+            .map_or("", |r| r.task.as_str())
+            .to_owned();
+        let relay = plan.relay.is_some();
+        std::thread::spawn(move || {
+            let done = dispatch(backend, role, &dir, &task, false);
+            let _ = tx.send((backend, role, relay, done));
         });
-        match done {
-            Ok(_) if plan.relay.is_some() => self.note(
-                &crate::tr!(
-                    "已在 Claude 开好「{}」接力会话，看一眼就发送",
-                    "opened a {} relay in Claude: check it and send",
-                    role.name()
-                ),
-                Tone::Ok,
-            ),
-            Ok(_) => self.note(
-                &crate::tr!(
-                    "已在 Claude 开好「{}」的新会话，写上任务发送",
-                    "opened a new {} session in Claude: write the task and send",
-                    role.name()
-                ),
-                Tone::Ok,
-            ),
-            Err(e) => self.note(
-                &crate::tr!("派活失败：{}", "dispatch failed: {}", e),
-                Tone::Failed,
-            ),
-        }
     }
 
     fn note(&mut self, text: &str, tone: Tone) {
         self.note = Some((text.to_owned(), tone, Instant::now()));
     }
 
-    /// The footer's right-hand note: a fresh note on what a key did, else the
-    /// summary model, after a warning while the hooks are out.
+    /// The footer's right-hand note: a fresh note on what a key did, else a
+    /// fatal source warning, then the summary after a warning if hooks are out.
     fn status_note(&self) -> (String, Option<Tone>) {
         match &self.note {
             Some((text, tone, at)) if at.elapsed() < NOTE_FOR => (text.clone(), Some(*tone)),
-            _ if !self.hooks => (format!("{} · {}", hooks_out(), self.summary_note()), None),
-            _ => (self.summary_note().to_owned(), None),
+            _ => {
+                if let Some(warning) = &self.source_warning {
+                    (warning.clone(), Some(Tone::Failed))
+                } else if !self.hooks {
+                    (format!("{} · {}", hooks_out(), self.summary_note()), None)
+                } else {
+                    (self.summary_note().to_owned(), None)
+                }
+            }
         }
     }
 
@@ -1288,6 +1354,470 @@ mod tests {
     use super::*;
     use pixtuoid_core::Reducer;
     use pixtuoid_core::source::{AgentEvent, Transport};
+
+    #[derive(Default)]
+    struct TestFloors {
+        current: usize,
+        count: usize,
+    }
+
+    impl Floors for TestFloors {
+        fn current_floor(&self) -> usize {
+            self.current
+        }
+
+        fn n_floors(&self) -> usize {
+            self.count.max(1)
+        }
+
+        fn navigate(&mut self, floor: usize, _now: SystemTime) {
+            self.current = floor;
+        }
+    }
+
+    /// A Core whose scene and task channels are in memory. The short-lived
+    /// runtime provides pipeline-owned layout state and is shut down before
+    /// the assertions; no app or GUI starts.
+    fn core_with_scene(scene: SceneState) -> Core {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "agent-office-core-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let socket = root.join("hook.sock");
+        let spawned = rt.block_on(async { pipeline::spawn(socket, 100, 40) });
+        rt.shutdown_background();
+        let _ = std::fs::remove_dir_all(&root);
+        let pipeline::Pipeline {
+            floor_caps,
+            deaths_rx,
+            ..
+        } = spawned;
+        let (scene_tx, scene_rx) = tokio::sync::watch::channel(Arc::new(scene));
+        drop(scene_tx);
+        let pipe = pipeline::Pipeline {
+            scene_rx,
+            floor_caps,
+            deaths_rx,
+        };
+        let (_views_tx, views_rx) =
+            tokio::sync::watch::channel(tasks::TaskViews::default());
+        let (force_tx, _force_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_outlook_tx, outlook_rx) = tokio::sync::watch::channel(Outlook::default());
+        let (_desktop_tx, desktop_rx) =
+            tokio::sync::watch::channel(desktop::Looks::default());
+        Core {
+            ui: PanelState::default(),
+            head_labels: true,
+            hooks: true,
+            note: None,
+            source_warning: None,
+            quit_armed: None,
+            pipe,
+            views_rx,
+            force_tx,
+            watch: Watch::default(),
+            outlook_rx,
+            desktop_rx,
+            notifier: notify::Notifier::default(),
+            banners: false,
+            jumps: Jumps::default(),
+            open_agent: jump::open_agent,
+            dispatches: Dispatches::default(),
+            host_at: None,
+            picked_host: None,
+            setup_checked: None,
+        }
+    }
+
+    fn land_until_done(core: &mut Core) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while core.dispatches.out.is_some() && Instant::now() < deadline {
+            core.land_dispatches();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        core.land_dispatches();
+        assert!(
+            core.dispatches.out.is_none(),
+            "dispatch result did not land"
+        );
+    }
+
+    fn fake_open_agent(_scene: &SceneState, _id: AgentId) -> Result<&'static str, String> {
+        Ok("test open; no GUI")
+    }
+
+    /// A failed dispatch can mean the result is unknown, so retrying blindly is
+    /// unsafe. That immediate instruction must not disappear behind a source
+    /// death; once its ordinary display window ends, the stale input stays
+    /// visible and its retained health state remains intact.
+    #[test]
+    fn recent_action_note_precedes_a_source_warning_until_it_expires() {
+        let mut core = core_with_scene(SceneState::uniform(8));
+        let warning = "数据源 claude-code 已停止：listener exploded";
+        core.source_warning = Some(warning.into());
+        core.note("派活失败：结果未知，先检查勿重试", Tone::Failed);
+        assert_eq!(
+            core.status_note(),
+            (
+                "派活失败：结果未知，先检查勿重试".into(),
+                Some(Tone::Failed)
+            )
+        );
+        assert_eq!(core.source_warning.as_deref(), Some(warning));
+
+        let (_, _, at) = core.note.as_mut().unwrap();
+        *at = Instant::now()
+            .checked_sub(NOTE_FOR + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(core.status_note(), (warning.into(), Some(Tone::Failed)));
+        assert_eq!(core.source_warning.as_deref(), Some(warning));
+    }
+
+    /// A waiting child is already included in waiting counts and alerts. Both
+    /// OpenNext and notification refocus must select that same child, and the
+    /// jump must resolve it to the root session exactly as open_agent does.
+    #[test]
+    fn open_next_and_notification_refocus_reach_a_waiting_subagent() {
+        let now = SystemTime::now();
+        let started = now - Duration::from_secs(120);
+        let mut scene = SceneState::uniform(8);
+        let mut reducer = Reducer::new();
+        let mut start = |sid: &str, parent: Option<AgentId>| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            reducer.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: parent,
+                },
+                started,
+                Transport::Hook,
+            );
+            id
+        };
+        let parent = start("parent", None);
+        let child = start("agent-child", Some(parent));
+        scene.agents.get_mut(&parent).unwrap().state =
+            pixtuoid_core::ActivityState::Running { item: None };
+        let waiting = scene.agents.get_mut(&child).unwrap();
+        waiting.state = pixtuoid_core::ActivityState::RequiresAction { reason: None };
+        waiting.state_started_at = now - Duration::from_secs(60);
+        let views = tasks::TaskViews::default();
+        let seen = HashMap::new();
+        let rows = panel::order(&scene, &views, now, &seen);
+        assert_eq!(panel::waiting(&scene, &views, &rows, &seen), [child]);
+
+        let mut core = core_with_scene(scene.clone());
+        core.open_agent = fake_open_agent;
+        assert_eq!(core.next_waiting(), Some(child));
+        let mut floors = TestFloors::default();
+        core.act(Action::OpenNext, &mut floors);
+        assert_eq!(core.ui.selected, Some(child));
+        let (opened, opened_scene, done) = core
+            .jumps
+            .rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the injected opener ran without a GUI");
+        assert!(done.is_ok());
+        assert_eq!(opened, child);
+        assert_eq!(
+            jump::root_agent(&opened_scene, opened).unwrap().agent_id,
+            parent,
+            "OpenNext passed a child whose jump opens the root session"
+        );
+
+        // Prime before the wait began so the next tick is an actual unseen
+        // banner, not merely an initial waiting session.
+        let mut primed = scene.clone();
+        primed.agents.get_mut(&child).unwrap().state =
+            pixtuoid_core::ActivityState::Running { item: None };
+        core.notifier.tick(&primed, &views, &seen, started, false);
+        let tick = core.notifier.tick(&scene, &views, &seen, now, false);
+        assert_eq!(tick.badge, Some(1));
+        assert_eq!(tick.alerts.len(), 1);
+        assert_eq!(tick.alerts[0].agent, child);
+        assert!(core.notifier.unseen);
+        core.ui.selected = None;
+        core.focus_gained(&mut floors);
+        assert_eq!(core.ui.selected, Some(child));
+        assert!(!core.notifier.unseen);
+    }
+
+    /// Async landing must not flatten Claude's fresh and relay instructions or
+    /// freeze them in one language. DSH already returns its richer route note,
+    /// which is preserved verbatim.
+    #[test]
+    fn dispatch_success_notes_keep_host_kind_and_language() {
+        use crate::i18n::{Lang, with};
+        for (relay, zh, en) in [
+            (
+                false,
+                "已在 Claude 开好「后端」的新会话，写上任务发送",
+                "opened a new Backend session in Claude: write the task and send",
+            ),
+            (
+                true,
+                "已在 Claude 开好「后端」接力会话，看一眼就发送",
+                "opened a Backend relay in Claude: check it and send",
+            ),
+        ] {
+            assert_eq!(
+                with(Lang::Zh, || {
+                    dispatch_success(
+                        crate::roles::Backend::Claude,
+                        crate::roles::Role::Backend,
+                        relay,
+                        "CLI text stays out of the GUI note".into(),
+                    )
+                }),
+                zh
+            );
+            assert_eq!(
+                with(Lang::En, || {
+                    dispatch_success(
+                        crate::roles::Backend::Claude,
+                        crate::roles::Role::Backend,
+                        relay,
+                        "CLI text stays out of the GUI note".into(),
+                    )
+                }),
+                en
+            );
+        }
+        assert_eq!(
+            dispatch_success(
+                crate::roles::Backend::Dsh,
+                crate::roles::Role::Qa,
+                true,
+                "created and submitted a QA relay (shop · abc123)".into(),
+            ),
+            "created and submitted a QA relay (shop · abc123)"
+        );
+    }
+
+    /// Claude's checked URL open may take seconds. It must happen off the UI
+    /// thread: another action works while it is out, a repeat does not start a
+    /// competing dispatch, and its eventual success and failure both land.
+    #[test]
+    fn claude_dispatch_stays_asynchronous_and_lands_its_outcome() {
+        let mut core = core_with_scene(SceneState::uniform(8));
+        let mut floors = TestFloors::default();
+        let plan = DispatchPlan {
+            dir: std::env::temp_dir(),
+            backend: crate::roles::Backend::Claude,
+            relay: None,
+            switchable: false,
+        };
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let releaser = std::thread::spawn(move || {
+            // Bounds the fail-before run too: the old synchronous call returns
+            // here and fails the elapsed assertion instead of hanging a test.
+            std::thread::sleep(Duration::from_millis(600));
+            let _ = release_tx.send(());
+        });
+        let started = Instant::now();
+        core.dispatch_with(&plan, crate::roles::Role::Backend, move |backend, _, _, _, _| {
+            assert_eq!(backend, crate::roles::Backend::Claude);
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok("the CLI keeps its own success text".into())
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "dispatch blocked the UI thread for {:?}",
+            started.elapsed()
+        );
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        core.act(Action::ToggleLabels, &mut floors);
+        assert!(!core.head_labels, "an action is handled while dispatch is out");
+        assert_eq!(core.dispatches.out, Some(crate::roles::Backend::Claude));
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let duplicates = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&duplicates);
+        core.dispatch_with(&plan, crate::roles::Role::Qa, move |_, _, _, _, _| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok("must not run".into())
+        });
+        land_until_done(&mut core);
+        releaser.join().unwrap();
+        assert_eq!(
+            duplicates.load(Ordering::Relaxed),
+            0,
+            "one dispatch at a time"
+        );
+        assert_eq!(
+            core.watch.stats.uses.get("dispatch.fresh.backend"),
+            Some(&1)
+        );
+        let (note, tone, _) = core.note.as_ref().unwrap();
+        assert_eq!(note, "已在 Claude 开好「后端」的新会话，写上任务发送");
+        assert_eq!(*tone, Tone::Ok);
+
+        core.dispatch_with(&plan, crate::roles::Role::Qa, |_, _, _, _, _| {
+            Err(anyhow::anyhow!("injected failure"))
+        });
+        land_until_done(&mut core);
+        let (note, tone, _) = core.note.as_ref().unwrap();
+        assert_eq!(note, "派活失败：injected failure");
+        assert_eq!(*tone, Tone::Failed);
+        assert_eq!(core.watch.stats.uses.get("dispatch.failed"), Some(&1));
+    }
+
+    /// The rejection belongs to the host already working, not to the new plan
+    /// it refused. Exercise both directions without a real desktop app, then
+    /// cross the async landing before proving the other host can now run.
+    fn assert_busy_dispatch_names_in_flight_host(in_flight: crate::roles::Backend) {
+        use crate::i18n::{Lang, with};
+        use crate::roles::Backend;
+
+        let rejected = in_flight.other();
+        let plan = |backend| DispatchPlan {
+            dir: std::env::temp_dir(),
+            backend,
+            relay: None,
+            switchable: true,
+        };
+        let mut core = core_with_scene(SceneState::uniform(8));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        core.dispatch_with(
+            &plan(in_flight),
+            crate::roles::Role::Backend,
+            move |backend, _, _, _, _| {
+                assert_eq!(backend, in_flight);
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok("in-flight dispatch landed".into())
+            },
+        );
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        core.dispatch_with(&plan(rejected), crate::roles::Role::Qa, |_, _, _, _, _| {
+            panic!("a competing dispatch must not run")
+        });
+        let (note, tone, _) = core.note.as_ref().unwrap();
+        let lost = match in_flight {
+            Backend::Dsh => "上一次 DSH 派活还没完成，等它出结果再派",
+            Backend::Claude => "上一次 Claude 派活还没完成，等它出结果再派",
+        };
+        assert_eq!(note, lost);
+        assert_eq!(*tone, Tone::Failed);
+
+        with(Lang::En, || {
+            core.dispatch_with(&plan(rejected), crate::roles::Role::Qa, |_, _, _, _, _| {
+                panic!("a competing dispatch must not run")
+            });
+            let (note, tone, _) = core.note.as_ref().unwrap();
+            assert_eq!(
+                note,
+                &format!(
+                    "wait for the current {} dispatch before starting another",
+                    in_flight.short()
+                )
+            );
+            assert_eq!(*tone, Tone::Failed);
+        });
+
+        release_tx.send(()).unwrap();
+        land_until_done(&mut core);
+        assert_eq!(
+            core.watch.stats.uses.get("dispatch.fresh.backend"),
+            Some(&1),
+            "the original dispatch still lands and is counted"
+        );
+        with(Lang::En, || {
+            core.dispatch_with(
+                &plan(rejected),
+                crate::roles::Role::Qa,
+                move |backend, _, _, _, _| {
+                    assert_eq!(backend, rejected);
+                    Err(anyhow::anyhow!("next dispatch failed"))
+                },
+            );
+            land_until_done(&mut core);
+            let (note, tone, _) = core.note.as_ref().unwrap();
+            assert_eq!(note, "dispatch failed: next dispatch failed");
+            assert_eq!(*tone, Tone::Failed);
+        });
+        assert!(core.dispatches.out.is_none());
+        assert_eq!(core.watch.stats.uses.get("dispatch.failed"), Some(&1));
+    }
+
+    #[test]
+    fn dsh_in_flight_rejection_does_not_blame_claude() {
+        assert_busy_dispatch_names_in_flight_host(crate::roles::Backend::Dsh);
+    }
+
+    #[test]
+    fn claude_in_flight_rejection_does_not_blame_dsh() {
+        assert_busy_dispatch_names_in_flight_host(crate::roles::Backend::Claude);
+    }
+
+    /// Two fresh sessions must not edit one ordinary git worktree at once, but
+    /// a relay belongs beside that worktree's uncommitted changes. Exercise the
+    /// real git layout: pixtuoid's seat helper only knows `.claude/worktrees`.
+    #[test]
+    fn fresh_dispatch_uses_main_checkout_while_relay_keeps_ordinary_worktree() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-office-core-worktree-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&main, &["init", "-q"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        );
+        let worktree = root.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", worktree.to_str().unwrap()],
+        );
+        let main = main.canonicalize().unwrap();
+        assert_eq!(
+            pixtuoid_core::state::project_root(&worktree),
+            worktree,
+            "the regression really is an ordinary worktree, not a pixtuoid seat"
+        );
+        assert_eq!(dispatch_dir(&worktree, false), main, "fresh");
+        assert_eq!(dispatch_dir(&worktree, true), worktree, "relay");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The footer's key hints run longer than a narrow window: drawn across
     /// the whole row, they were overwritten mid-word by the status, which

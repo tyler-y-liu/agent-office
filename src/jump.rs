@@ -23,9 +23,10 @@ use pixtuoid_core::{AgentId, AgentSlot, SceneState};
 /// The desktop app's list of sessions waiting on the user.
 pub const NEEDS_INPUT: &str = "claude://code/needs-input";
 
-/// Open the session `id` belongs to; a subagent opens its root's. `Ok` is the
-/// footer's note on where it went, the error what to tell the user.
-pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, String> {
+/// The slot `open_agent` opens: a subagent's root session. Kept separate so
+/// the next-waiting path can prove its selected child reaches this same root
+/// without asking the OS to open anything.
+pub(crate) fn root_agent(scene: &SceneState, id: AgentId) -> Result<&AgentSlot, String> {
     let mut slot = scene
         .agents
         .get(&id)
@@ -37,6 +38,13 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
             None => break,
         }
     }
+    Ok(slot)
+}
+
+/// Open the session `id` belongs to; a subagent opens its root's. `Ok` is the
+/// footer's note on where it went, the error what to tell the user.
+pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, String> {
+    let slot = root_agent(scene, id)?;
     let pid = match &*slot.source {
         crate::pipeline::CC_SOURCE => {
             let dir = crate::tasks::projects_root()
@@ -47,8 +55,7 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
                 ))?;
             let (pid, entry) = registry_entry(&dir, &slot.session_id)?;
             if let Some(url) = url_for(&entry).map_err(str::to_owned)? {
-                return open_url(&url)
-                    .map(|()| crate::i18n::t("已在 Claude 打开", "opened in Claude"));
+                return open_desktop(&url);
             }
             pid
         }
@@ -479,22 +486,24 @@ fn activate_os(_pid: i32) -> bool {
     false
 }
 
-pub fn open_url(url: &str) -> Result<(), String> {
-    // Reaped off the window's thread: `open` hands the link to the app and
-    // returns, and a frame should not stall on it, nor leave it a zombie.
-    let mut child = std::process::Command::new("open")
-        .arg(url)
-        .spawn()
-        .map_err(|e| crate::tr!("open 失败：{e}", "open failed: {e}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+/// Open a desktop link only after `open` says something took it. Both desktop
+/// jumps use this: spawning `open` alone also succeeds when no app claims the
+/// scheme, which used to put a false success note in the footer.
+pub fn open_desktop(url: &str) -> Result<&'static str, String> {
+    open_desktop_with(url, open_url_checked)
 }
 
-/// `open_url`, waiting for `open` to say whether anything took the link:
-/// a dispatch must not report a session opened when no app claims
-/// `claude://`. Called from the window's thread, so the wait is bounded.
+/// The injectable seam keeps both callers' result mapping testable without
+/// opening a real app.
+fn open_desktop_with(
+    url: &str,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<&'static str, String> {
+    open(url).map(|()| crate::i18n::t("已在 Claude 打开", "opened in Claude"))
+}
+
+/// Wait for `open` to say whether anything took the link: a jump must not
+/// report a session opened when no app claims `claude://`. The wait is bounded.
 pub fn open_url_checked(url: &str) -> Result<(), String> {
     // Its output is dropped: stderr repeats the link, the whole prompt in it.
     let child = std::process::Command::new("open")
@@ -614,6 +623,22 @@ mod tests {
         // The real `open` on a scheme no app claims.
         #[cfg(target_os = "macos")]
         assert!(open_url_checked("agentofficenosuch://x").is_err());
+    }
+
+    /// Both desktop jump paths share this mapping. A refused URL must reach
+    /// the footer as an error, never as the old spawn-only false success.
+    #[test]
+    fn a_desktop_jump_reports_the_checked_open_result() {
+        let mut asked = None;
+        let failed = open_desktop_with("claude://code/needs-input", |url| {
+            asked = Some(url.to_owned());
+            Err("no application claims claude://".into())
+        });
+        assert_eq!(asked.as_deref(), Some("claude://code/needs-input"));
+        assert!(failed.is_err_and(|e| e.contains("no application")));
+
+        let opened = open_desktop_with("claude://code/continue?session=local_demo", |_| Ok(()));
+        assert!(opened.is_ok());
     }
 
     /// `open` waits while a cold app starts: the window must not freeze

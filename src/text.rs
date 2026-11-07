@@ -9,6 +9,9 @@ pub fn cells(s: &str) -> u16 {
 
 /// `s` cut to at most `max` cells, an ellipsis marking the cut.
 pub fn truncate_cells(s: &str, max: u16) -> String {
+    if max == 0 {
+        return String::new();
+    }
     let max = usize::from(max);
     let total: usize = s.chars().map(|c| c.width().unwrap_or(0)).sum();
     if total <= max {
@@ -82,6 +85,25 @@ pub fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Even one overflow cell can shift columns or overwrite a neighbour in a
+    /// zero-width panel, so there must be no room for an ellipsis either.
+    #[test]
+    fn zero_budget_returns_an_empty_string() {
+        for s in ["abc", "界", ""] {
+            assert_eq!(truncate_cells(s, 0), "", "{s:?}");
+        }
+    }
+
+    #[test]
+    fn nonzero_truncation_boundaries_are_unchanged() {
+        assert_eq!(truncate_cells("a", 1), "a");
+        assert_eq!(truncate_cells("ab", 1), "…");
+        assert_eq!(truncate_cells("abc", 2), "a…");
+        assert_eq!(truncate_cells("界", 1), "…");
+        assert_eq!(truncate_cells("界", 3), "界");
+        assert_eq!(truncate_cells("界界", 3), "界…");
+    }
 
     #[test]
     fn cjk_counts_double_so_a_cut_never_overflows_its_cells() {
