@@ -1,23 +1,45 @@
 # agent-office
 
+[![Latest release](https://img.shields.io/github/v/release/tyler-y-liu/agent-office)](https://github.com/tyler-y-liu/agent-office/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
+
 English | [简体中文](README.zh-CN.md)
 
-A pixel office on Victoria Harbour for your Claude Code sessions. Every session is a little worker with its current task over its head. See at a glance who is waiting for your approval and who looks stuck, and double-click to jump back to that session.
+**Every coding-agent session, as a little worker in one pixel office.** agent-office is an always-on-top window on Victoria Harbour that shows what each Claude Code, Codex, Cursor or DeepSeek Harness session is doing right now — who is working, who is waiting for your approval, who is stuck — and takes you back to that session in one double-click.
 
-![agent-office](docs/demo.gif)
+![agent-office at night: workers at their desks, a session waiting in your office, and the task panel on the right](docs/demo.gif)
 
-## What it does
+*A night shift in the office, driven by demo sessions.*
 
-With several agent sessions running at once, it's hard to keep track of which one finished, which one is waiting for you to click "Allow", and which one has been going in circles for ten minutes. agent-office puts them all in one office:
+**Jump to:** [Install](#install) · [Agents](#other-agents) · [The office](#the-office) · [Keys](#keys) · [Roles](#roles) · [Configuration](#configuration) · [Privacy](#privacy) · [Development](#development)
+
+## Why this exists
+
+With several agent sessions running at once, it's hard to keep track of which one finished, which one is waiting for you to click "Allow", and which one has been going in circles for ten minutes. agent-office puts them all in one office, so the state of your whole fleet is one glance away.
+
+## What you get
 
 - **One-line summaries**: reads each session's latest prompt, todos and recent actions, and summarizes them in one short line through an OpenAI-compatible API you configure. When a turn ends it summarizes the result too: what got done, where it got stuck, or what it is asking you.
-- **Seats by state**: working sessions sit at their desks; sessions waiting for approval ("!" over the head), asking you a question ("?") or finished with a result you have not read queue in your office; ones you have read rest in the pantry; stuck ones stay at their desk in a red ring with a "⚠" by their name tag. The side panel groups them as waiting → stuck → done, unread → working → idle.
-- **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command is running; a Claude Code session waiting on its own subagent isn't timed), marks a session as possibly stuck.
+- **Seats by state**: working sessions sit at their desks; sessions waiting for approval, asking you a question or finished with a result you have not read queue in your office; ones you have read rest in the pantry; stuck ones stay at their desk in a red ring with a "⚠" by their name tag.
+- **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command is running; a session waiting on its own subagent isn't timed), marks a session as possibly stuck.
 - **Notifications**: when the window is in the background and a session starts waiting for you, you get a system notification. The Dock badge always shows how many are waiting.
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
-- **Several agents**: Claude Code, Codex, Cursor (`cursor-agent`) and DeepSeek Harness (dsh).
+- **Several agents**: Claude Code, Codex, Cursor (`cursor-agent`) and DeepSeek Harness (dsh) in the same office.
 
-The UI comes in English and Simplified Chinese, following your macOS language; press `l` in the window to switch (saved for the next start), or set `AGENT_OFFICE_LANG`.
+### At a glance
+
+| You see | It means |
+|---|---|
+| `!` over a worker | Waiting for your approval |
+| `?` over a worker | Asking you a question |
+| Red ring, `⚠` by the name tag | Possibly stuck: repeated failures or a long silence |
+| In **Your office** | Needs you: approvals first, then questions, then unread results |
+| In the **pantry** | Read, or finished over 15 minutes ago unread |
+| On the **rooftop** | Idle over 30 minutes (wide windows only) |
+
+The side panel groups everyone the same way: waiting → stuck → done, unread → working → idle. The UI comes in English and Simplified Chinese, following your macOS language; press `l` in the window to switch (saved for the next start), or set `AGENT_OFFICE_LANG`.
 
 ## Requirements
 
@@ -25,7 +47,7 @@ The UI comes in English and Simplified Chinese, following your macOS language; p
 - Rust 1.95 or newer, only when building from source
 - Optional: an OpenAI-compatible chat completions endpoint for summaries. Without one it still works, and the panel shows each session's raw prompt.
 
-## Quick start
+## Install
 
 ```bash
 brew install tyler-y-liu/tap/agent-office
@@ -33,9 +55,17 @@ agent-office connect      # adds hooks to ~/.claude/settings.json (backs it up f
 agent-office
 ```
 
-You can also build from source with `cargo install --git https://github.com/tyler-y-liu/agent-office`. Each [release](https://github.com/tyler-y-liu/agent-office/releases) also has a universal binary for Apple Silicon and Intel.
+Other ways in:
 
-To turn on summaries, put these in `~/.config/agent-office/env` (or set them as environment variables):
+```bash
+cargo install --git https://github.com/tyler-y-liu/agent-office
+```
+
+Each [release](https://github.com/tyler-y-liu/agent-office/releases) also has a universal binary for Apple Silicon and Intel.
+
+### Turn on summaries
+
+Put these in `~/.config/agent-office/env` (or set them as environment variables):
 
 ```bash
 AGENT_OFFICE_API_BASE=https://your-gateway.example.com
@@ -77,6 +107,8 @@ A row of four-person desks runs under the north windows, with a corridor in the 
 
 The rooftop appears only when the office is at least 200 columns wide. Without a rooftop they go to the window sofa; at lunch or in a typhoon the rooftop closes and resting ones are all in the pantry. When the desks fill up, a new floor opens; switch with `[` and `]`.
 
+A Claude Code session whose background command is still running stays at its desk, in the working group, until that command reports back — even if its turn has already ended.
+
 ### Keys
 
 | Key | Action |
@@ -104,6 +136,7 @@ Click a card or worker to select it; scroll the panel with the mouse wheel. Afte
 `agent-office roles install` installs nine roles as Claude Code agents (`~/.claude/agents/office-*.md`): product, UX, architect, frontend, backend, QA, devops, reviewer and a PM that splits work among the others. `agent-office roles install --agent dsh` installs the same roles as DeepSeek Harness Agent Presets, which you can also choose directly in DSH's preset picker. Run `agent-office connect dsh` as well, then restart DSH. A session started in a role wears its chip on its badge and card; a PM's todo list shows as its plan on its card and on the meeting room's whiteboard. In DSH, the PM delegates with `subagent` and `agent_preset`.
 
 Press `p` to dispatch one. A digit picks the role; the host follows the worker you started from (or the latest one when none is selected), and `h` switches it between Claude Code and DeepSeek Harness — `AGENT_OFFICE_DISPATCH_HOST` sets where it opens. In Claude, the desktop app opens a new session with the prompt filled in, for you to send:
+
 - On a finished or stuck card, it is a relay: the posts to hand on to come first, marked, and the task carries what the session was asked, what it came to and where its changes are.
 - Anywhere else it opens a fresh session in that worker's repository (with none selected, the latest one's) and asks you for its task; until you give one it queues in your office.
 
@@ -142,11 +175,16 @@ Daily stats are stored locally in `~/.config/agent-office/stats.json`.
 
 ## Limitations
 
+<details>
+<summary>What it can't do (yet)</summary>
+
 - Only used on macOS.
 - Jumping: sessions in the Claude desktop app open directly. For sessions in a terminal, the terminal comes to the front; iTerm2 and Terminal.app also switch to the right tab (macOS asks once for permission to control the terminal). Other terminals can't be taken to a specific tab.
 - Sessions in tmux switch to their pane, but only on tmux's default socket (sessions started with `-L` / `-S` can't be found).
 - Notifications go through `osascript`, so they appear as "Script Editor" in Notification Center and clicking one doesn't jump to the session; use the Dock icon or the window.
 - It can run alongside pixtuoid; each uses its own socket and hooks.
+
+</details>
 
 <details>
 <summary><b>Little details in the office</b></summary>

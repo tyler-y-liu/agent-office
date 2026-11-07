@@ -1,23 +1,45 @@
 # agent-office
 
+[![最新版本](https://img.shields.io/github/v/release/tyler-y-liu/agent-office)](https://github.com/tyler-y-liu/agent-office/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![平台：macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#环境要求)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
+
 [English](README.md) | 简体中文
 
-开在维港边的像素办公室，给你的 Claude Code 会话用。每个会话是一个小人，头顶写着它正在做什么。谁在等你批准、谁像是卡住了，一眼就看得到，双击就能跳回那个会话。
+**每个 agent 会话，都是这间像素办公室里的小人。** agent-office 是常驻在维港边上的一扇置顶小窗：Claude Code、Codex、Cursor、DeepSeek Harness 的每个会话在做什么、谁在等你批准、谁像是卡住了，一眼就看得到，双击就能跳回那个会话。
 
-![agent-office](docs/demo.zh-CN.gif)
+![agent-office 夜间画面：小人在工位上，一个会话在你的办公室等批准，右侧是任务栏](docs/demo.zh-CN.gif)
 
-## 能做什么
+*夜间办公室，由演示会话驱动。*
 
-同时开好几个 agent 会话时，很难记得哪个做完了、哪个在等你点「允许」、哪个已经原地打转十分钟。agent-office 把它们放进一间办公室：
+**目录：** [安装](#安装) · [其他 agent](#其他-agent) · [办公室](#办公室) · [按键](#按键) · [角色](#角色) · [配置](#配置) · [隐私](#隐私) · [开发](#开发)
+
+## 为什么做这个
+
+同时开好几个 agent 会话时，很难记得哪个做完了、哪个在等你点「允许」、哪个已经原地打转十分钟。agent-office 把它们放进同一间办公室，整个团队的状态一眼就看完。
+
+## 你能得到什么
 
 - **一句话摘要**：读每个会话的最新指令、todo 和最近动作，用你配置的 OpenAI 兼容接口总结成不超过 20 字的一句话。一轮结束后再总结一句结果：做成了什么、卡在哪，或者它在问你什么。
-- **按状态排座位**：干活的坐工位；等你批准（头顶「!」）、在问你问题（头顶「?」）或做完了你还没看的，到你的办公室排队；看过的去茶水间歇着；卡住的留在工位、红圈围着、名牌旁标「⚠」。侧栏按「等你 → 卡住 → 做完待看 → 干活 → 闲着」分组。
-- **卡点检测**：连续失败 3 次，或者在干活却 5 分钟没新动静（在跑命令行时放宽到 20 分钟；Claude Code 会话在等自己的子 agent 时不计时），标红为「可能卡住」。
+- **按状态排座位**：干活的坐工位；等你批准、在问你问题、或做完了你还没看的，到你的办公室排队；看过的去茶水间歇着；卡住的留在工位、红圈围着、名牌旁标「⚠」。
+- **卡点检测**：连续失败 3 次，或者在干活却 5 分钟没新动静（在跑命令行时放宽到 20 分钟；会话在等自己的子 agent 时不计时），标红为「可能卡住」。
 - **提醒**：窗口不在前面时，有会话开始等你，就弹一条系统通知；Dock 角标一直显示有几个在等你。
 - **一键跳回**：双击小人或卡片，在 Claude 桌面 app 里打开那个会话，或者把它所在的终端切到前台。
-- **多种 agent**：Claude Code、Codex、Cursor（`cursor-agent`）和 DeepSeek Harness（dsh）。
+- **多种 agent**：Claude Code、Codex、Cursor（`cursor-agent`）和 DeepSeek Harness（dsh）在同一个办公室里。
 
-界面有简体中文和英文两种，默认跟随 macOS 的系统语言；在窗口里按 `l` 切换（下次启动也是这种语言），也可以用 `AGENT_OFFICE_LANG` 指定。
+### 一眼看懂
+
+| 看到 | 意思是 |
+|---|---|
+| 头顶「!」 | 在等你批准 |
+| 头顶「?」 | 在问你问题 |
+| 红圈、名牌旁「⚠」 | 可能卡住：连续失败，或长时间没动静 |
+| 在**你的办公室** | 需要你处理：先批准，再问题，最后是没看的结果 |
+| 在**茶水间** | 看过的，或者做完 15 分钟还没看的 |
+| 在**天台** | 闲置超过 30 分钟（窗口够宽才有） |
+
+侧栏也照这个顺序分组：等你 → 卡住 → 做完待看 → 干活 → 闲着。界面有简体中文和英文两种，默认跟随 macOS 的系统语言；在窗口里按 `l` 切换（下次启动也是这种语言），也可以用 `AGENT_OFFICE_LANG` 指定。
 
 ## 环境要求
 
@@ -25,7 +47,7 @@
 - Rust 1.95 或更新（只有从源码编译才需要）
 - 可选：一个 OpenAI 兼容的 chat completions 接口，用来生成摘要。不配也能用，任务栏会显示原始指令。
 
-## 快速开始
+## 安装
 
 ```bash
 brew install tyler-y-liu/tap/agent-office
@@ -33,9 +55,17 @@ agent-office connect      # 往 ~/.claude/settings.json 加 hooks（会先备份
 agent-office
 ```
 
-也可以从源码编译：`cargo install --git https://github.com/tyler-y-liu/agent-office`。每个 [release](https://github.com/tyler-y-liu/agent-office/releases) 也附了 universal 二进制（Apple Silicon 和 Intel 通用）。
+其他方式：
 
-开启摘要：在 `~/.config/agent-office/env` 里写上（或者设成同名环境变量）：
+```bash
+cargo install --git https://github.com/tyler-y-liu/agent-office
+```
+
+每个 [release](https://github.com/tyler-y-liu/agent-office/releases) 也附了 universal 二进制（Apple Silicon 和 Intel 通用）。
+
+### 开启摘要
+
+在 `~/.config/agent-office/env` 里写上（或者设成同名环境变量）：
 
 ```bash
 AGENT_OFFICE_API_BASE=https://your-gateway.example.com
@@ -63,7 +93,7 @@ AGENT_OFFICE_MODEL=your-model
 
 ## 使用
 
-### 办公室布局
+### 办公室
 
 北面窗下是一排四人长桌，中间一条走廊，南边从西到东是会议室 A、会议室 B（窗口够宽时还有会议室 C）、茶水间、你的办公室。窗口够宽时西端还有一块天台。点门牌会弹出这块区域的说明。
 
@@ -76,6 +106,8 @@ AGENT_OFFICE_MODEL=your-model
 | 天台 | 闲置超过 30 分钟 |
 
 办公室宽 200 列以上才有天台。没有天台时去窗边沙发；午饭和台风时天台关闭，歇着的都在茶水间。工位坐满时会开新楼层，用 `[` `]` 切换。
+
+Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它也留在工位、算在「干活」里，直到命令回报结果。
 
 ### 按键
 
@@ -104,6 +136,7 @@ AGENT_OFFICE_MODEL=your-model
 `agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。
 
 按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人；按 `h` 可以在 Claude Code 和 DeepSeek Harness 之间换，`AGENT_OFFICE_DISPATCH_HOST` 改的是打开时的默认值。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
+
 - 在完成或卡住的卡片上发起是接力：建议接手的角色排在前面，任务里带上一棒原来的任务、结论和改动目录。
 - 其他情况是开新会话：目录用这个小人的仓库，没选中时用最近活动小人的仓库；打开后等你给任务，没给前就在你的办公室排队。
 
@@ -142,11 +175,16 @@ DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提�
 
 ## 限制
 
+<details>
+<summary>目前做不到的事</summary>
+
 - 只在 macOS 上用过。
 - 跳转：Claude 桌面 app 里的会话直接打开；终端里的会话把终端切到前台，iTerm2 和 Terminal.app 还会切到对应标签页（第一次 macOS 会问是否允许控制该终端）。其他终端到不了具体标签页。
 - tmux 里的会话会切到它的窗格，但只认默认 socket（`-L` / `-S` 起的找不到）。
 - 系统通知走 `osascript`，通知中心里显示为「脚本编辑器」，点通知不会跳到会话；点 Dock 图标或窗口回去。
 - 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
+
+</details>
 
 <details>
 <summary><b>办公室里的小细节</b></summary>
