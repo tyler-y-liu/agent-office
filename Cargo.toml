@@ -1,6 +1,6 @@
 [package]
 name = "agent-office"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "An always-on-top pixel office where every Claude Code session is a little worker with its task over its head"
 license = "MIT"
