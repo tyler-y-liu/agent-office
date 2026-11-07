@@ -2585,8 +2585,8 @@ fn picker_heading(plan: &crate::core::DispatchPlan) -> (String, String) {
                     "a new DSH session; open it from the session list and write its task",
                 ),
                 crate::roles::Backend::Cursor => crate::i18n::t(
-                    "在 Terminal 开一个新 Cursor 会话，它会先问你要做什么",
-                    "a new Cursor session in Terminal; it asks you what to do first",
+                    "在 Cursor 开一个新会话，确认后写任务发送",
+                    "a new chat in Cursor; confirm it, write the task and send",
                 ),
                 crate::roles::Backend::Claude => crate::i18n::t(
                     "开一个新会话，任务在 Claude 里写",
@@ -4092,9 +4092,9 @@ mod tests {
 
     /// With three hosts `h` no longer means "the other one": the hint has to
     /// name the host it lands on (DSH skipped when not set up), or a pick
-    /// read as going to DSH would open Cursor. A fresh Cursor dispatch starts
-    /// working at once in a terminal, unlike Claude's prefilled draft, so the
-    /// line says where it opens and that it will ask for its task.
+    /// read as going to DSH would open Cursor. A fresh Cursor dispatch is a
+    /// draft in the Cursor app that waits for its task, so the line says it
+    /// opens there and that the user still has to write and send it.
     #[test]
     fn the_picker_names_the_next_host_and_says_where_cursor_opens() {
         use crate::i18n::{with, Lang};
@@ -4111,12 +4111,12 @@ mod tests {
         with(Lang::Zh, || {
             let (head, sub) = picker_heading(&cursor);
             assert!(head.contains("（Cursor）"), "{head}");
-            assert!(sub.starts_with("在 Terminal 开一个新 Cursor 会话，它会先问你要做什么"), "{sub}");
+            assert!(sub.starts_with("在 Cursor 开一个新会话，确认后写任务发送"), "{sub}");
             assert!(sub.contains("h 换成 Claude Code"), "{sub}");
         });
         with(Lang::En, || {
             let (_, sub) = picker_heading(&cursor);
-            assert!(sub.starts_with("a new Cursor session in Terminal; it asks you what to do first"), "{sub}");
+            assert!(sub.starts_with("a new chat in Cursor; confirm it, write the task and send"), "{sub}");
             assert!(sub.contains("h switches to Claude Code"), "{sub}");
         });
     }

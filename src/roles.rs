@@ -769,7 +769,7 @@ const DESKTOP_PROMPT_MAX: usize = 14_336;
 
 /// RFC 3986 percent-encoding of everything but the unreserved characters:
 /// a `+` for a space would reach the app as a plus.
-fn encode(s: &str) -> String {
+pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
@@ -882,10 +882,12 @@ pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String>
                 "DSH dispatch creates a session through a running Host; omit --terminal",
             ).into());
         }
-        return host_missing(Backend::Dsh);
+        return host_missing(Backend::Dsh, false);
     }
     if backend == Backend::Cursor {
-        if let Some(why) = host_missing(Backend::Cursor) {
+        // A task without cursor-agent is refused by `cursor_route`, which
+        // says why in the terms of this one dispatch.
+        if let Some(why) = host_missing(Backend::Cursor, false) {
             return Some(why);
         }
         let states = agents_dir(Backend::Cursor)
@@ -938,8 +940,9 @@ fn cursor_roles_missing(role: Role, states: &[(&'static Post, State)]) -> Option
 /// Why `host` could take no dispatch at all, if it could not: its connector
 /// is down, or (Claude, DSH) no office role is installed for it. The picker
 /// only offers a host that passes, so `h` never lands on one that would only
-/// answer with an error once a role is picked.
-pub fn host_missing(host: Backend) -> Option<String> {
+/// answer with an error once a role is picked. `with_task` is a dispatch
+/// that carries a task (every relay): Cursor runs one only through its CLI.
+pub fn host_missing(host: Backend, with_task: bool) -> Option<String> {
     match host {
         Backend::Dsh => {
             if !crate::dsh::installed() {
@@ -955,20 +958,12 @@ pub fn host_missing(host: Backend) -> Option<String> {
                 ).into()
             })
         }
-        Backend::Cursor => {
-            if crate::cursor::bin().is_none() {
-                return Some(crate::i18n::t(
-                    "找不到 cursor-agent 命令：先装好 Cursor CLI",
-                    "cursor-agent not found: install the Cursor CLI first",
-                ).into());
-            }
-            (!crate::cursor::installed()).then(|| {
-                crate::i18n::t(
-                    "Cursor hooks 还没接好：先运行 agent-office connect cursor",
-                    "Cursor hooks are not connected: run agent-office connect cursor",
-                ).into()
-            })
-        }
+        Backend::Cursor => cursor_missing(
+            crate::cursor::app_installed(),
+            crate::cursor::bin().is_some(),
+            crate::cursor::installed(),
+            with_task,
+        ),
         Backend::Claude => {
             let installed = agents_dir(Backend::Claude).and_then(|dir| status(&dir, Backend::Claude)).is_ok_and(|rows| {
                 rows.iter()
@@ -982,6 +977,32 @@ pub fn host_missing(host: Backend) -> Option<String> {
             })
         }
     }
+}
+
+/// [`host_missing`] for Cursor, given whether its app, its CLI and the
+/// office's hooks are there. Either the app or the CLI takes a fresh
+/// dispatch; a task (every relay) runs only in the CLI, so without it a
+/// relay must pick another host rather than land here and fail. Both report
+/// through the same hooks.
+pub(crate) fn cursor_missing(app: bool, cli: bool, hooks: bool, with_task: bool) -> Option<String> {
+    if !app && !cli {
+        return Some(crate::i18n::t(
+            "找不到 Cursor：先装好 Cursor app 或 Cursor CLI（cursor-agent）",
+            "Cursor not found: install the Cursor app or the Cursor CLI (cursor-agent) first",
+        ).into());
+    }
+    if with_task && !cli {
+        return Some(crate::i18n::t(
+            "带任务派到 Cursor 需要 cursor-agent 命令行；装好 Cursor CLI，或不带任务在 app 里开",
+            "dispatching a task to Cursor needs the cursor-agent CLI: install the Cursor CLI, or open it in the app without a task",
+        ).into());
+    }
+    (!hooks).then(|| {
+        crate::i18n::t(
+            "Cursor hooks 还没接好：先运行 agent-office connect cursor",
+            "Cursor hooks are not connected: run agent-office connect cursor",
+        ).into()
+    })
 }
 
 /// The host a dispatch goes to: `AGENT_OFFICE_DISPATCH_HOST` when it names
@@ -1124,9 +1145,32 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
             ))?;
             return exec_in(dir, &bin, &[prompt]);
         }
-        crate::cursor::open_in_terminal(dir, role.post().id, &prompt)?;
         let repo = repo_name(dir);
-        return Ok(if task.trim().is_empty() {
+        let route = cursor_route(
+            task,
+            crate::cursor::app_installed(),
+            crate::cursor::bin().is_some(),
+            || crate::cursor::app_link(dir, &prompt),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let why_not_app = match route {
+            CursorRoute::App(link) => match crate::cursor::open_in_app(dir, &link) {
+                Ok(()) => {
+                    return Ok(crate::tr!(
+                        "已在 Cursor 打开「{}」新会话（{repo}）：点 Create Chat，写好任务再发送",
+                        "opened a {} chat in Cursor ({repo}): click Create Chat, add the task and send",
+                        role.name(),
+                    ));
+                }
+                // As with a link Cursor would not take: the Terminal still
+                // starts the session, and the note says why.
+                Err(e) if crate::cursor::bin().is_some() => Some(e.to_string()),
+                Err(e) => return Err(e),
+            },
+            CursorRoute::Terminal(why) => why,
+        };
+        crate::cursor::open_in_terminal(dir, role.post().id, &prompt)?;
+        let done = if task.trim().is_empty() {
             crate::tr!(
                 "已在 Terminal 开好 Cursor「{}」会话，它会先问你要做什么（{repo}）",
                 "opened a Cursor {} session in Terminal; it asks you what to do first ({repo})",
@@ -1138,6 +1182,10 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
                 "opened and submitted a Cursor {} relay in Terminal ({repo})",
                 role.name(),
             )
+        };
+        return Ok(match why_not_app {
+            Some(why) => crate::tr!("{done}；{why}，改在 Terminal 开", "{done}; {why}, so in Terminal"),
+            None => done,
         });
     }
     if terminal {
@@ -1151,6 +1199,54 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
         role.post().zh,
         dir.display()
     ))
+}
+
+/// Where a Cursor dispatch (not `--terminal`) opens.
+#[derive(Debug, PartialEq, Eq)]
+enum CursorRoute {
+    /// The app, with this link's prompt filled in for the user to send.
+    App(String),
+    /// Terminal.app running `cursor-agent`, which submits at once; with why
+    /// the app was not used when it would have been.
+    Terminal(Option<String>),
+}
+
+/// Which way a Cursor dispatch goes, given what is installed. A task (every
+/// relay) must run as given, which only `cursor-agent` does; a fresh session
+/// is a draft for the user, which the app shows best, unless Cursor would
+/// refuse or change its prompt (`link`).
+fn cursor_route(
+    task: &str,
+    app: bool,
+    cli: bool,
+    link: impl FnOnce() -> Result<String, String>,
+) -> Result<CursorRoute, String> {
+    let no_cli = || {
+        crate::i18n::t(
+            "带任务派到 Cursor 需要 cursor-agent 命令行；装好 Cursor CLI，或不带任务在 app 里开",
+            "dispatching a task to Cursor needs the cursor-agent CLI: install the Cursor CLI, or open it in the app without a task",
+        )
+        .to_owned()
+    };
+    if !task.trim().is_empty() {
+        return if cli { Ok(CursorRoute::Terminal(None)) } else { Err(no_cli()) };
+    }
+    let why = if app {
+        match link() {
+            Ok(link) => return Ok(CursorRoute::App(link)),
+            Err(why) => why,
+        }
+    } else {
+        crate::i18n::t("Cursor app 没装", "the Cursor app is not installed").to_owned()
+    };
+    if cli {
+        Ok(CursorRoute::Terminal(Some(why)))
+    } else {
+        Err(crate::tr!(
+            "{why}，也找不到 cursor-agent 命令，没法改在 Terminal 开",
+            "{why}, and cursor-agent is not there to open it in Terminal instead"
+        ))
+    }
 }
 
 /// Replace this process with `bin args…` in `dir`: `--terminal` starts the
@@ -1923,5 +2019,56 @@ mod tests {
         );
         let long = repo_name(Path::new("/a/a-very-long-repository-name-here"));
         assert!(long.ends_with('…'), "a long name is cut, not printed whole: {long}");
+    }
+
+    /// Only `cursor-agent` runs a task as given, so every relay must reach
+    /// the Terminal; a fresh session is a draft, which the app shows, unless
+    /// Cursor would not take its prompt, and then the Terminal still opens
+    /// and the note says why the app was not used.
+    #[test]
+    fn a_cursor_task_goes_to_the_terminal_and_a_fresh_one_to_the_app() {
+        use crate::i18n::{Lang, with};
+        let no_link = || -> Result<String, String> { panic!("a task never asks for an app link") };
+        assert_eq!(cursor_route("run the tests", true, true, no_link), Ok(CursorRoute::Terminal(None)));
+        let link = || Ok("cursor://x".to_owned());
+        assert_eq!(cursor_route("  ", true, true, link), Ok(CursorRoute::App("cursor://x".into())));
+        let refused = || Err("too long".to_owned());
+        assert_eq!(
+            cursor_route("", true, true, refused),
+            Ok(CursorRoute::Terminal(Some("too long".into())))
+        );
+        with(Lang::Zh, || {
+            let unused = || -> Result<String, String> { panic!("no app, no link") };
+            assert_eq!(
+                cursor_route("", false, true, unused),
+                Ok(CursorRoute::Terminal(Some("Cursor app 没装".into())))
+            );
+        });
+    }
+
+    /// A machine with only the app, or only the CLI, can take a dispatch, so
+    /// Cursor must be offered; with neither it must not. With only the app a
+    /// task cannot run, and saying so beats a relay that silently never
+    /// starts.
+    #[test]
+    fn cursor_is_ready_with_its_app_or_its_cli_and_a_task_needs_the_cli() {
+        use crate::i18n::{Lang, with};
+        assert_eq!(cursor_missing(true, false, true, false), None);
+        assert_eq!(cursor_missing(false, true, true, false), None);
+        assert_eq!(cursor_missing(false, true, true, true), None);
+        assert!(cursor_missing(false, false, true, false).is_some());
+        assert!(cursor_missing(true, true, false, false).unwrap().contains("connect cursor"));
+        with(Lang::Zh, || {
+            let why = cursor_missing(true, false, true, true).expect("a task needs the CLI");
+            assert!(why.contains("需要 cursor-agent"), "{why}");
+        });
+        with(Lang::Zh, || {
+            let unused = || -> Result<String, String> { panic!("a task never asks for an app link") };
+            let err = cursor_route("跑测试", true, false, unused).unwrap_err();
+            assert!(err.contains("需要 cursor-agent"), "{err}");
+            let refused = || Err("太长".to_owned());
+            let err = cursor_route("", true, false, refused).unwrap_err();
+            assert!(err.starts_with("太长") && err.contains("cursor-agent"), "{err}");
+        });
     }
 }

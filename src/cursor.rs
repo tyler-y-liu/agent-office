@@ -208,6 +208,437 @@ fn write_script(path: &Path, text: &str) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// Whether the Cursor app (the IDE) is installed where `open -a Cursor`
+/// finds it: a fresh dispatch can open it with the prompt filled in.
+pub fn app_installed() -> bool {
+    let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications/Cursor.app"));
+    std::iter::once(PathBuf::from("/Applications/Cursor.app"))
+        .chain(home)
+        .any(|p| p.is_dir())
+}
+
+// What the Cursor app's prompt link takes, as read from the `cursor-deeplink`
+// extension of Cursor 3.29.9 (dist/main.js). A later Cursor may change any of
+// it; a prompt it refuses only shows "Invalid text" there, while the office
+// would believe it dispatched, so the rules here err on refusing.
+
+/// Cursor refuses a prompt when `21 + encodeURIComponent(text).length` is
+/// over this.
+const APP_LINK_MAX: usize = 10_000;
+const APP_LINK_OVERHEAD: usize = 21;
+/// Cursor's "secret" patterns, each a run of parts matched in order within
+/// one line (`a.*b`, case aside). `read.*\.env.*print` is left out: any
+/// `.env` is already refused on its own. Cursor also decodes every word that
+/// looks like base64 and checks that too; that layer is not repeated here
+/// and no test covers it, so a role prompt with a word that happened to
+/// decode to one of these would still be sent, and refused by Cursor.
+const APP_REFUSED: [&[&str]; 7] = [
+    &["cat", ".ssh/id_rsa"],
+    &["upload", "passwords.txt"],
+    &["dump", "token"],
+    &["dump", "password"],
+    &["exfiltrate", "credential"],
+    &["leak", "secret"],
+    &["how", "extract", "credential"],
+];
+
+/// Format characters (Unicode `Cf`) and private use, which Cursor's
+/// character check refuses; with every control but tab and the line breaks
+/// (`char::is_control`), that is all of `\p{C}` std can tell apart.
+fn format_char(c: char) -> bool {
+    matches!(u32::from(c),
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
+        | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+        | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F
+        | 0xE000..=0xF8FF | 0xF0000..=0x10FFFF)
+}
+
+/// Whether `parts` occur in this order within one line of `lower`, as
+/// Cursor's `a.*b` does (its `.` stops at line breaks).
+fn in_one_line(lower: &str, parts: &[&str]) -> bool {
+    lower.split(['\n', '\r', '\u{2028}', '\u{2029}']).any(|line| {
+        let mut rest = line;
+        parts.iter().all(|p| match rest.find(p) {
+            Some(i) => {
+                rest = &rest[i + p.len()..];
+                true
+            }
+            None => false,
+        })
+    })
+}
+
+/// What in `prompt` Cursor would change before reading it: its query is
+/// decoded once whole, then cut at every `&name=`, then `+` turns into a
+/// space and `%hh` is decoded again. Any of those makes the draft differ
+/// from the prompt, a role card cut mid-sentence at worst.
+fn app_mangled(prompt: &str) -> Option<&'static str> {
+    let b = prompt.as_bytes();
+    if prompt.contains('+') {
+        return Some("+");
+    }
+    let pct = b.windows(3).any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit());
+    if pct {
+        return Some("%hh");
+    }
+    let amp = b.iter().enumerate().any(|(i, &c)| {
+        c == b'&'
+            && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic)
+            && b[i + 2..]
+                .iter()
+                .find(|c| !(c.is_ascii_alphanumeric() || **c == b'_' || **c == b'-'))
+                == Some(&b'=')
+    });
+    amp.then_some("&name=")
+}
+
+/// What in `prompt` Cursor refuses outright.
+fn app_refused(prompt: &str) -> Option<String> {
+    if prompt.trim().is_empty() {
+        return Some(crate::i18n::t("空的", "empty").into());
+    }
+    if prompt.chars().any(|c| (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || format_char(c)) {
+        return Some(crate::i18n::t("格式字符或控制字符", "format or control characters").into());
+    }
+    let lower = prompt.to_lowercase();
+    // `/\.env(\b|\W)/` without the `u` flag: `.env` not followed by an
+    // ASCII word character.
+    let env = lower.match_indices(".env").any(|(i, _)| {
+        !lower.as_bytes().get(i + 4).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+    });
+    if env {
+        return Some(".env".into());
+    }
+    APP_REFUSED
+        .iter()
+        .find(|parts| in_one_line(&lower, parts))
+        .map(|parts| parts.join(".*"))
+}
+
+/// The link that opens a chat in the Cursor app with `prompt` filled in, in
+/// the window of `dir` (Cursor routes by the folder's name), or why Cursor
+/// would not take `prompt` as it is.
+pub fn app_link(dir: &Path, prompt: &str) -> Result<String, String> {
+    let text = crate::roles::encode(prompt);
+    let len = APP_LINK_OVERHEAD + text.len();
+    if len > APP_LINK_MAX {
+        return Err(crate::tr!(
+            "prompt 太长（编码后 {len}，Cursor 链接最多 {APP_LINK_MAX}）",
+            "the prompt is too long for a Cursor link ({len} encoded, at most {APP_LINK_MAX})"
+        ));
+    }
+    if let Some(what) = app_mangled(prompt) {
+        return Err(crate::tr!(
+            "prompt 里有 Cursor 链接会改掉的字符（{what}）",
+            "the prompt has characters a Cursor link would change ({what})"
+        ));
+    }
+    if let Some(what) = app_refused(prompt) {
+        return Err(crate::tr!(
+            "prompt 里有 Cursor 会拒收的内容（{what}）",
+            "the prompt has content Cursor refuses ({what})"
+        ));
+    }
+    let mut link = format!("cursor://anysphere.cursor-deeplink/prompt?text={text}");
+    // A folder name Cursor would change could route to the wrong window or
+    // none; without it the link lands in the window `open -a` just raised.
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    if let Some(name) = name.filter(|n| !n.trim().is_empty() && app_mangled(n).is_none()) {
+        link.push_str("&workspace=");
+        link.push_str(&crate::roles::encode(&name));
+    }
+    Ok(link)
+}
+
+/// Whether the Cursor app is running: a cold start needs far longer before
+/// its window takes a link.
+fn app_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-x", "Cursor"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// How the Agents window's title starts (Cursor 3.29.9; re-check after an
+/// upgrade). It is never a folder's window, whatever the folder is called.
+const AGENTS_WINDOW_TITLE: &str = "Cursor Agents";
+
+/// Whether `title` is `name`'s folder window. Cursor's title ends in the
+/// folder's name, after the open file's when there is one (`notes — blog`
+/// is blog's window, not notes'), so only the last part counts. Any part
+/// that is or starts as the Agents window's title rules it out.
+fn is_folder_window(title: &str, name: &str) -> bool {
+    !title.split(" — ").any(|part| part.starts_with(AGENTS_WINDOW_TITLE))
+        && title.rsplit(" — ").next() == Some(name)
+}
+
+/// Whether a prompt link sent now would land in `name`'s window, given
+/// Cursor's on-screen window titles front first (`None`: no title yet).
+/// Cursor 3.29.9 hands a deeplink to its focused window, else its last
+/// active one, if that window has loaded; the Agents window then prefills
+/// its own composer and ignores `workspace=` (its handler says so), so a
+/// link sent while it is in front would start the role in whatever
+/// repository it has picked. Only the folder's own window in front, its
+/// title drawn (so its page has loaded), is a landing the office can vouch
+/// for.
+fn target_in_front(titles: &[Option<String>], name: &str) -> bool {
+    matches!(titles.first(), Some(Some(t)) if is_folder_window(t, name))
+}
+
+// Waits measured by hand on Cursor 3.29.9, not guarantees.
+/// How often Cursor's windows are looked at while waiting.
+const APP_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+/// How long a running Cursor may take to bring the folder's window up in
+/// front; a cold one also has to start, and may restore other windows.
+const APP_WARM_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+const APP_COLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(40);
+/// How long the folder's window must stay in front before the link goes: a
+/// window that just came up starts its extensions (the link's handler)
+/// about a second after its title shows, and a window already open must
+/// show it holds the front after `open -a`, not before it.
+const APP_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The wait for the folder's window, poll by poll.
+struct Waiting {
+    start: std::time::Instant,
+    limit: std::time::Duration,
+    polls: u32,
+    /// Since when the folder's window has been in front without a break.
+    since: Option<std::time::Instant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    Wait,
+    Send,
+    Timeout,
+    /// More than one window carries the folder's name: Cursor routes by
+    /// name too, so neither the office nor Cursor can tell them apart.
+    SameName,
+}
+
+/// One poll of the wait. A wrong call here must come out as not sending,
+/// never as sending: a link sent to the wrong window starts the role in
+/// another repository, while not sending only falls back to Terminal. So
+/// the first poll never counts (it may show the windows as they were
+/// before `open -a`), the folder's window must hold the front for
+/// [`APP_SETTLE`] with the clock restarting whenever anything else is in
+/// front, and two windows of the same name are never sent to.
+fn step(w: &mut Waiting, titles: &[Option<String>], name: &str, now: std::time::Instant) -> Step {
+    let same = titles.iter().flatten().filter(|t| is_folder_window(t, name)).count();
+    if same > 1 {
+        return Step::SameName;
+    }
+    let first = w.polls == 0;
+    w.polls += 1;
+    if !first && target_in_front(titles, name) {
+        if now.duration_since(*w.since.get_or_insert(now)) >= APP_SETTLE {
+            return Step::Send;
+        }
+    } else {
+        w.since = None;
+    }
+    if now.duration_since(w.start) >= w.limit {
+        Step::Timeout
+    } else {
+        Step::Wait
+    }
+}
+
+/// Open `dir` in the Cursor app, wait until its window is the one in front,
+/// then send `link` to it: the chat it creates is prefilled, for the user
+/// to finish and send. When the landing cannot be vouched for, nothing is
+/// sent and the error says why, so the caller can open it elsewhere.
+pub fn open_in_app(dir: &Path, link: &str) -> Result<()> {
+    anyhow::ensure!(
+        cfg!(target_os = "macos"),
+        crate::i18n::t("只有 macOS 能替你打开 Cursor", "only macOS can open Cursor for you")
+    );
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .context(crate::i18n::t("目录没有名字", "the folder has no name"))?;
+    // Asking for the permission would pop a system prompt mid-dispatch;
+    // the reason says where to grant it instead.
+    anyhow::ensure!(
+        front::titles().is_some(),
+        crate::i18n::t(
+            "agent-office 没有屏幕录制权限，看不到 Cursor 的窗口标题，没法确认 prompt 会落在哪个窗口（系统设置 → 隐私与安全性 → 屏幕录制，把 agent-office 加进去）",
+            "agent-office has no Screen Recording permission, so it cannot see Cursor's window titles to make sure the prompt lands in the right window (System Settings → Privacy & Security → Screen Recording: add agent-office)",
+        )
+    );
+    let limit = if app_running() { APP_WARM_LIMIT } else { APP_COLD_LIMIT };
+    run_open(std::process::Command::new("open").args(["-a", "Cursor"]).arg(dir)).map_err(|why| {
+        anyhow::anyhow!(crate::tr!(
+            "没能用 Cursor 打开 {}（{why}）",
+            "could not open {} in Cursor ({why})",
+            dir.display()
+        ))
+    })?;
+    let mut w = Waiting {
+        start: std::time::Instant::now(),
+        limit,
+        polls: 0,
+        since: None,
+    };
+    // The window can still change between the last look and the link: this
+    // narrows the race to a few milliseconds, it does not close it.
+    loop {
+        let titles = front::titles().unwrap_or_default();
+        match step(&mut w, &titles, &name, std::time::Instant::now()) {
+            Step::Send => break,
+            Step::Wait => std::thread::sleep(APP_POLL),
+            Step::Timeout => anyhow::bail!(crate::tr!(
+                "等了 {} 秒，{name} 的 Cursor 窗口没到最前，没法确认 prompt 会落在那里",
+                "after {} s the Cursor window of {name} was not in front, so the prompt could land elsewhere",
+                limit.as_secs()
+            )),
+            Step::SameName => anyhow::bail!(crate::tr!(
+                "Cursor 里有不止一个叫 {name} 的窗口，没法确认 prompt 会落在哪个",
+                "Cursor has more than one window named {name}, so the prompt could land in the wrong one"
+            )),
+        }
+    }
+    run_open(std::process::Command::new("open").arg(link)).map_err(|why| {
+        anyhow::anyhow!(crate::tr!(
+            "Cursor 没接住链接（{why}）",
+            "Cursor did not take the link ({why})"
+        ))
+    })
+}
+
+/// Run an `open` that should hand off at once: `Err` with why when it fails
+/// within a few seconds. Its output is dropped, as it may echo the prompt.
+fn run_open(cmd: &mut std::process::Command) -> Result<(), String> {
+    let opened = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .and_then(|child| crate::jump::exit_within(child, std::time::Duration::from_secs(3)));
+    match opened {
+        // Still running: Cursor took it and is starting up.
+        Ok(None) => Ok(()),
+        Ok(Some(s)) if s.success() => Ok(()),
+        Ok(Some(s)) => Err(s.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Cursor's windows as the window server lists them.
+#[cfg(target_os = "macos")]
+mod front {
+    use std::ffi::{c_char, c_void};
+
+    type Ref = *const c_void;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Ref;
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRectMakeWithDictionaryRepresentation(dict: Ref, rect: *mut Rect) -> bool;
+        static kCGWindowOwnerName: Ref;
+        static kCGWindowName: Ref;
+        static kCGWindowLayer: Ref;
+        static kCGWindowBounds: Ref;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: Ref) -> isize;
+        fn CFArrayGetValueAtIndex(array: Ref, i: isize) -> Ref;
+        fn CFDictionaryGetValue(dict: Ref, key: Ref) -> Ref;
+        fn CFStringGetCString(s: Ref, buf: *mut c_char, len: isize, encoding: u32) -> u8;
+        fn CFNumberGetValue(n: Ref, kind: isize, out: *mut c_void) -> u8;
+        fn CFGetTypeID(r: Ref) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFRelease(r: Ref);
+    }
+
+    const ON_SCREEN_ONLY: u32 = 1 << 0;
+    const EXCLUDE_DESKTOP: u32 = 1 << 4;
+    const UTF8: u32 = 0x0800_0100;
+    const SINT64: isize = 4;
+    /// Smaller ones are tooltips and popups, never what a link lands in.
+    const MIN_SIDE: f64 = 200.0;
+
+    unsafe fn string(r: Ref) -> Option<String> {
+        if r.is_null() || unsafe { CFGetTypeID(r) != CFStringGetTypeID() } {
+            return None;
+        }
+        let mut buf = vec![0 as c_char; 4096];
+        (unsafe { CFStringGetCString(r, buf.as_mut_ptr(), buf.len() as isize, UTF8) } != 0)
+            .then(|| unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+    }
+
+    unsafe fn number(r: Ref) -> Option<i64> {
+        if r.is_null() || unsafe { CFGetTypeID(r) != CFNumberGetTypeID() } {
+            return None;
+        }
+        let mut n = 0i64;
+        (unsafe { CFNumberGetValue(r, SINT64, (&raw mut n).cast()) } != 0).then_some(n)
+    }
+
+    /// The titles of Cursor's on-screen windows, front first (`None` for
+    /// one with no title yet); `None` when titles cannot be seen at all:
+    /// without Screen Recording permission macOS hides them.
+    pub fn titles() -> Option<Vec<Option<String>>> {
+        // SAFETY: CoreGraphics returns a CFArray of CFDictionaries we own
+        // (Copy rule) and release; values read from them are borrowed and
+        // type-checked before use.
+        unsafe {
+            if !CGPreflightScreenCaptureAccess() {
+                return None;
+            }
+            let list = CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP, 0);
+            if list.is_null() {
+                return Some(Vec::new());
+            }
+            let mut out = Vec::new();
+            for i in 0..CFArrayGetCount(list) {
+                let w = CFArrayGetValueAtIndex(list, i);
+                if string(CFDictionaryGetValue(w, kCGWindowOwnerName)).as_deref() != Some("Cursor")
+                    || number(CFDictionaryGetValue(w, kCGWindowLayer)) != Some(0)
+                {
+                    continue;
+                }
+                let mut r = Rect::default();
+                let bounds = CFDictionaryGetValue(w, kCGWindowBounds);
+                if bounds.is_null()
+                    || !CGRectMakeWithDictionaryRepresentation(bounds, &raw mut r)
+                    || r.w < MIN_SIDE
+                    || r.h < MIN_SIDE
+                {
+                    continue;
+                }
+                let title = string(CFDictionaryGetValue(w, kCGWindowName)).filter(|t| !t.is_empty());
+                out.push(title);
+            }
+            CFRelease(list);
+            Some(out)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod front {
+    pub fn titles() -> Option<Vec<Option<String>>> {
+        None
+    }
+}
+
 /// Where the forwarder writes one `<session>.jsonl` task log per session.
 pub fn transcripts_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -685,5 +1116,193 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_793_871_015), "2026-11-05T09:30:15Z");
+    }
+
+    /// `%hh` runs decoded as UTF-8; `None` when a run is not UTF-8, which
+    /// is where `decodeURIComponent` throws.
+    fn pct_decode(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        let (mut out, mut i) = (Vec::new(), 0);
+        while i < b.len() {
+            let hex = |c: u8| char::from(c).to_digit(16);
+            match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+                (b'%', Some(h), Some(l)) => {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                }
+                (c, ..) => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
+    /// A query parameter as Cursor 3.29.9 reads it: the URI's query decoded
+    /// once whole, the value cut at the next `&name=`, then `+` made a space
+    /// and decoded again (left as it is where that throws).
+    fn cursor_param(link: &str, key: &str) -> Option<String> {
+        let query = pct_decode(link.split_once('?')?.1)?;
+        let start = if query.starts_with(&format!("{key}=")) {
+            key.len() + 1
+        } else {
+            query.find(&format!("&{key}="))? + key.len() + 2
+        };
+        let rest = &query[start..];
+        let b = rest.as_bytes();
+        let end = (0..b.len())
+            .find(|&i| {
+                b[i] == b'&'
+                    && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic)
+                    && b[i + 2..].iter().find(|c| !(c.is_ascii_alphanumeric() || **c == b'_' || **c == b'-')) == Some(&b'=')
+            })
+            .unwrap_or(b.len());
+        let raw = rest[..end].replace('+', " ");
+        Some(pct_decode(&raw).unwrap_or(raw))
+    }
+
+    /// The app path only ever sends a role's fresh prompt, card included: if
+    /// Cursor read back anything but that prompt, the draft would carry a
+    /// role card cut or changed mid-sentence with nothing saying so. Every
+    /// role, in both languages, must come through whole and route to the
+    /// folder's window.
+    #[test]
+    fn every_fresh_role_prompt_reads_back_whole_in_the_app() {
+        use crate::i18n::{Lang, with};
+        let dir = Path::new("/work/shop");
+        for lang in [Lang::Zh, Lang::En] {
+            with(lang, || {
+                for post in crate::roles::ROSTER {
+                    let prompt = crate::roles::cursor_prompt(post.role, "");
+                    let link = app_link(dir, &prompt)
+                        .unwrap_or_else(|e| panic!("{} ({lang:?}) refused: {e}", post.id));
+                    assert!(link.starts_with("cursor://anysphere.cursor-deeplink/prompt?"), "{link}");
+                    assert_eq!(cursor_param(&link, "text").as_deref(), Some(prompt.as_str()), "{}", post.id);
+                    assert_eq!(cursor_param(&link, "workspace").as_deref(), Some("shop"));
+                }
+            });
+        }
+    }
+
+    /// The parser above must itself show the damage the rules guard against,
+    /// or the round trip would pass for any link.
+    #[test]
+    fn the_simulated_cursor_parse_does_change_what_the_rules_refuse() {
+        let enc = crate::roles::encode;
+        for raw in ["a+b", "a&b=c", "100%41"] {
+            let link = format!("cursor://x/prompt?text={}&workspace=w", enc(raw));
+            assert_ne!(cursor_param(&link, "text").as_deref(), Some(raw), "{raw}");
+        }
+    }
+
+    /// Cursor refuses or silently rewrites these; sent anyway, the office
+    /// would note a dispatch that never reached a chat. Each must come back
+    /// as a reason the dispatch can show instead.
+    #[test]
+    fn prompts_cursor_would_refuse_or_change_are_refused_here() {
+        let dir = Path::new("/w/shop");
+        for bad in [
+            "x + y",
+            "a&b=c",
+            "see %41",
+            "read the .env file",
+            "zero\u{200B}width",
+            "bell\u{7}",
+            "del\u{7F}",
+            "please dump the token",
+            "how to extract a credential",
+        ] {
+            assert!(app_link(dir, bad).is_err(), "{bad:?}");
+        }
+        let long = "字".repeat(4000);
+        assert!(app_link(dir, &long).unwrap_err().contains("10000"));
+        // What looks close but is not refused by Cursor goes through.
+        for ok in ["a & b", "100% sure", ".environment", "dump\ntoken", "tab\tand\r\nlines"] {
+            assert!(app_link(dir, ok).is_ok(), "{ok:?}");
+        }
+    }
+
+    /// A folder name Cursor would change could route the chat to another
+    /// window; it is left out, and the prompt still goes.
+    #[test]
+    fn a_folder_name_cursor_would_change_is_not_sent_to_route_by() {
+        let link = app_link(Path::new("/w/c++"), "hi").unwrap();
+        assert!(!link.contains("workspace="), "{link}");
+        assert_eq!(cursor_param(&link, "text").as_deref(), Some("hi"));
+    }
+
+    fn titles(v: &[Option<&str>]) -> Vec<Option<String>> {
+        v.iter().map(|o| o.map(str::to_owned)).collect()
+    }
+
+    /// The link goes only when the folder's own window is in front with its
+    /// title drawn: in front, the Agents window would take the prompt into
+    /// whatever repository it has picked, and any other window, or one not
+    /// loaded yet, could hand it on to the wrong place.
+    #[test]
+    fn only_the_folders_own_window_in_front_takes_the_link() {
+        let t = titles;
+        assert!(target_in_front(&t(&[Some("shop"), Some("Cursor Agents")]), "shop"));
+        assert!(target_in_front(&t(&[Some("main.rs — shop")]), "shop"));
+        // An open file named like the folder is not the folder's window.
+        assert!(!target_in_front(&t(&[Some("shop — blog")]), "shop"));
+        assert!(!target_in_front(&t(&[Some("Cursor Agents"), Some("shop")]), "shop"));
+        assert!(!target_in_front(&t(&[Some("Cursor Agents — shop")]), "shop"));
+        assert!(!target_in_front(&t(&[Some("Cursor Agents (2)")]), "Cursor Agents (2)"));
+        assert!(!target_in_front(&t(&[Some("blog"), Some("shop")]), "shop"));
+        assert!(!target_in_front(&t(&[None, Some("shop")]), "shop"), "a window still loading is in front");
+        assert!(!target_in_front(&t(&[]), "shop"));
+        assert!(!target_in_front(&t(&[Some("shop-api")]), "shop"));
+    }
+
+    fn waiting(start: std::time::Instant) -> Waiting {
+        Waiting {
+            start,
+            limit: std::time::Duration::from_secs(10),
+            polls: 0,
+            since: None,
+        }
+    }
+
+    /// A wrong call in the wait must come out as not sending: a link sent
+    /// to the wrong window starts the role in another repository, while not
+    /// sending only falls back to Terminal.
+    #[test]
+    fn the_wait_sends_only_after_the_folders_window_holds_the_front() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let shop = titles(&[Some("shop"), Some("Cursor Agents")]);
+        let agents = titles(&[Some("Cursor Agents"), Some("shop")]);
+
+        // The first look may be the windows as they were before `open -a`:
+        // however long it is then held, the clock starts after it.
+        let mut w = waiting(t0);
+        assert_eq!(step(&mut w, &shop, "shop", at(0)), Step::Wait);
+        assert_eq!(step(&mut w, &shop, "shop", at(200)), Step::Wait);
+        assert_eq!(step(&mut w, &shop, "shop", at(2100)), Step::Wait, "2 s from the second look, not the first");
+        assert_eq!(step(&mut w, &shop, "shop", at(2200)), Step::Send);
+
+        // The Agents window taking the front restarts the clock.
+        let mut w = waiting(t0);
+        assert_eq!(step(&mut w, &shop, "shop", at(0)), Step::Wait);
+        assert_eq!(step(&mut w, &shop, "shop", at(200)), Step::Wait);
+        assert_eq!(step(&mut w, &agents, "shop", at(1800)), Step::Wait);
+        assert_eq!(step(&mut w, &shop, "shop", at(2200)), Step::Wait);
+        assert_eq!(step(&mut w, &shop, "shop", at(4100)), Step::Wait);
+        assert_eq!(step(&mut w, &shop, "shop", at(4200)), Step::Send);
+
+        // Two windows of the folder's name: never sent to either.
+        let mut w = waiting(t0);
+        let twins = titles(&[Some("api"), Some("main.rs — api")]);
+        assert_eq!(step(&mut w, &twins, "api", at(0)), Step::SameName);
+        assert_eq!(step(&mut w, &twins, "api", at(5000)), Step::SameName);
+
+        // Never in front: gives up at the limit rather than sending.
+        let mut w = waiting(t0);
+        assert_eq!(step(&mut w, &agents, "shop", at(0)), Step::Wait);
+        assert_eq!(step(&mut w, &agents, "shop", at(9900)), Step::Wait);
+        assert_eq!(step(&mut w, &agents, "shop", at(10_000)), Step::Timeout);
     }
 }

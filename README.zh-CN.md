@@ -133,7 +133,7 @@ Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它�
 
 ### 角色
 
-`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。`agent-office roles install --agent cursor` 把同一套角色装成 Cursor agents（`~/.cursor/agents/office-*.md`，认 `CURSOR_CONFIG_DIR`），新开的 `cursor-agent` 才看得到，项目里 `.cursor/agents/` 下的同名文件会盖过这里的；Cursor 里的 PM 用 Task 工具派活。派给 Cursor 要先装好 Cursor CLI（`cursor-agent`）并跑 `agent-office connect cursor`。
+`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。`agent-office roles install --agent cursor` 把同一套角色装成 Cursor agents（`~/.cursor/agents/office-*.md`，认 `CURSOR_CONFIG_DIR`），新开的 `cursor-agent` 才看得到，项目里 `.cursor/agents/` 下的同名文件会盖过这里的；Cursor 里的 PM 用 Task 工具派活。派给 Cursor 要先装好 Cursor app 或 Cursor CLI（`cursor-agent`），并跑 `agent-office connect cursor`；hooks 对 app 里的会话和 `cursor-agent` 都生效。
 
 按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人；按 `h` 在 Claude Code、DeepSeek Harness、Cursor 三个宿主间轮换，跳过没装好的，`AGENT_OFFICE_DISPATCH_HOST` 改的是打开时的默认值。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
 
@@ -146,7 +146,7 @@ Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它�
 
 DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提交；新会话则创建空白的角色会话。派完会把 Harness 窗口提到前面（`dsh://open`），新会话在会话列表最上面，打开后给任务。不支持 `--terminal`。只有还没被 Host 认领的请求才会在超时后撤回；已经认领的请求会继续等最终结果和会话 ID，不会把晚到的结果丢掉。Host 中途退出时结果未知，先检查 DSH 会话列表再决定是否重试。如果错误带会话 ID，先打开原会话继续。还没开始处理就已过期的请求会被拒绝，不会在下次启动时补跑。
 
-Cursor 派活会新开一个 Terminal.app 窗口，在目标目录里启动 `cursor-agent` 并直接提交：prompt 里带上角色说明（cursor-agent 没有以 agent 身份启动的参数），接力带着任务直接开干；新会话会先问你要做什么。PM 要先把 Cursor 角色装齐。命令行里加 `--terminal` 则不开新窗口，在当前终端里直接启动 `cursor-agent`。
+Cursor 派活把角色说明放在 prompt 里（Cursor 没有以 agent 身份开会话的参数）。不带任务的新会话会在 Cursor app 里打开目标目录并预填 prompt，点 Create Chat，写好任务再发送；带任务的派活（所有接力）新开一个 Terminal.app 窗口，在目标目录里启动 `cursor-agent` 并直接提交，所以要装 Cursor CLI。prompt 只在该目录的 Cursor 窗口到了最前时才发出，agent-office 靠窗口标题确认，所以需要屏幕录制权限；app 没装、prompt 没法原样放进 Cursor 链接、或者确认不了那个窗口在最前时，新会话退回 Terminal，回执里写明原因。PM 要先把 Cursor 角色装齐。命令行里加 `--terminal` 则不开新窗口，在当前终端里直接启动 `cursor-agent`。
 
 终端里用 `agent-office dispatch --role qa "跑全量测试"`（`--dir`、`--terminal`，PM 用 `--auto`）；派给 DeepSeek Harness 时加 `--agent dsh`，派给 Cursor 时加 `--agent cursor`。`agent-office roles remove [--agent dsh|cursor]` 只移除对应宿主的角色，不影响其他宿主。
 
