@@ -82,7 +82,12 @@ pub fn live_cc_session_ids(sessions_dir: &Path) -> Option<ProbeSnapshot> {
             if !pid_alive(reg.pid) {
                 continue;
             }
+            // agent-office: `procStart` is the kernel's own start time, so a
+            // match there vouches even when `startedAt` lags it: a desktop
+            // session stamps `startedAt` only once the app claims it, seen 40s
+            // late, and was then taken for a recycled pid.
             if let Some(actual_secs) = pid_start_time_secs(reg.pid)
+                && !reg.proc_start_secs.is_some_and(|s| s.abs_diff(actual_secs) <= 1)
                 && (reg.started_at_ms / 1000).abs_diff(actual_secs) > PID_START_TOLERANCE_SECS
             {
                 tracing::debug!(
@@ -158,6 +163,9 @@ struct RegistryEntry {
     session_id: String,
     /// `startedAt` — ms-epoch CC stamps at startup.
     started_at_ms: u64,
+    /// agent-office: `procStart`, the process's start as epoch seconds; newer
+    /// CC only, so additive.
+    proc_start_secs: Option<u64>,
 }
 
 /// One registry-file parse outcome — the seam the #247 drift warn keys on.
@@ -208,7 +216,38 @@ fn parse_registry_entry(bytes: &[u8]) -> RegistryParse {
         pid,
         session_id: session_id.to_string(),
         started_at_ms,
+        proc_start_secs: v
+            .get("procStart")
+            .and_then(|s| s.as_str())
+            .and_then(parse_proc_start),
     })
+}
+
+/// agent-office: CC's `procStart`, the process start in UTC as `ps` prints
+/// it (`Sat Nov  7 01:02:17 2026`), as epoch seconds.
+#[cfg(unix)]
+fn parse_proc_start(s: &str) -> Option<u64> {
+    let mut parts = s.split_whitespace().skip(1);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = parts.next()?;
+    let month = MONTHS.iter().position(|m| *m == month)? as i64 + 1;
+    let day: i64 = parts.next()?.parse().ok()?;
+    let mut clock = parts.next()?.split(':').map(|n| n.parse::<i64>().ok());
+    let (h, m, sec) = (clock.next()??, clock.next()??, clock.next()??);
+    let year: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=31).contains(&day) || clock.next().is_some() {
+        return None;
+    }
+    // Days from 1970-01-01 to the civil date (Hinnant's days_from_civil).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3600 + m * 60 + sec).ok()
 }
 
 /// Tolerance for the `startedAt` ↔ kernel-start-time identity check. CC writes
@@ -471,6 +510,7 @@ mod liveness_tests {
             pid,
             session_id: "s".to_string(),
             started_at_ms,
+            proc_start_secs: None,
         };
         assert!(prefer_candidate(&e(1_000, 99), &e(2_000, 1)));
         assert!(!prefer_candidate(&e(2_000, 1), &e(1_000, 99)));
@@ -536,6 +576,57 @@ mod liveness_tests {
         assert!(
             !live.contains("recycled-session"),
             "one second past the tolerance is a recycled pid, got {live:?}"
+        );
+    }
+
+    /// agent-office: `procStart` is read in UTC, the way CC writes it.
+    #[cfg(unix)]
+    #[test]
+    fn proc_start_parses_as_utc_epoch_seconds() {
+        assert_eq!(parse_proc_start("Sat Nov  7 01:02:17 2026"), Some(1_794_013_337));
+        assert_eq!(parse_proc_start("Thu Jan  1 00:00:00 1970"), Some(0));
+        assert_eq!(parse_proc_start("Thu Feb 29 12:00:00 2024"), Some(1_709_208_000));
+        assert_eq!(parse_proc_start("Sat Nov  7 01:02 2026"), None);
+        assert_eq!(parse_proc_start("garbage"), None);
+    }
+
+    /// agent-office: a desktop session's `startedAt` can trail its process by
+    /// far more than the tolerance (it is stamped once the app claims the
+    /// session). The session is alive, so its exact `procStart` must vouch,
+    /// or it is never openable and never leaves "done, to read".
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn matching_proc_start_vouches_despite_a_late_started_at() {
+        let own_pid = std::process::id() as i32;
+        let actual = pid_start_time_secs(own_pid).expect("own pid must be introspectable");
+        let ctime = |secs: u64| {
+            let out = std::process::Command::new("date")
+                .args(["-u", "-r", &secs.to_string(), "+%a %b %e %H:%M:%S %Y"])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let entry = |name: &str, sid: &str, proc_start: String| {
+            std::fs::write(
+                dir.path().join(name),
+                serde_json::json!({
+                    "pid": own_pid,
+                    "sessionId": sid,
+                    "startedAt": (actual + 40) * 1000,
+                    "procStart": proc_start,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        entry("late.json", "late-claim", ctime(actual));
+        entry("recycled.json", "recycled", ctime(actual - 3600));
+        let live = live_cc_session_ids(dir.path()).expect("readable dir is a healthy probe");
+        assert!(live.contains("late-claim"), "procStart matches the kernel: {live:?}");
+        assert!(
+            !live.contains("recycled"),
+            "a procStart naming another process's start is still a recycled pid: {live:?}"
         );
     }
 
@@ -779,6 +870,7 @@ mod liveness_tests {
             pid,
             session_id: "dup".into(),
             started_at_ms,
+            proc_start_secs: None,
         }
     }
 
