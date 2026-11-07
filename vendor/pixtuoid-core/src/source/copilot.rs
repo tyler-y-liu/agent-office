@@ -429,10 +429,10 @@ mod tests {
     }
     use serde_json::json;
 
-    const PATH: &str = "/p/session-state/65f8cef9-7dd8-46fa-9f6a-78cc95f68ab3/events.jsonl";
+    const PATH: &str = "/p/session-state/demo-session-0001/events.jsonl";
 
     fn root() -> AgentId {
-        AgentId::from_parts(SOURCE_NAME, "65f8cef9-7dd8-46fa-9f6a-78cc95f68ab3")
+        AgentId::from_parts(SOURCE_NAME, "demo-session-0001")
     }
     fn decode(line: &str) -> Vec<AgentEvent> {
         decode_copilot_line(PATH, SOURCE_NAME, serde_json::from_str(line).unwrap())
@@ -442,7 +442,7 @@ mod tests {
     fn id_from_path_uses_the_parent_dir_not_the_stem() {
         assert_eq!(
             copilot_id_from_path(Path::new(PATH)),
-            "65f8cef9-7dd8-46fa-9f6a-78cc95f68ab3"
+            "demo-session-0001"
         );
     }
 
@@ -497,7 +497,7 @@ mod tests {
     /// the session; the schema's `ResumeData` carries no sessionId.
     #[test]
     fn session_resume_revives_the_root_with_its_cwd() {
-        let line = r#"{"type":"session.resume","data":{"resumeTime":"2026-05-22T06:20:00.000Z","eventCount":42,"context":{"cwd":"d:\\contentforge-fullstack (1)"}},"id":"r1","timestamp":"2026-05-22T06:20:00.010Z","parentId":"220c4131"}"#;
+        let line = r#"{"type":"session.resume","data":{"resumeTime":"2026-01-02T03:04:05.000Z","eventCount":42,"context":{"cwd":"C:\\demo\\example-app"}},"id":"e0001","timestamp":"2026-01-02T03:04:05.010Z","parentId":"e0000"}"#;
         match &decode(line)[..] {
             [
                 AgentEvent::SessionStart {
@@ -509,8 +509,8 @@ mod tests {
                 },
             ] => {
                 assert_eq!(*agent_id, root());
-                assert_eq!(session_id, "65f8cef9-7dd8-46fa-9f6a-78cc95f68ab3");
-                assert_eq!(cwd, Path::new(r"d:\contentforge-fullstack (1)"));
+                assert_eq!(session_id, "demo-session-0001");
+                assert_eq!(cwd, Path::new(r"C:\demo\example-app"));
                 assert_eq!(*parent_id, None);
             }
             other => panic!("expected one SessionStart, got {other:?}"),
@@ -518,8 +518,8 @@ mod tests {
     }
 
     #[test]
-    fn real_task_tool_is_delegating() {
-        let line = r#"{"type":"tool.execution_start","data":{"toolCallId":"call_SGMJ1yjMtpgFUbZct2fEo2Hk","toolName":"task","arguments":{"description":"Incident command response","agent_type":"sisko","name":"sisko-incident-command","mode":"sync"},"turnId":"0"},"id":"a","timestamp":"t","parentId":null}"#;
+    fn task_tool_is_delegating() {
+        let line = r#"{"type":"tool.execution_start","data":{"toolCallId":"call_demo_task_1","toolName":"task","arguments":{"description":"Demo task","agent_type":"demo-agent","name":"demo-agent-task","mode":"sync"},"turnId":"0"},"id":"e0001","timestamp":"t","parentId":null}"#;
         match &decode(line)[..] {
             [
                 AgentEvent::ToolUseStart {
@@ -564,9 +564,9 @@ mod tests {
     }
 
     #[test]
-    fn real_subagent_started_registers_child_parented_to_root_then_renamed() {
-        let line = r#"{"type":"subagent.started","data":{"toolCallId":"call_SGMJ1yjMtpgFUbZct2fEo2Hk","agentName":"sisko","agentDisplayName":"Sisko - Incident Commander / SRE Lead","agentDescription":"Sisko"},"id":"d171d290","timestamp":"2026-05-26T14:14:22.773Z","parentId":"83d641f1","agentId":"call_SGMJ1yjMtpgFUbZct2fEo2Hk"}"#;
-        let child = AgentId::from_parts(SOURCE_NAME, "call_SGMJ1yjMtpgFUbZct2fEo2Hk");
+    fn subagent_started_registers_child_parented_to_root_then_renamed() {
+        let line = r#"{"type":"subagent.started","data":{"toolCallId":"call_demo_child_1","agentName":"demo-agent","agentDisplayName":"Demo Agent - Team Lead","agentDescription":"Demo Agent"},"id":"e0101","timestamp":"2026-01-02T03:05:00.000Z","parentId":"e0100","agentId":"call_demo_child_1"}"#;
+        let child = AgentId::from_parts(SOURCE_NAME, "call_demo_child_1");
         match &decode(line)[..] {
             [
                 AgentEvent::SessionStart {
@@ -579,7 +579,7 @@ mod tests {
                 assert_eq!(*agent_id, child);
                 assert_eq!(*parent_id, Some(root()));
                 assert_eq!(*r, child);
-                assert_eq!(label, "Sisko - Incident Commander / SRE Lead");
+                assert_eq!(label, "Demo Agent - Team Lead");
             }
             other => panic!("expected SessionStart+Rename, got {other:?}"),
         }
@@ -626,13 +626,13 @@ mod tests {
     }
 
     #[test]
-    fn real_subagent_completed_ends_child_as_child() {
-        let line = r#"{"type":"subagent.completed","data":{"toolCallId":"call_kuB1BVYZyE3ih6ClBvbyKtZk","agentName":"rom","agentDisplayName":"Rom - Database Reliability Engineer"},"id":"e7ab205e","timestamp":"2026-05-26T14:14:43.099Z","parentId":"f85ba2bd","agentId":"call_kuB1BVYZyE3ih6ClBvbyKtZk"}"#;
+    fn subagent_completed_ends_child_as_child() {
+        let line = r#"{"type":"subagent.completed","data":{"toolCallId":"call_demo_child_2","agentName":"demo-agent","agentDisplayName":"Demo Agent - Database"},"id":"e0201","timestamp":"2026-01-02T03:06:00.000Z","parentId":"e0200","agentId":"call_demo_child_2"}"#;
         match &decode(line)[..] {
             [AgentEvent::SessionEnd { agent_id, as_child }] => {
                 assert_eq!(
                     *agent_id,
-                    AgentId::from_parts(SOURCE_NAME, "call_kuB1BVYZyE3ih6ClBvbyKtZk")
+                    AgentId::from_parts(SOURCE_NAME, "call_demo_child_2")
                 );
                 assert!(*as_child);
             }
@@ -641,13 +641,13 @@ mod tests {
     }
 
     #[test]
-    fn real_subagent_failed_ends_child_as_child() {
-        let line = r#"{"type":"subagent.failed","data":{"toolCallId":"toolu_bdrk_014wc1joyQCq3f6RBzGcxVRb","agentName":"general-purpose","agentDisplayName":"General Purpose Agent","model":"claude-haiku-4.5","totalToolCalls":0,"durationMs":2183,"error":"No response generated"},"id":"225a0bef-8b18-4d4d-a643-4cedd7f2e603","timestamp":"2026-06-14T21:30:31.494Z","parentId":"5a8b7e5e-9d2c-43b7-82b2-1d8f98f820de","agentId":"toolu_bdrk_014wc1joyQCq3f6RBzGcxVRb"}"#;
+    fn subagent_failed_ends_child_as_child() {
+        let line = r#"{"type":"subagent.failed","data":{"toolCallId":"call_demo_child_3","agentName":"general-purpose","agentDisplayName":"General Purpose Agent","model":"claude-haiku-4.5","totalToolCalls":0,"durationMs":2183,"error":"No response generated"},"id":"e0301","timestamp":"2026-01-02T03:07:00.000Z","parentId":"e0300","agentId":"call_demo_child_3"}"#;
         match &decode(line)[..] {
             [AgentEvent::SessionEnd { agent_id, as_child }] => {
                 assert_eq!(
                     *agent_id,
-                    AgentId::from_parts(SOURCE_NAME, "toolu_bdrk_014wc1joyQCq3f6RBzGcxVRb")
+                    AgentId::from_parts(SOURCE_NAME, "call_demo_child_3")
                 );
                 assert!(*as_child, "a subagent failure is a child end");
             }
@@ -694,13 +694,13 @@ mod tests {
             "type": "tool.execution_start",
             "data": {"toolCallId": "tooluse_child1", "toolName": "view", "arguments": {}},
             "id": "x", "timestamp": "t", "parentId": null,
-            "agentId": "call_SGMJ1yjMtpgFUbZct2fEo2Hk"
+            "agentId": "call_demo_child_1"
         })
         .to_string();
         match &decode(&line)[..] {
             [AgentEvent::ToolUseStart { agent_id, .. }] => assert_eq!(
                 *agent_id,
-                AgentId::from_parts(SOURCE_NAME, "call_SGMJ1yjMtpgFUbZct2fEo2Hk"),
+                AgentId::from_parts(SOURCE_NAME, "call_demo_child_1"),
                 "a line with envelope agentId must attribute to the CHILD, not root"
             ),
             other => panic!("expected child ToolUseStart, got {other:?}"),
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn a_permission_waits_on_its_call_and_a_refusal_ends_it() {
-        let req = r#"{"type":"permission.requested","data":{"requestId":"8c508e21-0a6c-4a06-8824-3930476499ea","permissionRequest":{"kind":"shell","toolCallId":"call_K8WLZkwufHsI9bTvkZmMKec2","fullCommandText":"cat /etc/hostname","intention":"Print /etc/hostname contents","commands":[{"identifier":"cat","readOnly":true}],"possiblePaths":["/etc/hostname"],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":true},"promptRequest":{"kind":"path","accessKind":"shell","paths":["/etc/hostname"],"toolCallId":"call_K8WLZkwufHsI9bTvkZmMKec2"}},"id":"1f975691-a108-4d6f-924b-d48263d46274","timestamp":"2026-06-14T21:35:55.637Z","parentId":"e0a534c6-d548-4def-b0bd-316c83efe5fd"}"#;
+        let req = r#"{"type":"permission.requested","data":{"requestId":"00000000-0000-4000-8000-000000000001","permissionRequest":{"kind":"shell","toolCallId":"call_demo_perm_1","fullCommandText":"cat /workspace/demo/notes.txt","intention":"Print demo notes","commands":[{"identifier":"cat","readOnly":true}],"possiblePaths":["/workspace/demo/notes.txt"],"possibleUrls":[],"hasWriteFileRedirection":false,"canOfferSessionApproval":true},"promptRequest":{"kind":"path","accessKind":"shell","paths":["/workspace/demo/notes.txt"],"toolCallId":"call_demo_perm_1"}},"id":"00000000-0000-4000-8000-000000000002","timestamp":"2026-01-02T03:10:00.000Z","parentId":"00000000-0000-4000-8000-000000000003"}"#;
         match &decode(req)[..] {
             [
                 AgentEvent::UserActionRequest {
@@ -723,13 +723,13 @@ mod tests {
                 assert!(reason.contains("shell"), "reason names the gate: {reason}");
                 assert_eq!(
                     tool_use_id.as_deref(),
-                    Some("call_K8WLZkwufHsI9bTvkZmMKec2"),
+                    Some("call_demo_perm_1"),
                     "the wait names the call it gates"
                 );
             }
             other => panic!("expected UserActionRequest, got {other:?}"),
         }
-        let approved = r#"{"type":"permission.completed","data":{"requestId":"8c508e21-0a6c-4a06-8824-3930476499ea","toolCallId":"call_K8WLZkwufHsI9bTvkZmMKec2","result":{"kind":"approved"}},"id":"8123a44a-3471-4262-9191-b3cddaf5224d","timestamp":"2026-06-14T21:35:58.218Z","parentId":"1f975691-a108-4d6f-924b-d48263d46274"}"#;
+        let approved = r#"{"type":"permission.completed","data":{"requestId":"00000000-0000-4000-8000-000000000001","toolCallId":"call_demo_perm_1","result":{"kind":"approved"}},"id":"00000000-0000-4000-8000-000000000004","timestamp":"2026-01-02T03:10:03.000Z","parentId":"00000000-0000-4000-8000-000000000002"}"#;
         assert!(
             decode(approved).is_empty(),
             "approved → no event (the call ends on its own)"
@@ -739,16 +739,16 @@ mod tests {
         // no-rule auto-deny, and Esc at the prompt (1.0.98).
         for (refused, call) in [
             (
-                r#"{"type":"permission.completed","data":{"requestId":"954afe31-559a-4afc-9eb6-13e30cf48aea","toolCallId":"call_nf1RvU9GxssNg2g7WtPgHqQ4","result":{"kind":"denied-interactively-by-user"}},"id":"60dae716-c76c-45e2-84e1-c3248ce3790c","timestamp":"2026-06-14T21:38:43.086Z","parentId":"5240af45-3ad2-4bf7-bc37-83c329c9c2ea"}"#,
-                "call_nf1RvU9GxssNg2g7WtPgHqQ4",
+                r#"{"type":"permission.completed","data":{"requestId":"00000000-0000-4000-8000-000000000005","toolCallId":"call_demo_perm_2","result":{"kind":"denied-interactively-by-user"}},"id":"00000000-0000-4000-8000-000000000006","timestamp":"2026-01-02T03:11:00.000Z","parentId":"00000000-0000-4000-8000-000000000007"}"#,
+                "call_demo_perm_2",
             ),
             (
-                r#"{"type":"permission.completed","data":{"requestId":"eab9bd2c-ca42-4ab6-8567-1c11906500a6","toolCallId":"toolu_bdrk_015JoceQkzNKnLkeCj5NaLzT","result":{"kind":"denied-no-approval-rule-and-could-not-request-from-user"}},"id":"2cc6bffe-6443-4d8b-9765-dbfeda13c4de","timestamp":"2026-06-14T21:27:17.209Z","parentId":"c113f81d-6f12-4080-bd13-8613526543dc"}"#,
-                "toolu_bdrk_015JoceQkzNKnLkeCj5NaLzT",
+                r#"{"type":"permission.completed","data":{"requestId":"00000000-0000-4000-8000-000000000008","toolCallId":"call_demo_perm_3","result":{"kind":"denied-no-approval-rule-and-could-not-request-from-user"}},"id":"00000000-0000-4000-8000-000000000009","timestamp":"2026-01-02T03:12:00.000Z","parentId":"00000000-0000-4000-8000-00000000000a"}"#,
+                "call_demo_perm_3",
             ),
             (
-                r#"{"type":"permission.completed","data":{"requestId":"b310d4e0-1e0e-4600-955d-871b5a951e13","toolCallId":"call_-Dbzv4Ev_Get6cFh","result":{"kind":"cancelled","reason":"Session aborted"}},"id":"f36f04ef-3c73-4b7e-88a0-f00c036e2185","timestamp":"2026-10-18T08:09:01.252Z","parentId":"571e3185-d040-4403-b319-738711e0bb62"}"#,
-                "call_-Dbzv4Ev_Get6cFh",
+                r#"{"type":"permission.completed","data":{"requestId":"00000000-0000-4000-8000-00000000000b","toolCallId":"call_demo_perm_4","result":{"kind":"cancelled","reason":"Session aborted"}},"id":"00000000-0000-4000-8000-00000000000c","timestamp":"2026-01-02T03:13:00.000Z","parentId":"00000000-0000-4000-8000-00000000000d"}"#,
+                "call_demo_perm_4",
             ),
         ] {
             match &decode(refused)[..] {
@@ -761,8 +761,8 @@ mod tests {
     }
 
     #[test]
-    fn real_session_shutdown_ends_the_root() {
-        let line = r#"{"type":"session.shutdown","data":{"shutdownType":"routine","totalPremiumRequests":1},"id":"220c4131","timestamp":"2026-05-22T06:17:01.077Z","parentId":"cd21bd01"}"#;
+    fn session_shutdown_ends_the_root() {
+        let line = r#"{"type":"session.shutdown","data":{"shutdownType":"routine","totalPremiumRequests":1},"id":"e0002","timestamp":"2026-01-02T03:04:01.000Z","parentId":"e0001"}"#;
         match &decode(line)[..] {
             [AgentEvent::SessionEnd { agent_id, as_child }] => {
                 assert_eq!(*agent_id, root());
@@ -952,12 +952,12 @@ mod tests {
 
     #[test]
     fn subagent_completed_without_any_child_key_is_ignored() {
-        let completed = r#"{"type":"subagent.completed","data":{"agentName":"rom"},"id":"x","timestamp":"t","parentId":null}"#;
+        let completed = r#"{"type":"subagent.completed","data":{"agentName":"demo-agent"},"id":"x","timestamp":"t","parentId":null}"#;
         assert!(
             decode(completed).is_empty(),
             "un-keyable completed child → no SessionEnd"
         );
-        let failed = r#"{"type":"subagent.failed","data":{"agentName":"rom"},"id":"x","timestamp":"t","parentId":null}"#;
+        let failed = r#"{"type":"subagent.failed","data":{"agentName":"demo-agent"},"id":"x","timestamp":"t","parentId":null}"#;
         assert!(
             decode(failed).is_empty(),
             "the failed arm shares the same keying gate"

@@ -2,7 +2,6 @@ class AgentOffice < Formula
   desc "Always-on-top pixel office where every Claude Code session is a little worker"
   homepage "https://github.com/tyler-y-liu/agent-office"
   url "https://github.com/tyler-y-liu/agent-office/releases/download/v@VERSION@/agent-office-v@VERSION@-macos-universal.tar.gz"
-  version "@VERSION@"
   sha256 "@SHA256@"
   license "MIT"
 
@@ -10,6 +9,10 @@ class AgentOffice < Formula
 
   def install
     bin.install "agent-office"
+    # The binary embeds the OFL-licensed Fusion Pixel font, so the notices and
+    # the font license must be installed alongside it, not left in the tarball.
+    # Readable at $(brew --prefix)/share/agent-office.
+    pkgshare.install "THIRD-PARTY-NOTICES.md", "LICENSE", "licenses"
   end
 
   def caveats

@@ -40,8 +40,33 @@ jobs:
             target/x86_64-apple-darwin/release/agent-office
           # The linker ad-hoc signs only the arm64 slice; sign both so codesign -v passes.
           codesign --force --sign - dist/agent-office/agent-office
-          cp LICENSE README.md dist/agent-office/
+          cp LICENSE README.md THIRD-PARTY-NOTICES.md dist/agent-office/
+          # The binary embeds the OFL-licensed Fusion Pixel font, so the font
+          # license and its upstream notices must ship beside it (OFL 1.1
+          # condition 2, MIT "include the notice"). Copy them from the repo;
+          # never from the runner's home directory.
+          mkdir -p dist/agent-office/licenses
+          cp assets/OFL-Fusion-Pixel.txt dist/agent-office/licenses/
+          cp -R assets/LICENSES-Fusion-Pixel dist/agent-office/licenses/
+          # Fail here, with the missing path in the log, rather than publishing
+          # a release that is out of compliance.
+          for f in LICENSE README.md THIRD-PARTY-NOTICES.md \
+                   licenses/OFL-Fusion-Pixel.txt \
+                   licenses/LICENSES-Fusion-Pixel/boutique-bitmap-7x7/OFL.txt \
+                   licenses/LICENSES-Fusion-Pixel/galmuri/LICENSE.txt \
+                   licenses/LICENSES-Fusion-Pixel/misaki/misaki.txt \
+                   licenses/LICENSES-Fusion-Pixel/miseki-bitmap/LICENSE.txt; do
+            test -s "dist/agent-office/$f" || { echo "missing from package: $f"; exit 1; }
+          done
+          grep -q "SIL OPEN FONT LICENSE Version 1.1" dist/agent-office/THIRD-PARTY-NOTICES.md \
+            || { echo "THIRD-PARTY-NOTICES.md lacks the OFL text"; exit 1; }
           tar -C dist -czf "agent-office-$GITHUB_REF_NAME-macos-universal.tar.gz" agent-office
+          tar -tzf "agent-office-$GITHUB_REF_NAME-macos-universal.tar.gz" | tee package-members.txt
+          grep -qx "agent-office/THIRD-PARTY-NOTICES.md" package-members.txt \
+            || { echo "tarball lacks THIRD-PARTY-NOTICES.md"; exit 1; }
+          grep -qx "agent-office/licenses/OFL-Fusion-Pixel.txt" package-members.txt \
+            || { echo "tarball lacks the font license"; exit 1; }
+          # sha256 is computed from the final tarball, after the notices are in it.
           shasum -a 256 agent-office-*.tar.gz | tee agent-office.sha256
 
       - name: Publish release

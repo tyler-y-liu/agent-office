@@ -1,0 +1,62 @@
+name: ci
+
+# The READMEs promise a minimum Rust version ("Rust 1.95 or newer"), and that
+# promise broke once: the code used a library feature that was still unstable
+# there, so the stated version did not compile. This workflow keeps the promise
+# honest — the `msrv` job is pinned to Cargo.toml's `rust-version` and runs the
+# whole suite on exactly that toolchain.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The floor. Fails if Cargo.toml's `rust-version` is missing, if the READMEs
+  # disagree with it, or if that toolchain cannot build and pass the tests.
+  msrv:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read Cargo.toml's rust-version
+        id: msrv
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$msrv" || { echo "Cargo.toml has no rust-version"; exit 1; }
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+          echo "Minimum Rust: $msrv"
+
+      - name: Check both READMEs promise that version
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          for f in README.md README.zh-CN.md; do
+            grep -qF "rust-$MSRV" "$f" || { echo "$f: badge does not say Rust $MSRV"; exit 1; }
+            grep -qF "Rust $MSRV " "$f" || { echo "$f: requirements do not say Rust $MSRV"; exit 1; }
+          done
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install "$MSRV" --profile minimal
+
+      - name: Test on the minimum
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$MSRV" test --release --locked
+
+  # Current stable, so a break on the toolchain people actually run shows up
+  # here too, not only from a release tag.
+  stable:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Test on stable
+        run: cargo +stable test --release --locked

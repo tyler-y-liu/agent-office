@@ -61,7 +61,7 @@ Other ways in:
 cargo install --git https://github.com/tyler-y-liu/agent-office
 ```
 
-Each [release](https://github.com/tyler-y-liu/agent-office/releases) also has a universal binary for Apple Silicon and Intel.
+Each [release](https://github.com/tyler-y-liu/agent-office/releases) also has a universal binary for Apple Silicon and Intel. The binary embeds the OFL-licensed Fusion Pixel font, so the third-party notices ship with it: `licenses/` inside the tarball, or `$(brew --prefix)/share/agent-office/THIRD-PARTY-NOTICES.md` after Homebrew.
 
 ### Turn on summaries
 

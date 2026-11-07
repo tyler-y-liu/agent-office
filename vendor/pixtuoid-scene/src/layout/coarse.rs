@@ -84,7 +84,7 @@ fn walk_piece(mask: &WalkableMask, overlay: &OccupancyOverlay, cx: u16, cy: u16)
     let mut unseen = open_bits;
     let mut largest: CellBits = 0;
     while unseen != 0 {
-        let mut piece = unseen.isolate_lowest_one();
+        let mut piece = lowest_bit(unseen);
         loop {
             let grown = (piece
                 | ((piece << 1) & !WEST_COLUMN)
@@ -103,6 +103,16 @@ fn walk_piece(mask: &WalkableMask, overlay: &OccupancyOverlay, cx: u16, cy: u16)
         unseen &= !piece;
     }
     largest
+}
+
+/// The lowest set bit of `bits` (`0` for `0`): the pixel [`walk_piece`] starts
+/// each piece from. Starting low is what makes "the first piece in row order
+/// among equals" the one a cell reports.
+/// agent-office: the standard spelling, `bits.isolate_lowest_one()`, is still
+/// unstable and this crate builds on Rust 1.95 (our stated minimum), so we
+/// write out `x & x.wrapping_neg()`, which is the same bit.
+fn lowest_bit(bits: CellBits) -> CellBits {
+    bits & bits.wrapping_neg()
 }
 
 /// Is pixel `(x, y)` open — walkable on the static `mask` and clear of the
@@ -388,5 +398,17 @@ mod tests {
             cell_walkable(&m, &OccupancyOverlay::new(), 1, 1),
             "joined into one piece, it stands"
         );
+    }
+
+    /// A cell split into two equal pieces reports the first in row order, and
+    /// that comes from seeding each piece at its lowest open bit. The seed is
+    /// hand-written (the standard `isolate_lowest_one` is unstable and Rust
+    /// 1.95 is our floor), so pin its edges: no bit at all, high-only, and all.
+    #[test]
+    fn the_lowest_open_bit_is_where_a_piece_starts() {
+        assert_eq!(lowest_bit(0), 0);
+        assert_eq!(lowest_bit(0b1010_0000), 0b0010_0000);
+        assert_eq!(lowest_bit(1 << 15), 1 << 15);
+        assert_eq!(lowest_bit(CellBits::MAX), 1);
     }
 }

@@ -61,7 +61,7 @@ agent-office
 cargo install --git https://github.com/tyler-y-liu/agent-office
 ```
 
-每个 [release](https://github.com/tyler-y-liu/agent-office/releases) 也附了 universal 二进制（Apple Silicon 和 Intel 通用）。
+每个 [release](https://github.com/tyler-y-liu/agent-office/releases) 也附了 universal 二进制（Apple Silicon 和 Intel 通用）。二进制内嵌了 OFL 授权的 Fusion Pixel 字体，所以第三方许可随包附带：压缩包里是 `licenses/`，用 Homebrew 装完在 `$(brew --prefix)/share/agent-office/THIRD-PARTY-NOTICES.md`。
 
 ### 开启摘要
 
