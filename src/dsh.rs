@@ -79,7 +79,8 @@ fn plugin_source(exe: &Path, transcripts: &Path, viewing: &Path, dispatch: &Path
 }
 
 /// The patch file's top-level sequence items, each with the comment lines
-/// above it. A file that is only `[]` (dsh's empty patch) has none.
+/// above it. File-leading trivia stays separate so it survives unmounting.
+/// A file that is only `[]` (dsh's empty patch) has none.
 fn items(text: &str) -> Vec<String> {
     if text.trim() == "[]" {
         return Vec::new();
@@ -90,6 +91,11 @@ fn items(text: &str) -> Vec<String> {
         let starts_item = line.starts_with("- ") || line == "-";
         let loose = line.trim().is_empty() || line.starts_with('#');
         if starts_item {
+            // File-leading trivia belongs to the document, not the first row:
+            // removing that row must not discard a marker or the user's comments.
+            if out.is_empty() && !pending.is_empty() && pending.lines().all(flow_trivia_line) {
+                out.push(std::mem::take(&mut pending));
+            }
             out.push(std::mem::take(&mut pending) + line + "\n");
         } else if loose || out.is_empty() {
             pending.push_str(line);
@@ -120,22 +126,71 @@ fn is_plugin(item: &str, wanted: &str) -> bool {
     !ids.is_empty() && ids.iter().all(|id| *id == wanted)
 }
 
-fn is_ours(item: &str) -> bool {
-    is_plugin(item, PLUGIN_ID)
+/// Whether `wanted` has a live insert not disabled by dsh's plugin manager.
+/// The manager's disable is a separate item, so it must override every item
+/// for that id rather than being mistaken for another way to mount it.
+fn plugin_active(items: &[String], wanted: &str) -> bool {
+    let mut inserted = false;
+    for item in items.iter().filter(|item| is_plugin(item, wanted)) {
+        for line in item.lines() {
+            let line = line.trim_start();
+            if line.starts_with('#') {
+                continue;
+            }
+            let field = line.strip_prefix("- ").unwrap_or(line).trim_start();
+            inserted |= field == "insert:";
+            if let Some(value) = field.strip_prefix("disabled:") {
+                let value = value
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(['"', '\'']);
+                if value.eq_ignore_ascii_case("true") {
+                    return false;
+                }
+            }
+        }
+    }
+    inserted
+}
+
+fn flow_trivia_line(line: &str) -> bool {
+    line.trim().is_empty() || line.trim_start().starts_with('#') || line.trim() == "---"
+}
+
+/// Split leading whitespace, whole-line comments and document starts from a
+/// top-level flow sequence without interpreting the YAML values themselves.
+fn flow_parts(text: &str) -> Option<(&str, &str)> {
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        if rest.starts_with('[') {
+            return Some((&text[..text.len() - rest.len()], rest));
+        }
+        let (line, next) = rest.split_once('\n')?;
+        if flow_trivia_line(line) {
+            rest = next;
+        } else {
+            return None;
+        }
+    }
 }
 
 /// A non-empty flow sequence (`[ {id: x} ]`, which dsh's yaml writer keeps
 /// when it adds a row to `[]`): a block item appended after it is invalid
 /// YAML, and dsh would refuse to boot.
 fn is_flow(text: &str) -> bool {
-    let t = text.trim_start();
-    t.starts_with('[') && text.trim() != "[]"
+    flow_parts(text).is_some_and(|(_, flow)| flow.trim() != "[]")
 }
 
 fn without_plugin(text: &str, wanted: &str) -> String {
     // We only ever write block items, so a flow sequence holds none of ours.
     if is_flow(text) {
         return text.to_owned();
+    }
+    // Replacing an empty flow must remove its marker but keep its trivia.
+    if let Some((prefix, _)) = flow_parts(text) {
+        return prefix.to_owned();
     }
     items(text).into_iter().filter(|i| !is_plugin(i, wanted)).collect()
 }
@@ -144,9 +199,7 @@ fn without_plugin(text: &str, wanted: &str) -> String {
 /// a sequence, and a file with no items left is null, not `[]`.
 fn after_unmount(text: &str, wanted: &str) -> String {
     let kept = without_plugin(text, wanted);
-    let no_items = kept
-        .lines()
-        .all(|l| l.trim().is_empty() || l.starts_with('#'));
+    let no_items = kept.lines().all(flow_trivia_line);
     if no_items && !text.trim().is_empty() {
         kept + "[]\n"
     } else {
@@ -204,7 +257,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
 }
 
 pub(crate) fn plugin_mounted(home: &Path, wanted: &str) -> bool {
-    read_patch(home).is_ok_and(|text| items(&text).iter().any(|item| is_plugin(item, wanted)))
+    read_patch(home).is_ok_and(|text| plugin_active(&items(&text), wanted))
 }
 
 pub(crate) fn mount_plugin(home: &Path, wanted: &str, plugin: &Path) -> Result<()> {
@@ -303,13 +356,23 @@ pub fn disconnect() -> Result<()> {
 /// window reads as a dispatch that did nothing.
 pub fn focus_app() {
     #[cfg(target_os = "macos")]
+    if let Ok(child) = std::process::Command::new("open")
+        .arg("dsh://open")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
     {
-        let _ = std::process::Command::new("open")
-            .arg("dsh://open")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        drop(reap_in_background(child));
     }
+}
+
+/// `open` returns after handing off the URL. Wait off the window's thread so
+/// focusing neither stalls a frame nor leaves that short-lived child a zombie.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn reap_in_background(
+    mut child: std::process::Child,
+) -> std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>> {
+    std::thread::spawn(move || child.wait())
 }
 
 /// Whether the patch mounts our plugin and the plugin file is there.
@@ -328,7 +391,7 @@ pub fn installed() -> bool {
         && web_current(&web_dir(&dir))
         && read_patch(&home).is_ok_and(|t| {
             let items = items(&t);
-            items.iter().any(|i| is_ours(i)) && items.iter().any(|i| is_plugin(i, WEB_ID))
+            plugin_active(&items, PLUGIN_ID) && plugin_active(&items, WEB_ID)
         })
 }
 
@@ -344,8 +407,31 @@ fn forwards_turn_start(plugin: &str) -> bool {
     plugin.contains("\"turn_start\"")
 }
 
+/// After a crash, a live pid can belong to a new host while its old viewing
+/// file remains. Only a written marker derived from the process start lets
+/// desktop reject that stale file, so pid-only plugin versions need reconnecting.
 fn says_what_you_view(plugin: &str) -> bool {
     plugin.contains("const VIEWING = ")
+        && derives_process_start_marker(plugin)
+        && plugin.contains("START_MARKER === undefined")
+        && plugin.contains(concat!(
+            "JSON.stringify({ pid: process.pid, startMarker: START_MARKER, ",
+            "sessions: [...open.keys()] })"
+        ))
+}
+
+fn derives_process_start_marker(plugin: &str) -> bool {
+    // `ps lstart` supplies the same start second as the kernel on macOS; a
+    // clock reading or unrelated id cannot identify this incarnation.
+    [
+        "const START_MARKER = (() => {",
+        r#"execFileSync("ps", ["-p", String(process.pid), "-o", "lstart="]"#,
+        "Date.parse(started)",
+        "Math.floor(milliseconds / 1000)",
+        "Number.isSafeInteger(marker)",
+    ]
+    .into_iter()
+    .all(|code| plugin.contains(code))
 }
 
 /// One from before Workspaces creates Sessions no sidebar lists: once you
@@ -366,17 +452,51 @@ mod tests {
     fn a_plugin_without_the_turn_start_is_not_connected() {
         assert!(forwards_turn_start(TEMPLATE));
         assert!(!forwards_turn_start(&TEMPLATE.replace("\"turn_start\"", "\"x\"")));
-        // Nor one from before it said which session you view.
-        assert!(says_what_you_view(TEMPLATE));
-        assert!(!says_what_you_view(
-            &TEMPLATE.replace("const VIEWING = ", "const X = ")
-        ));
         // Nor one from before dispatch: accepting work it cannot receive
         // would only time out in the spool.
         assert!(supports_dispatch(TEMPLATE));
         assert!(!supports_dispatch(&TEMPLATE.replace("sessionController.create", "sessionController.nope")));
         // Nor one that creates by cwd alone: its Sessions join no Workspace.
         assert!(!supports_dispatch(&TEMPLATE.replace("workspaceId: workspace.id", "cwd: request.cwd")));
+    }
+
+    /// A pre-marker or partially backported plugin writes files desktop must
+    /// reject after a pid is reused. It is stale, however much of the newer
+    /// source (or a START_MARKER mention) remains alongside the missing step.
+    #[test]
+    fn a_plugin_without_a_viewing_start_marker_is_not_connected() {
+        assert!(says_what_you_view(TEMPLATE));
+        for (version, source) in [
+            (
+                "before viewing support",
+                TEMPLATE.replace("const VIEWING = ", "const X = "),
+            ),
+            (
+                "pid-only viewing JSON",
+                TEMPLATE.replace("startMarker: START_MARKER, ", ""),
+            ),
+            (
+                "marker write deleted",
+                TEMPLATE.replace("startMarker: START_MARKER, ", "startMarker: undefined, "),
+            ),
+            (
+                "marker generation removed",
+                TEMPLATE.replace(
+                    "const START_MARKER = (() => {",
+                    "const START_MARKER = undefined; (() => {",
+                ),
+            ),
+            (
+                "wall clock instead of process start",
+                TEMPLATE.replace("Date.parse(started)", "Date.now()"),
+            ),
+            (
+                "unreliable marker no longer suppresses writes",
+                TEMPLATE.replace("START_MARKER === undefined", "false"),
+            ),
+        ] {
+            assert!(!says_what_you_view(&source), "accepted {version}");
+        }
     }
 
     /// pixtuoid's row, the user's own rows and their comments must survive a
@@ -413,6 +533,54 @@ mod tests {
         assert_eq!(after_disconnect(text), "[]\n");
     }
 
+    /// A document marker is leading trivia, not a null YAML value. Unmounting
+    /// must restore the valid empty flow instead of leaving only `---`.
+    #[test]
+    fn disconnect_preserves_document_markers_around_an_empty_flow() {
+        for original in [
+            "---\n[]\n",
+            "# lead\n\n---\n[]\n",
+            "---\n- insert:\n    - id: pixtuoid\n      name: /p.mjs\n",
+        ] {
+            assert_eq!(after_disconnect(original), original);
+            let dir = Path::new("/h/.dsh/agent-office");
+            let connected = after_connect(original, &plugin_path(dir), dir).unwrap();
+            assert_eq!(after_disconnect(&connected), original);
+        }
+    }
+
+    /// Only a live insert makes dispatch ready. The manager represents a
+    /// disabled plugin with a separate row; treating that row as the mount
+    /// would send work to a plugin that dsh will never start.
+    #[test]
+    fn only_an_enabled_insert_is_mounted() {
+        let home = std::env::temp_dir().join(format!("ao-dsh-mounted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let patch = patch_path(&home);
+        let normal = with_plugin("", PLUGIN_ID, Path::new("/x.mjs")).unwrap();
+        std::fs::write(&patch, &normal).unwrap();
+        assert!(plugin_mounted(&home, PLUGIN_ID));
+        assert!(!plugin_mounted(&home, "pixtuoid"));
+
+        let disabled = format!("{normal}- id: agent-office\n  disabled: true\n");
+        std::fs::write(&patch, disabled).unwrap();
+        assert!(!plugin_mounted(&home, PLUGIN_ID));
+
+        std::fs::write(&patch, "- id: agent-office\n  disabled: true\n").unwrap();
+        assert!(!plugin_mounted(&home, PLUGIN_ID));
+
+        let other = with_plugin("", "pixtuoid", Path::new("/p.mjs")).unwrap();
+        std::fs::write(
+            &patch,
+            format!("# - id: agent-office\n# disabled: true\n{other}"),
+        )
+        .unwrap();
+        assert!(!plugin_mounted(&home, PLUGIN_ID));
+        assert!(plugin_mounted(&home, "pixtuoid"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     /// A flow-style patch must be refused, not turned into invalid YAML that
     /// stops every dsh profile from booting.
     #[test]
@@ -420,6 +588,50 @@ mod tests {
         let flow = "[ { id: web, disabled: true } ]\n";
         assert!(with_ours(flow, Path::new("/x.mjs")).is_err());
         assert_eq!(without_plugin(flow, PLUGIN_ID), flow);
+    }
+
+    /// Leading trivia is not a YAML value: hiding a flow sequence behind it
+    /// and then appending a block item would still produce invalid YAML.
+    #[test]
+    fn a_non_empty_flow_after_leading_trivia_is_refused_and_left_alone() {
+        let p = Path::new("/x.mjs");
+        for flow in [
+            "# comment\n[ { id: x } ]\n",
+            "\n  # comment\n\n[ { id: x } ]\n",
+            "---\n[ { id: x } ]\n",
+            "# comment\n\n---\n\n[ { id: x } ]\n",
+        ] {
+            assert!(with_ours(flow, p).is_err(), "accepted {flow:?}");
+            assert_eq!(without_plugin(flow, PLUGIN_ID), flow);
+        }
+    }
+
+    /// The same leading trivia around dsh's empty `[]` must survive replacing
+    /// the flow marker, without leaving `[]` next to the new block item.
+    #[test]
+    fn an_empty_flow_after_leading_trivia_becomes_a_block_sequence() {
+        for (text, prefix) in [
+            ("# comment\n[]\n", "# comment\n"),
+            ("\n  # comment\n\n[]\n", "\n  # comment\n\n"),
+            ("---\n[]\n", "---\n"),
+            ("# comment\n\n---\n[]\n", "# comment\n\n---\n"),
+        ] {
+            assert_eq!(
+                with_ours(text, Path::new("/x.mjs")).unwrap(),
+                format!("{prefix}- insert:\n    - id: agent-office\n      name: \"/x.mjs\"\n")
+            );
+        }
+    }
+
+    /// Brackets in comments and mapping values do not make the top-level
+    /// sequence flow-style, and ordinary block rows and comments stay intact.
+    #[test]
+    fn comments_and_plain_values_are_not_flow_sequences() {
+        let block = "# [ a comment, not a sequence ]\n- insert:\n    - id: pixtuoid\n      name: /p.mjs\n";
+        assert!(!is_flow("value: [ { id: x } ]\n"));
+        let once = with_ours(block, Path::new("/x.mjs")).unwrap();
+        assert!(once.starts_with(block));
+        assert_eq!(without_plugin(&once, PLUGIN_ID), block);
     }
 
     /// Disconnect must not take another plugin's row with it.
@@ -453,29 +665,60 @@ mod tests {
         assert_eq!(after_disconnect(&once), original);
     }
 
+    /// Focusing uses a short-lived `open` process. Its complete wait must be
+    /// observable without launching a desktop app, or dropping the Child
+    /// would leave a zombie every time the office raises DSH.
+    #[cfg(unix)]
+    #[test]
+    fn the_focus_child_is_reaped_off_the_calling_thread() {
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = reap_in_background(child).join().unwrap().unwrap();
+        assert!(status.success());
+    }
+
     /// DSH loads a browser half only from a package whose manifest declares
     /// `dsh.client` for the web and exports `./client`, and registers it under
-    /// the id the bundle names. Any mismatch and dispatches stop opening,
-    /// silently: this pins what the spike proved DSH accepts.
+    /// the id and with the services the bundle names. Any mismatch prevents
+    /// DSH from installing the client, so this pins the package/loader shape.
     #[test]
     fn the_browser_package_is_shaped_as_dsh_loads_it() {
         let file = |name: &str| WEB_FILES.iter().find(|(n, _)| *n == name).unwrap().1;
         let pkg: serde_json::Value = serde_json::from_str(file("package.json")).unwrap();
         assert_eq!(pkg["dsh"]["client"]["platform"], "web");
+        assert_eq!(
+            pkg["dsh"]["client"]["inject"],
+            serde_json::json!([
+                "@deepseek-ai/dsh-api-session-controller",
+                "@deepseek-ai/dsh-client-ui-workspace"
+            ])
+        );
         assert_eq!(pkg["exports"]["."], "./host.mjs");
         assert_eq!(pkg["exports"]["./client"], "./client.js");
+        let client = file("client.js");
         let id = pkg["name"].as_str().unwrap();
-        assert!(file("client.js").contains(&format!("id: \"{id}\"")));
+        assert!(client.contains("window.__ModuleLoader__.load({"));
+        assert!(client.contains(&format!("id: \"{id}\"")));
+        assert!(client.contains(&format!("module.exports.name = \"{WEB_ID}\"")));
+        assert!(client.contains("const inject = [\"sessions\", \"uiWorkspace\"]"));
+        assert!(client.contains("module.exports.inject = inject"));
+        assert!(client.contains("module.exports.apply = apply"));
         // The mounted row resolves to the host half, whose nearest manifest
         // must be this package's.
         assert!(web_entry(Path::new("/d")).ends_with("web/host.mjs"));
-        // It opens exactly the presets a dispatch creates, and never the
-        // subagents a DSH PM spawns under those same presets.
+        // The host still creates role-selected Sessions, but no association
+        // between this page and an external dispatch identifies a list row.
         assert!(TEMPLATE.contains("const agentPreset = `office-${request.role}`"));
-        assert!(file("client.js").contains("preset.startsWith(\"office-\")"));
-        assert!(file("client.js").contains("row.origin !== \"subagent\""));
-        // Nor an old dispatch a page sees only on reconnecting.
-        assert!(file("client.js").contains("Date.now() - row.updatedAt < FRESH_MS"));
+        // The Node suite proves that existing, fresh, late and subagent rows
+        // have no viewport effects. Keep the old eager heuristics out of the
+        // installed source as well: neither can establish dispatch ownership.
+        assert!(!client.contains("openSession"));
+        assert!(!client.contains("FRESH_MS"));
     }
 
     /// A browser half left by an older build reads as not connected, so the

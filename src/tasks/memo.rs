@@ -74,8 +74,14 @@ impl Memo {
             .unsaved_since
             .is_some_and(|t| now.duration_since(t) >= SAVE_AFTER)
         {
-            self.unsaved_since = None;
-            self.save();
+            match self.save() {
+                Ok(()) => self.unsaved_since = None,
+                Err(e) => {
+                    // Try at the next debounce point, not on every scene poll.
+                    self.unsaved_since = Some(now);
+                    eprintln!("agent-office: saving memo failed: {e}");
+                }
+            }
         }
     }
 
@@ -91,28 +97,67 @@ impl Memo {
         }
     }
 
-    fn save(&self) {
-        let Some(path) = &self.path else { return };
+    fn save(&self) -> std::io::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
         let pairs: Vec<(&String, &String)> = self
             .order
             .iter()
             .filter_map(|k| Some((k, self.lines.get(k)?)))
             .collect();
-        if let Ok(json) = serde_json::to_string(&pairs) {
-            // Through a temporary file, so a crash mid-write keeps the old
-            // memo; 0600 because it holds task titles and questions.
-            let tmp = path.with_extension("json.tmp");
-            let _ = crate::atomic::write_private(path, &tmp, json.as_bytes());
-        }
+        let json = serde_json::to_string(&pairs).map_err(std::io::Error::other)?;
+        // Through a temporary file, so a crash mid-write keeps the old memo;
+        // 0600 because it holds task titles and questions.
+        let tmp = path.with_extension("json.tmp");
+        crate::atomic::write_private(path, &tmp, json.as_bytes())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed memo write must remain scheduled instead of silently dropping
+    /// model replies. Failure re-arms the same five-second debounce, then a
+    /// repaired path saves on that next due point; success stops further work.
+    #[test]
+    fn a_failed_save_is_retried_at_the_next_due_point() {
+        let dir =
+            std::env::temp_dir().join(format!("agent-office-memo-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = dir.join("memo");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("summaries.json");
+        let mut m = Memo {
+            path: Some(path.clone()),
+            ..Memo::default()
+        };
+        m.insert("k".into(), "修登录页".into());
+        let start = Instant::now();
+        m.unsaved_since = Some(start);
+        m.save_due(start + SAVE_AFTER - Duration::from_millis(1));
+        assert!(!path.exists(), "the original debounce still holds");
+        let failed_at = start + SAVE_AFTER;
+        m.save_due(failed_at);
+        assert!(m.unsaved_since.is_some(), "a failed write stays scheduled");
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        m.save_due(failed_at + SAVE_AFTER - Duration::from_millis(1));
+        assert!(!path.exists(), "failure does not spin on every poll");
+        m.save_due(failed_at + SAVE_AFTER);
+        assert_eq!(m.unsaved_since, None, "only a complete save clears due");
+        let saved: Vec<(String, String)> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, [("k".into(), "修登录页".into())]);
+        m.save_due(failed_at + SAVE_AFTER * 2);
+        assert_eq!(m.unsaved_since, None, "a recovered save is not repeated");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The memo holds task titles and what sessions are asking you: other
     /// users of the Mac must not read it, even where an older build left it
@@ -129,10 +174,10 @@ mod tests {
             ..Memo::default()
         };
         m.insert(key(&["task", "修登录页"]), "修复登录页".into());
-        m.save();
+        m.save().unwrap();
         assert_eq!(mode(&path), 0o600);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        m.save();
+        m.save().unwrap();
         assert_eq!(mode(&path), 0o600);
         assert!(
             std::fs::read_to_string(&path)

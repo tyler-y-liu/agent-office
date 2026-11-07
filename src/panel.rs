@@ -139,7 +139,7 @@ pub fn waits_on_you(slot: &AgentSlot, view: Option<&TaskView>, read: bool) -> Op
                 && view.is_some_and(|v| {
                     v.needs_task
                         || v.outcome_summarized
-                            && v.outcome.as_deref().is_some_and(|o| crate::i18n::is_ask(o))
+                            && v.outcome.as_deref().is_some_and(crate::i18n::is_ask)
                 }) =>
         {
             Some(Wait::Reply)
@@ -334,12 +334,12 @@ pub fn waiting(
         .collect()
 }
 
-/// The session to deal with next: the one in your office's guest chair, so
-/// what opens is who you see there; with the chair empty, the one that will
-/// take it. `drawn` is the scene as the office draws it ([`crate::core::as_seen`]),
-/// judged by the office's own line ([`pixtuoid_scene::waiting`]), so the two
-/// cannot disagree.
-pub fn next_waiting(drawn: &SceneState, now: SystemTime) -> Option<AgentId> {
+/// Who sits in your office's guest chair, or with the chair empty, who will
+/// take it: `drawn` is the scene as the office draws it
+/// ([`crate::core::as_seen`]), judged by the office's own line
+/// ([`pixtuoid_scene::waiting`]), so the two cannot disagree. Sessions only:
+/// a sub-agent does not queue there.
+pub fn guest_chair(drawn: &SceneState, now: SystemTime) -> Option<AgentId> {
     let line = pixtuoid_scene::waiting::line(
         drawn
             .agents
@@ -351,6 +351,43 @@ pub fn next_waiting(drawn: &SceneState, now: SystemTime) -> Option<AgentId> {
         .find(|s| pixtuoid_scene::waiting::lines_up(s, now))
         .or(line.first())
         .map(|s| s.agent_id)
+}
+
+/// The session to deal with next, what `n` and a banner's click open: the
+/// one in the guest chair, unless a sub-agent waits on a prompt, which the
+/// banner and the badge count but the office does not seat. That one goes
+/// first when the chair holds no prompt, or a younger one.
+pub fn next_waiting(
+    scene: &SceneState,
+    views: &TaskViews,
+    now: SystemTime,
+    seen: &HashMap<AgentId, SystemTime>,
+) -> Option<AgentId> {
+    let drawn = crate::core::as_seen(&std::sync::Arc::new(scene.clone()), views, seen, false, now);
+    let shown = |id: &AgentId| {
+        drawn
+            .agents
+            .get(id)
+            .is_some_and(|s| crate::pipeline::is_shown_source(&s.source))
+    };
+    let prompt = |s: &AgentSlot| {
+        pixtuoid_scene::waiting::need(s, now) == Some(pixtuoid_scene::waiting::Need::Approval)
+    };
+    let sub = drawn
+        .agents
+        .values()
+        .filter(|s| crate::pipeline::is_shown_source(&s.source))
+        .filter(|s| s.parent_id.as_ref().is_some_and(shown))
+        .filter(|s| prompt(s))
+        .min_by_key(|s| (s.state_started_at, s.agent_id));
+    let guest = guest_chair(&drawn, now).and_then(|id| drawn.agents.get(&id));
+    match (guest, sub) {
+        (Some(g), Some(s)) if prompt(g) && g.state_started_at <= s.state_started_at => {
+            Some(g.agent_id)
+        }
+        (_, Some(s)) => Some(s.agent_id),
+        (g, None) => g.map(|g| g.agent_id),
+    }
 }
 
 /// `slot` then its subagents, theirs under them, oldest first at each level.
@@ -1143,7 +1180,7 @@ pub fn render(
         .iter()
         .filter(|(_, d)| *d == 0)
         .filter_map(|(id, _)| scene.agents.get(id))
-        .map(|s| group_of(s))
+        .map(&group_of)
         .collect();
     // The scroll mark takes the title row's right end when cards overflow.
     let room = usize::from(area.width).saturating_sub(1 + 4);
@@ -1467,6 +1504,7 @@ fn bar_labels(width: u16) -> Option<Vec<Vec<(crate::roles::Role, &'static str)>>
 /// The hosts are a list, not "this one and the other": adding Cursor to
 /// [`crate::roles::Backend::ALL`] puts a third chip here with no new layout,
 /// which a `⇄` that names one alternative could never do.
+#[expect(clippy::too_many_arguments, reason = "one role bar's layout and drawing state")]
 fn role_bar(
     x: u16,
     y: u16,
@@ -2099,9 +2137,7 @@ mod tests {
         );
         // As the office draws it, which the guest chair and `n` both go by.
         let next = |scene: &SceneState, seen: &HashMap<AgentId, SystemTime>| {
-            let drawn =
-                crate::core::as_seen(&std::sync::Arc::new(scene.clone()), &views, seen, false, now);
-            next_waiting(&drawn, now)
+            next_waiting(scene, &views, now, seen)
         };
         assert_eq!(next(&scene, &none), Some(prompt));
         // A prompt just raised has not walked over yet: what opens is the
@@ -2134,6 +2170,91 @@ mod tests {
             "the question seen, the unread result is next"
         );
         assert_eq!(next(&answered, &none), Some(asked));
+    }
+
+    /// A running parent's only waiting child still needs an answer. The badge
+    /// already counts it, so the next-waiting key must be able to reach it;
+    /// adding roots must not put the child back behind an older reply or a
+    /// younger prompt in another tree.
+    #[test]
+    fn a_waiting_subagent_is_next_in_the_global_waiting_order() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let parent = start(&mut scene, &mut r, "parent", None, t0);
+        let child = start(&mut scene, &mut r, "agent-child", Some(parent), t0);
+        scene.agents.get_mut(&parent).unwrap().state = ActivityState::Running { item: None };
+        let child_slot = scene.agents.get_mut(&child).unwrap();
+        child_slot.state = ActivityState::RequiresAction { reason: None };
+        child_slot.state_started_at = now - Duration::from_secs(60);
+        let mut views = TaskViews::default();
+        let seen = HashMap::new();
+        let rows = order(&scene, &views, now, &seen);
+        assert_eq!(waiting(&scene, &views, &rows, &seen), [child]);
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child));
+
+        // Prompts outrank replies across trees, not just among root sessions.
+        let reply = start(&mut scene, &mut r, "reply", None, t0);
+        let reply_slot = scene.agents.get_mut(&reply).unwrap();
+        reply_slot.state = ActivityState::Idle;
+        reply_slot.state_started_at = now - Duration::from_secs(600);
+        views = std::sync::Arc::new(HashMap::from([(
+            reply,
+            TaskView {
+                outcome: Some("问：可以合并吗？".into()),
+                outcome_summarized: true,
+                ..TaskView::default()
+            },
+        )]));
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child));
+
+        // Within prompts the oldest state_started_at wins globally too.
+        let younger = start(&mut scene, &mut r, "younger", None, t0);
+        let younger_slot = scene.agents.get_mut(&younger).unwrap();
+        younger_slot.state = ActivityState::RequiresAction { reason: None };
+        younger_slot.state_started_at = now - Duration::from_secs(30);
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child));
+    }
+
+    /// `n` keeps to the guest chair while it holds the older prompt: a
+    /// sub-agent's prompt goes first only when it has waited longer, or when
+    /// the chair holds no prompt, so the office and `n` disagree only when a
+    /// sub-agent the office does not seat has the better claim.
+    #[test]
+    fn n_takes_the_guest_chair_unless_a_sub_agent_waited_longer() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now = t0 + Duration::from_secs(3600);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let parent = start(&mut scene, &mut r, "parent", None, t0);
+        let child = start(&mut scene, &mut r, "agent-child", Some(parent), t0);
+        let root = start(&mut scene, &mut r, "root", None, t0);
+        let set = |scene: &mut SceneState, id, state, ago: u64| {
+            let s = scene.agents.get_mut(&id).unwrap();
+            s.state = state;
+            s.state_started_at = now - Duration::from_secs(ago);
+        };
+        let ask = || ActivityState::RequiresAction { reason: None };
+        set(&mut scene, parent, ActivityState::Running { item: None }, 300);
+        set(&mut scene, child, ask(), 40);
+        set(&mut scene, root, ask(), 90);
+        let views = TaskViews::default();
+        let seen = HashMap::new();
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(root), "the older prompt");
+        set(&mut scene, root, ask(), 30);
+        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child), "the sub waited longer");
+        let ran = TaskView {
+            prompt: Some("修登录页".into()),
+            ..TaskView::default()
+        };
+        let views: TaskViews = std::sync::Arc::new(HashMap::from([(root, ran)]));
+        set(&mut scene, root, ActivityState::Idle, 600);
+        assert_eq!(
+            next_waiting(&scene, &views, now, &seen),
+            Some(child),
+            "a result in the chair waits behind any prompt"
+        );
     }
 
     /// A card leads with its repository's initial on the repository's colour

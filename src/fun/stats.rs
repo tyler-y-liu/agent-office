@@ -3,8 +3,8 @@
 //! that bring the boss to the door. The record is kept on disk so a bench's
 //! stars outlive a restart.
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use pixtuoid_core::state::{ActivityState, project_root};
@@ -114,6 +114,8 @@ pub struct Watch {
     /// When each agent stuck now got stuck.
     stuck_since: HashMap<AgentId, SystemTime>,
     pub stats: Stats,
+    /// Older dirty records awaiting their write, oldest first.
+    pending: VecDeque<Stats>,
     /// When you last let a waiting agent go on.
     pub approved_at: Option<SystemTime>,
     path: Option<PathBuf>,
@@ -143,13 +145,19 @@ impl Watch {
     pub fn observe(&mut self, scene: &SceneState, views: &TaskViews, now: SystemTime) {
         let day = Clock::now(now).date();
         self.observe_on(&day, scene, views, now);
-        if self.unsaved && self.saved_at.is_none_or(|t| t.elapsed() >= SAVE_EVERY) {
+        if (self.unsaved || !self.pending.is_empty())
+            && self.saved_at.is_none_or(|t| t.elapsed() >= SAVE_EVERY)
+        {
             self.save();
         }
     }
 
     fn observe_on(&mut self, day: &str, scene: &SceneState, views: &TaskViews, now: SystemTime) {
-        if self.stats.day != day {
+        let new_day = self.stats.day != day;
+        if new_day {
+            if self.unsaved {
+                self.pending.push_back(self.stats.clone());
+            }
             self.stats = Stats {
                 day: day.to_owned(),
                 repos: std::mem::take(&mut self.stats.repos),
@@ -164,7 +172,13 @@ impl Watch {
                 stuck: stuck_at_work(slot, views.get(id)).is_some(),
                 tokens: slot.tokens_used,
             };
-            if let Some(was) = self.seen.insert(*id, now_seen) {
+            if let Some(mut was) = self.seen.insert(*id, now_seen) {
+                if new_day && was.stuck && now_seen.stuck {
+                    // Today's segment starts at its first observation: the
+                    // office may have slept, so yesterday's start is unknown.
+                    self.stuck_since.remove(id);
+                    was.stuck = false;
+                }
                 self.count(slot, was, now_seen, now);
             }
         }
@@ -225,17 +239,42 @@ impl Watch {
     }
 
     fn save(&mut self) {
+        self.save_using(crate::atomic::write_private);
+    }
+
+    fn save_using(&mut self, mut write: impl FnMut(&Path, &Path, &[u8]) -> std::io::Result<()>) {
         self.saved_at = Some(Instant::now());
-        self.unsaved = false;
-        let Some(path) = &self.path else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&self.stats) {
-            // Through a temporary file, so a crash mid-write keeps the old record.
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, path);
+        let Some(path) = self.path.clone() else {
+            self.pending.clear();
+            self.unsaved = false;
+            return;
+        };
+        while self.unsaved || !self.pending.is_empty() {
+            let is_pending = !self.pending.is_empty();
+            let stats = if is_pending {
+                self.pending.front().expect("pending was not empty")
+            } else {
+                &self.stats
+            };
+            let saved = (|| -> std::io::Result<()> {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let json = serde_json::to_string_pretty(stats).map_err(std::io::Error::other)?;
+                // Through a temporary file, so a crash mid-write keeps the old record.
+                let tmp = path.with_extension("json.tmp");
+                write(&path, &tmp, json.as_bytes())
+            })();
+            match saved {
+                Ok(()) if is_pending => {
+                    self.pending.pop_front();
+                }
+                Ok(()) => self.unsaved = false,
+                // Leave this and every newer record for the next attempt.
+                Err(e) => {
+                    eprintln!("agent-office: saving stats failed: {e}");
+                    return;
+                }
             }
         }
     }
@@ -243,15 +282,19 @@ impl Watch {
     /// Write what changed since the last write, on the way out: counts
     /// since then would otherwise be lost on quit.
     pub fn flush(&mut self) {
-        if self.unsaved {
-            self.save();
+        self.flush_using(crate::atomic::write_private);
+    }
+
+    fn flush_using(&mut self, write: impl FnMut(&Path, &Path, &[u8]) -> std::io::Result<()>) {
+        if self.unsaved || !self.pending.is_empty() {
+            self.save_using(write);
         }
     }
 
     /// Whether a change is waiting for the next write.
     #[cfg(test)]
     fn unsaved(&self) -> bool {
-        self.unsaved
+        self.unsaved || !self.pending.is_empty()
     }
 
     /// Whether the boss is at the door at `now`.
@@ -311,6 +354,23 @@ mod tests {
             },
             ..Watch::default()
         }
+    }
+
+    fn finish_turn(
+        w: &mut Watch,
+        scene: &mut SceneState,
+        id: AgentId,
+        day: &str,
+        views: &TaskViews,
+        now: SystemTime,
+    ) {
+        let slot = scene.agents.get_mut(&id).unwrap();
+        slot.state = ActivityState::Running { item: None };
+        w.observe_on(day, scene, views, now);
+        scene.agents.get_mut(&id).unwrap().tokens_used += 10;
+        w.observe_on(day, scene, views, now);
+        scene.agents.get_mut(&id).unwrap().state = ActivityState::Idle;
+        w.observe_on(day, scene, views, now);
     }
 
     /// A turn counts when a working agent goes idle, to the day and to its
@@ -379,6 +439,205 @@ mod tests {
         assert!(w.unsaved(), "a turn finished");
     }
 
+    /// A disk failure must not throw away the only dirty marker: after the
+    /// path is repaired, quitting via `flush` still has to persist the counts.
+    /// A successful flush must then be quiet rather than writing every time.
+    #[test]
+    fn a_failed_save_stays_dirty_and_flush_writes_after_recovery() {
+        let dir =
+            std::env::temp_dir().join(format!("agent-office-stats-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file where the record's parent directory must be makes every real
+        // tmp-file open fail without depending on permissions or a fake path.
+        let parent = dir.join("record");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("stats.json");
+        let mut w = Watch {
+            path: Some(path.clone()),
+            ..watch()
+        };
+        w.tally("test.recovery");
+        w.save();
+        assert!(w.unsaved(), "a failed write must stay dirty");
+        w.flush();
+        assert!(w.unsaved(), "another failed flush must not give up");
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        w.flush();
+        assert!(!w.unsaved(), "the complete recovered write cleared dirty");
+        let saved: Stats = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, w.stats);
+        let saved_at = w.saved_at;
+        w.flush();
+        assert_eq!(w.saved_at, saved_at, "a clean flush does not write again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed old-day write must stay ahead of the new day, without pausing
+    /// new counts. Otherwise recovering at quit silently replaces the only copy
+    /// of the dirty old day with today's record.
+    #[test]
+    fn rollover_retries_the_failed_old_day_before_the_new_day() {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-office-stats-rollover-retry-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = dir.join("record");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("stats.json");
+        let (mut scene, ids) = scene_with(&[("a", "/src/shop")]);
+        let views = TaskViews::default();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_100);
+        let mut w = Watch {
+            path: Some(path.clone()),
+            ..watch()
+        };
+
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-05", &views, now);
+        w.tally("test.before_rollover");
+        let old = w.stats.clone();
+        w.save();
+        assert!(w.unsaved());
+        assert!(!path.exists(), "the failed write created no record");
+
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-06", &views, now);
+        let current = w.stats.clone();
+        assert_eq!(current.turns, 1, "the new day keeps counting");
+        assert_eq!(current.repos.get("shop"), Some(&2));
+        assert_eq!(current.uses.get("test.before_rollover"), Some(&1));
+
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let mut writes: Vec<Stats> = Vec::new();
+        w.flush_using(|path, tmp, json| {
+            writes.push(serde_json::from_slice(json).unwrap());
+            crate::atomic::write_private(path, tmp, json)
+        });
+        assert_eq!(writes, vec![old, current.clone()]);
+        assert!(!w.unsaved());
+        let saved: Stats = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, current, "the newest complete record is last on disk");
+
+        w.observe_on("2026-11-06", &scene, &views, now);
+        w.flush_using(|_, _, _| -> std::io::Result<()> {
+            panic!("a fully recovered, unchanged watch must not write again")
+        });
+        assert_eq!(
+            w.stats, current,
+            "observing the same frame counts nothing twice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Counts made inside the ordinary ten-second debounce window are just as
+    /// dirty as counts whose write failed: a midnight rollover must queue them.
+    #[test]
+    fn debounce_dirty_counts_survive_rollover() {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-office-stats-rollover-debounce-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stats.json");
+        let (mut scene, ids) = scene_with(&[("a", "/src/shop")]);
+        let views = TaskViews::default();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_100);
+        let mut w = Watch {
+            path: Some(path.clone()),
+            ..watch()
+        };
+
+        w.saved_at = Some(Instant::now());
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-05", &views, now);
+        let old = w.stats.clone();
+        // Direct observation is what `observe` does while the recent saved_at
+        // suppresses its write; there is deliberately no successful old-day save.
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-06", &views, now);
+        let current = w.stats.clone();
+        assert!(w.unsaved());
+
+        let mut writes: Vec<Stats> = Vec::new();
+        w.flush_using(|path, tmp, json| {
+            writes.push(serde_json::from_slice(json).unwrap());
+            crate::atomic::write_private(path, tmp, json)
+        });
+        assert_eq!(writes, vec![old, current.clone()]);
+        let saved: Stats = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, current);
+        assert_eq!(
+            saved.turns, 1,
+            "today is counted once, not added to yesterday"
+        );
+        assert_eq!(saved.repos.get("shop"), Some(&2));
+
+        w.observe_on("2026-11-06", &scene, &views, now);
+        w.flush_using(|_, _, _| -> std::io::Result<()> {
+            panic!("a clean flush must not write again")
+        });
+        assert_eq!(w.stats, current);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// More than one day can remain dirty when writes keep failing. Each
+    /// rollover must append its own snapshot, never overwrite an older pending day.
+    #[test]
+    fn repeated_rollovers_preserve_all_earlier_failed_snapshots() {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-office-stats-rollover-queue-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = dir.join("record");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("stats.json");
+        let (mut scene, ids) = scene_with(&[("a", "/src/shop")]);
+        let views = TaskViews::default();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_100);
+        let mut w = Watch {
+            path: Some(path.clone()),
+            ..watch()
+        };
+
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-05", &views, now);
+        let oldest = w.stats.clone();
+        w.save();
+        assert!(w.unsaved());
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-06", &views, now);
+        let middle = w.stats.clone();
+        w.save();
+        assert!(
+            w.unsaved(),
+            "the second failure keeps every pending day dirty"
+        );
+        finish_turn(&mut w, &mut scene, ids[0], "2026-11-07", &views, now);
+        let newest = w.stats.clone();
+
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let mut writes: Vec<Stats> = Vec::new();
+        w.flush_using(|path, tmp, json| {
+            writes.push(serde_json::from_slice(json).unwrap());
+            crate::atomic::write_private(path, tmp, json)
+        });
+        assert_eq!(writes, vec![oldest, middle, newest.clone()]);
+        assert!(!w.unsaved());
+        let saved: Stats = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, newest);
+        assert_eq!(saved.repos.get("shop"), Some(&3));
+
+        w.observe_on("2026-11-07", &scene, &views, now);
+        w.flush_using(|_, _, _| -> std::io::Result<()> {
+            panic!("draining every day exactly once must leave a clean watch")
+        });
+        assert_eq!(w.stats, newest);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Letting a waiting agent go on brings the boss to the door for a
     /// moment; an agent that just starts working does not.
     #[test]
@@ -418,7 +677,8 @@ mod tests {
         assert_eq!(tokens_short(3_450_000), "3.5M");
     }
 
-    /// A stuck spell counts once however long it lasts.
+    /// A stuck spell counts once however long it lasts; recovering and then
+    /// getting stuck again is a new spell.
     #[test]
     fn a_stuck_spell_counts_once() {
         use crate::tasks::{Stuck, TaskView};
@@ -439,6 +699,57 @@ mod tests {
             w.observe_on("d", &scene, &stuck, now);
         }
         assert_eq!(w.stats.stuck, 1);
+        w.observe_on("d", &scene, &ok, now);
+        w.observe_on("d", &scene, &stuck, now);
+        w.observe_on("d", &scene, &stuck, now);
+        assert_eq!(w.stats.stuck, 2, "only recovery starts another spell");
+    }
+
+    /// A spell still stuck at midnight starts one new segment today, timed
+    /// from today's first observation. Time before that observation (while
+    /// the office may have been asleep) is unknown, not free stuck duration.
+    #[test]
+    fn stuck_across_midnight_starts_a_new_daily_segment() {
+        use crate::tasks::{Stuck, TaskView};
+        let (mut scene, ids) = scene_with(&[("a", "/src/shop")]);
+        scene.agents.get_mut(&ids[0]).unwrap().state = ActivityState::Running { item: None };
+        let at_23_59 = SystemTime::UNIX_EPOCH + Duration::from_secs(23 * 3600 + 59 * 60);
+        let mut w = watch();
+        let ok = TaskViews::default();
+        let stuck: TaskViews = Arc::new(HashMap::from([(
+            ids[0],
+            TaskView {
+                stuck: Some(Stuck::Failing(3)),
+                ..TaskView::default()
+            },
+        )]));
+        w.observe_on("2026-11-05", &scene, &ok, at_23_59);
+        w.observe_on("2026-11-05", &scene, &stuck, at_23_59);
+        assert_eq!(w.stats.stuck, 1, "yesterday's spell still counts once");
+
+        let name = String::from(&*scene.agents[&ids[0]].label);
+        w.observe_on(
+            "2026-11-06",
+            &scene,
+            &stuck,
+            at_23_59 + Duration::from_secs(6 * 60),
+        );
+        assert_eq!(
+            (w.stats.stuck, w.stats.stuck_longest.get(&name)),
+            (1, Some(&0)),
+            "00:05 starts today's segment without crediting time before it"
+        );
+        w.observe_on(
+            "2026-11-06",
+            &scene,
+            &stuck,
+            at_23_59 + Duration::from_secs(11 * 60),
+        );
+        assert_eq!(
+            (w.stats.stuck, w.stats.stuck_longest.get(&name)),
+            (1, Some(&300)),
+            "00:10 extends only today's segment, without counting it again"
+        );
     }
 
     /// The replay's honours come from today's own record: who finished most,

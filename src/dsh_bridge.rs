@@ -101,7 +101,11 @@ fn claim_path(dir: &Path, id: &str) -> PathBuf {
 /// Unreadable or older claims fail safe: never turn an uncertain Host into an
 /// invitation to dispatch the same task again.
 fn claim_alive(path: &Path) -> Option<bool> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(true),
+    };
     let pid = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v.get("pid").and_then(serde_json::Value::as_i64))
@@ -168,13 +172,50 @@ fn ready_result(path: &Path, id: &str) -> Result<Option<WireResult>> {
     }
 }
 
-fn wait_result(path: &Path, id: &str, claim: &Path, timeout: Duration) -> Result<WireResult> {
-    wait_result_with(claim, timeout, || ready_result(path, id))
+fn retract_request(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e)
+            .with_context(|| crate::tr!("撤回 {} 失败", "could not retract {}", path.display())),
+    }
+}
+
+/// Identifies the one dispatch failure whose request and result must remain
+/// available for reconciliation and a Host that is still completing its work.
+#[derive(Debug)]
+struct RetractionFailed;
+
+impl std::fmt::Display for RetractionFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&crate::tr!(
+            "DSH 撤回派活请求失败：状态未知，先检查再重试",
+            "could not retract the DSH request; outcome unknown: check before retrying"
+        ))
+    }
+}
+
+impl std::error::Error for RetractionFailed {}
+
+fn wait_result(
+    path: &Path,
+    id: &str,
+    request: &Path,
+    claim: &Path,
+    timeout: Duration,
+) -> Result<WireResult> {
+    wait_result_with(
+        claim,
+        timeout,
+        || retract_request(request),
+        || ready_result(path, id),
+    )
 }
 
 fn wait_result_with(
     claim: &Path,
     timeout: Duration,
+    mut retract: impl FnMut() -> Result<()>,
     mut ready: impl FnMut() -> Result<Option<WireResult>>,
 ) -> Result<WireResult> {
     let started = Instant::now();
@@ -185,27 +226,36 @@ fn wait_result_with(
         }
         // Timeout can retract only work no Host accepted. Once claimed, wait
         // for its session id instead of telling the user it is safe to retry.
-        let alive = claim_alive(claim);
+        let mut alive = claim_alive(claim);
         seen_claim |= alive.is_some();
         if started.elapsed() >= timeout && alive.is_none() {
-            // The Host writes its result BEFORE releasing the claim. If this
-            // iteration saw neither, the result may have landed in between:
-            // check once more before retracting or calling the outcome unknown.
+            // Retraction is the ordering point: a Host claims before reading
+            // the request, so only a request gone before any claim is provably
+            // unaccepted. Never leave this window to the caller's cleanup.
+            retract().map_err(|error| error.context(RetractionFailed))?;
+            alive = claim_alive(claim);
+            seen_claim |= alive.is_some();
+            // A Host writes its result BEFORE releasing its claim. If a claim
+            // from before retraction has just disappeared, its result is thus
+            // already durable; reading the result after the claim cannot miss
+            // that transition between the two checks.
             if let Some(result) = ready()? {
                 return Ok(result);
             }
-            if seen_claim {
+            if alive.is_none() {
+                if seen_claim {
+                    bail!(crate::tr!(
+                        "DSH 已接受派活，但结果丢失且状态未知：请先检查 DSH 会话列表，勿盲目重试",
+                        "the DSH Host accepted the dispatch, but its result is unavailable: check its session list before retrying"
+                    ));
+                }
                 bail!(crate::tr!(
-                    "DSH 已接受派活，但结果丢失且状态未知：请先检查 DSH 会话列表，勿盲目重试",
-                    "the DSH Host accepted the dispatch, but its result is unavailable: check its session list before retrying"
+                    "DSH 尚未接受派活，等待超时（{} 毫秒）；{}",
+                    "the DSH Host did not accept the dispatch before the {}ms timeout; {}",
+                    timeout.as_millis(),
+                    start_hint()
                 ));
             }
-            bail!(crate::tr!(
-                "DSH 尚未接受派活，等待超时（{} 毫秒）；{}",
-                "the DSH Host did not accept the dispatch before the {}ms timeout; {}",
-                timeout.as_millis(),
-                start_hint()
-            ));
         }
         if alive == Some(false) {
             bail!(crate::tr!(
@@ -218,6 +268,15 @@ fn wait_result_with(
 }
 
 fn dispatch_in(dir: &Path, request: DispatchRequest, timeout: Duration) -> Result<DispatchResult> {
+    dispatch_in_with(dir, request, timeout, wait_result)
+}
+
+fn dispatch_in_with(
+    dir: &Path,
+    request: DispatchRequest,
+    timeout: Duration,
+    wait: impl FnOnce(&Path, &str, &Path, &Path, Duration) -> Result<WireResult>,
+) -> Result<DispatchResult> {
     validate(&request)?;
     create_private_dir(dir)?;
     let request_path = request_path(dir, &request.id);
@@ -252,9 +311,10 @@ fn dispatch_in(dir: &Path, request: DispatchRequest, timeout: Duration) -> Resul
     })?;
 
     let attempted = (|| {
-        let wire = wait_result(
+        let wire = wait(
             &result_path,
             &request.id,
+            &request_path,
             &claim_path(dir, &request.id),
             timeout,
         )?;
@@ -289,11 +349,16 @@ fn dispatch_in(dir: &Path, request: DispatchRequest, timeout: Duration) -> Resul
             )),
         }
     })();
-    // Every terminal path retracts the queued request: failure never grants a
-    // later Host permission to replay it. An in-flight create can finish after
-    // a timeout; its result therefore carries the session id when one exists.
-    let _ = std::fs::remove_file(&request_path);
-    let _ = std::fs::remove_file(&result_path);
+    // Successful retraction proves a later Host cannot replay the request. A
+    // failed retraction proves nothing: preserve both files so a Host can still
+    // finish and the user can recover any session id before choosing a retry.
+    let preserve_evidence = attempted
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<RetractionFailed>().is_some());
+    if !preserve_evidence {
+        let _ = std::fs::remove_file(&request_path);
+        let _ = std::fs::remove_file(&result_path);
+    }
     attempted
 }
 
@@ -349,6 +414,58 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("request {id} was never published");
+    }
+
+    /// Only a missing claim proves that no Host accepted the request. Read
+    /// errors, malformed contents and live pids must all fail safe; a directory
+    /// at the claim path exercises a real non-NotFound filesystem error.
+    #[test]
+    fn only_a_missing_or_dead_claim_is_not_alive() {
+        let dir = scratch("claim-read-errors");
+        let claim = claim_path(&dir, "req-claim-read-errors");
+        assert_eq!(claim_alive(&claim), None);
+        std::fs::create_dir(&claim).unwrap();
+        assert_eq!(claim_alive(&claim), Some(true));
+        std::fs::remove_dir(&claim).unwrap();
+        std::fs::write(&claim, "not JSON\n").unwrap();
+        assert_eq!(claim_alive(&claim), Some(true));
+        std::fs::write(
+            &claim,
+            serde_json::json!({"pid":std::process::id()}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(claim_alive(&claim), Some(true));
+        #[cfg(unix)]
+        {
+            std::fs::write(&claim, r#"{"pid":2147483647}"#).unwrap();
+            assert_eq!(claim_alive(&claim), Some(false));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Permission failure is also uncertainty about a live Host, not proof of
+    /// absence. Root can still read a mode-000 file, so that environment uses
+    /// the directory case above while this checks the ordinary unprivileged path.
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_denied_claim_fails_safe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("claim-permission-error");
+        let claim = claim_path(&dir, "req-claim-permission-error");
+        std::fs::write(
+            &claim,
+            serde_json::json!({"pid":std::process::id()}).to_string(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claim, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::read_to_string(&claim).is_err();
+        let alive = claim_alive(&claim);
+        std::fs::set_permissions(&claim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if denied {
+            assert_eq!(alive, Some(true));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -506,22 +623,248 @@ mod tests {
     #[test]
     fn a_result_landing_while_the_claim_disappears_is_read_again() {
         let mut reads = 0;
-        let result = wait_result_with(Path::new("/missing-claim"), Duration::ZERO, || {
-            reads += 1;
-            if reads == 1 {
-                return Ok(None);
-            }
-            Ok(Some(WireResult {
-                id: "req-race".into(),
-                ok: true,
-                session_id: Some("session-finished".into()),
-                agent_preset: Some("office-qa".into()),
-                error: None,
-            }))
-        })
+        let result = wait_result_with(
+            Path::new("/missing-claim"),
+            Duration::ZERO,
+            || Ok(()),
+            || {
+                reads += 1;
+                if reads == 1 {
+                    return Ok(None);
+                }
+                Ok(Some(WireResult {
+                    id: "req-race".into(),
+                    ok: true,
+                    session_id: Some("session-finished".into()),
+                    agent_preset: Some("office-qa".into()),
+                    error: None,
+                }))
+            },
+        )
         .unwrap();
         assert_eq!(reads, 2);
         assert_eq!(result.session_id.as_deref(), Some("session-finished"));
+    }
+
+    /// A claim can appear after the last poll but before request retraction.
+    /// The request was accepted, so the timeout must keep waiting for its real
+    /// session id instead of reporting that a retry is safe.
+    #[test]
+    fn a_claim_created_before_retraction_keeps_waiting_for_success() {
+        let dir = scratch("claim-before-retract");
+        let id = "req-claim-before-retract";
+        let request = request_path(&dir, id);
+        let claim = claim_path(&dir, id);
+        std::fs::write(&request, "{}\n").unwrap();
+        let retracted = std::cell::Cell::new(false);
+        let host_read_request = std::cell::Cell::new(false);
+        let mut reads = 0;
+        let result = wait_result_with(
+            &claim,
+            Duration::ZERO,
+            || {
+                // Model a Host that wins the old race: claim and read first.
+                std::fs::write(
+                    &claim,
+                    serde_json::json!({"pid":std::process::id()}).to_string(),
+                )
+                .unwrap();
+                host_read_request.set(std::fs::read(&request).is_ok());
+                retract_request(&request)?;
+                retracted.set(true);
+                Ok(())
+            },
+            || {
+                reads += 1;
+                if reads <= 2 {
+                    return Ok(None);
+                }
+                assert!(retracted.get());
+                Ok(Some(WireResult {
+                    id: id.into(),
+                    ok: true,
+                    session_id: Some("session-accepted".into()),
+                    agent_preset: Some("office-qa".into()),
+                    error: None,
+                }))
+            },
+        )
+        .unwrap();
+        assert!(host_read_request.get());
+        assert!(retracted.get());
+        assert_eq!(reads, 3);
+        assert_eq!(result.session_id.as_deref(), Some("session-accepted"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// readdirSync can return a request just before the client retracts it.
+    /// A claim published afterwards can only observe the missing request; its
+    /// cancellation result must not be mistaken for an executed Session.
+    #[test]
+    fn a_claim_created_after_retraction_cannot_execute_the_request() {
+        let dir = scratch("claim-after-retract");
+        let id = "req-claim-after-retract";
+        let request = request_path(&dir, id);
+        let claim = claim_path(&dir, id);
+        let result_path = result_path(&dir, id);
+        std::fs::write(&request, "{}\n").unwrap();
+        let create_calls = std::cell::Cell::new(0);
+        let result = wait_result_with(
+            &claim,
+            Duration::ZERO,
+            || {
+                retract_request(&request)?;
+                // Model the stale directory entry claiming only after removal.
+                std::fs::write(
+                    &claim,
+                    serde_json::json!({"pid":std::process::id()}).to_string(),
+                )
+                .unwrap();
+                let outcome = match std::fs::read(&request) {
+                    Ok(_) => {
+                        create_calls.set(create_calls.get() + 1);
+                        serde_json::json!({"id":id,"ok":true,
+                            "sessionId":"must-not-exist","agentPreset":"office-qa"})
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        serde_json::json!({"id":id,"ok":false,
+                            "error":"dispatch request was cancelled"})
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                // The real plugin also writes its result before this removal.
+                write_result(&dir, id, outcome);
+                std::fs::remove_file(&claim).unwrap();
+                Ok(())
+            },
+            || ready_result(&result_path, id),
+        )
+        .unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.session_id, None);
+        assert_eq!(create_calls.get(), 0);
+        assert!(!request.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The result/claim release can straddle request retraction. Reading the
+    /// result after the post-retraction claim check returns that real reply.
+    #[test]
+    fn a_result_arriving_during_retraction_is_returned() {
+        let dir = scratch("result-during-retract");
+        let id = "req-result-during-retract";
+        let request = request_path(&dir, id);
+        let result_path = result_path(&dir, id);
+        std::fs::write(&request, "{}\n").unwrap();
+        let result = wait_result_with(
+            &claim_path(&dir, id),
+            Duration::ZERO,
+            || {
+                retract_request(&request)?;
+                write_result(
+                    &dir,
+                    id,
+                    serde_json::json!({"id":id,"ok":true,
+                        "sessionId":"session-during-retract","agentPreset":"office-qa"}),
+                );
+                Ok(())
+            },
+            || ready_result(&result_path, id),
+        )
+        .unwrap();
+        assert_eq!(result.session_id.as_deref(), Some("session-during-retract"));
+        assert!(!request.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A claim already observed before retraction is proof of acceptance even
+    /// if it later disappears without a readable result. That stays unknown.
+    #[test]
+    fn a_seen_claim_that_disappears_remains_unknown_after_retraction() {
+        let dir = scratch("seen-claim-disappears");
+        let id = "req-seen-claim-disappears";
+        let request = request_path(&dir, id);
+        let claim = claim_path(&dir, id);
+        std::fs::write(&request, "{}\n").unwrap();
+        std::fs::write(
+            &claim,
+            serde_json::json!({"pid":std::process::id()}).to_string(),
+        )
+        .unwrap();
+        let retracted = std::cell::Cell::new(false);
+        let mut reads = 0;
+        let error = wait_result_with(
+            &claim,
+            Duration::ZERO,
+            || {
+                retract_request(&request)?;
+                retracted.set(true);
+                Ok(())
+            },
+            || {
+                reads += 1;
+                if reads == 2 {
+                    std::fs::remove_file(&claim).unwrap();
+                }
+                Ok(None)
+            },
+        )
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("状态未知"), "{text}");
+        assert!(!text.contains("尚未接受"), "{text}");
+        assert!(retracted.get());
+        assert!(!request.exists());
+        assert_eq!(reads, 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// If retraction fails after a Host result landed, that session id is the
+    /// user's only recovery evidence. The dispatch must report an unknown
+    /// outcome and leave both the request and result for the existing protocol.
+    #[test]
+    fn failed_retraction_preserves_a_landed_session_result() {
+        let dir = scratch("failed-retraction-keeps-result");
+        let id = "req-retract-error";
+        let request_file = request_path(&dir, id);
+        let result_file = result_path(&dir, id);
+        let error = dispatch_in_with(
+            &dir,
+            request(id),
+            Duration::ZERO,
+            |result, id, request, claim, timeout| {
+                wait_result_with(
+                    claim,
+                    timeout,
+                    || {
+                        // A real filesystem failure, not a synthetic anyhow error.
+                        std::fs::remove_file(request).unwrap();
+                        std::fs::create_dir(request).unwrap();
+                        write_result(
+                            &dir,
+                            id,
+                            serde_json::json!({"id":id,"ok":true,
+                                "sessionId":"session-before-failed-retract",
+                                "agentPreset":"office-qa"}),
+                        );
+                        retract_request(request)
+                    },
+                    || ready_result(result, id),
+                )
+            },
+        )
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(result_file.exists(), "result evidence was removed: {text}");
+        assert!(request_file.is_dir(), "request path was removed: {text}");
+        assert!(text.contains("状态未知"), "{text}");
+        assert!(text.contains("先检查再重试"), "{text}");
+        let preserved = ready_result(&result_file, id).unwrap().unwrap();
+        assert_eq!(
+            preserved.session_id.as_deref(),
+            Some("session-before-failed-retract")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// An accepted request whose Host dies is unknown, not a proven miss. The

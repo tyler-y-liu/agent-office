@@ -23,7 +23,7 @@ const TRANSCRIPTS = __TRANSCRIPTS__
 const VIEWING = __VIEWING__
 const DISPATCH = __DISPATCH__
 
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import {
   appendFileSync,
   chmodSync,
@@ -37,6 +37,27 @@ import {
   writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
+
+// `startMarker` in a viewing file is the host incarnation's macOS
+// `pbi_start_tvsec`: the office compares it with pid_start_marker(pid), not
+// with the clock. `ps lstart` reports that same epoch second. Resolve it once
+// at plugin startup; without a reliable kernel-equivalent value, write no
+// viewing file rather than guessing from Date.now().
+const START_MARKER = (() => {
+  if (process.platform !== "darwin") return undefined
+  try {
+    const started = execFileSync("ps", ["-p", String(process.pid), "-o", "lstart="], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C" },
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+    const milliseconds = Date.parse(started)
+    const marker = Math.floor(milliseconds / 1000)
+    return Number.isSafeInteger(marker) && marker >= 0 ? marker : undefined
+  } catch {
+    return undefined
+  }
+})()
 
 export const name = "agent-office"
 export const inject = ["agents"]
@@ -275,15 +296,19 @@ export function apply(ctx) {
     // Streams it wrapped can outlive it (a reload swaps the plugin under open
     // streams); their ends must not rewrite the file the new one keeps.
     let disposed = false
-    // Named by pid, which the office also checks is still running: a crash
-    // skips the cleanup below and must not leave a session viewed for good.
+    // Named by pid, whose startMarker the office also checks: a crash skips
+    // the cleanup below, and pid reuse must not resurrect the old host's views.
     const file = join(VIEWING, `${process.pid}.json`)
     const write = () => {
-      if (disposed) return
+      if (disposed || START_MARKER === undefined) return
       try {
         mkdirSync(VIEWING, { recursive: true, mode: 0o700 })
         const tmp = file + ".tmp"
-        writeFileSync(tmp, JSON.stringify({ pid: process.pid, sessions: [...open.keys()] }), { mode: 0o600 })
+        writeFileSync(
+          tmp,
+          JSON.stringify({ pid: process.pid, startMarker: START_MARKER, sessions: [...open.keys()] }),
+          { mode: 0o600 },
+        )
         renameSync(tmp, file)
       } catch {}
     }

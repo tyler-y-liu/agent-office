@@ -1,54 +1,19 @@
 // @agent-office-dsh-web browser half — written by `agent-office connect dsh`.
 // Plain script in DSH's client module format (no build step).
 //
-// A dispatch creates its Session on the Host, which no Host plugin can show:
-// `dsh://open` only raises the window, and Host plugins cannot add events the
-// page hears. So the page watches its own Session list and opens a Session
-// that appears after it loaded under an office-* preset, the presets only
-// `agent-office roles install --agent dsh` defines. Choosing such a preset
-// in this page already opens the Session, so that case is unchanged.
+// The Host creates dispatch Sessions outside this page. Its create call has no
+// dispatch request id, and the session id returned to agent-office never reaches
+// this client, so a Session-list row cannot identify this page's dispatch.
+// Opening a fresh office-* row would let another client's dispatch steal this
+// page's view; the user can instead open the Session named in the dispatch result.
 window.__ModuleLoader__.load({
 	id: "agent-office-dsh-web",
 	factory: () => {
 		var module = { exports: {} };
 		const inject = ["sessions", "uiWorkspace"];
-		// A page that was offline sees every Session made meanwhile as new; only
-		// one this fresh is a dispatch the user is waiting to see. A dispatch
-		// gives up after 10s, so a minute also covers clock skew on a remote page.
-		const FRESH_MS = 60_000;
-		function apply(ctx) {
-			const list = ctx.sessions.list;
-			// Everything the first loaded list holds predates this page: opening
-			// one of those on reload or reconnect would steal the view.
-			let seen = null;
-			const check = () => {
-				const state = list.getSnapshot();
-				if (state.phase === "pending") return;
-				if (seen === null) {
-					seen = new Set(state.ids);
-					return;
-				}
-				let open;
-				for (const id of state.ids) {
-					if (seen.has(id)) continue;
-					const row = state.byId[id];
-					const preset = row?.projectionValues?.agentPreset;
-					// The preset can land after the row; decide once it is known.
-					if (typeof preset !== "string") continue;
-					seen.add(id);
-					// A subagent belongs to its parent's view, not a dispatch.
-					if (
-						preset.startsWith("office-")
-						&& row.origin !== "subagent"
-						&& row.parentId === undefined
-						&& Date.now() - row.updatedAt < FRESH_MS
-					) open = id;
-				}
-				if (open !== undefined) ctx.uiWorkspace.openSession(open);
-			};
-			ctx.effect(() => list.subscribe(check));
-			check();
-		}
+		// Sessions created by this page already follow DSH's existing UI flow.
+		// Do not retain a list listener that has no safe automatic choice to make.
+		function apply() {}
 		module.exports.name = "agent-office-web";
 		module.exports.inject = inject;
 		module.exports.apply = apply;

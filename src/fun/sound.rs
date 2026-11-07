@@ -117,20 +117,61 @@ impl Speaker {
         if let Some(p) = self.files.get(&chime) {
             return Some(p.clone());
         }
+        // TMPDIR is a valid choice of parent; the final directory is checked
+        // below. USER is not: it is environment input, not an identity.
+        #[cfg(unix)]
         let dir = std::env::temp_dir().join(format!(
             "agent-office-{}",
-            std::env::var("USER").unwrap_or_default()
+            rustix::process::getuid().as_raw()
         ));
-        std::fs::create_dir_all(&dir).ok()?;
-        let name = match chime {
-            Chime::Ding => "ding.wav",
-            Chime::Pop => "pop.wav",
-        };
-        let path = dir.join(name);
-        std::fs::write(&path, wav(&samples(chime))).ok()?;
+        #[cfg(not(unix))]
+        let dir = std::env::temp_dir().join("agent-office");
+        let path = write_chime(&dir, chime).ok()?;
         self.files.insert(chime, path.clone());
         Some(path)
     }
+}
+
+fn write_chime(dir: &std::path::Path, chime: Chime) -> std::io::Result<PathBuf> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+
+    let metadata = std::fs::symlink_metadata(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let safe = !metadata.file_type().is_symlink()
+            && metadata.is_dir()
+            && metadata.uid() == rustix::process::getuid().as_raw()
+            && metadata.permissions().mode() & 0o777 == 0o700;
+        if !safe {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "sound directory is not a non-symlink 0700 directory owned by this uid",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "sound path is not a real directory",
+        ));
+    }
+
+    let name = match chime {
+        Chime::Ding => "ding.wav",
+        Chime::Pop => "pop.wav",
+    };
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // A rename replaces a planted final symlink rather than its target. The
+    // private directory also keeps another user from racing the temporary file.
+    crate::atomic::write_private(&path, &tmp, &wav(&samples(chime)))?;
+    Ok(path)
 }
 
 const RATE: u32 = 22_050;
@@ -209,7 +250,7 @@ mod tests {
                     AgentEvent::SessionStart {
                         agent_id: id,
                         source: "claude-code".into(),
-                        session_id: i.to_string().into(),
+                        session_id: i.to_string(),
                         cwd: "/src/shop".into(),
                         parent_id: None,
                     },
@@ -264,6 +305,64 @@ mod tests {
         assert!(ear.hear(&scene, &cheer(at)).is_empty());
         let later = at + Duration::from_secs(60);
         assert_eq!(ear.hear(&scene, &cheer(later)), vec![Chime::Pop]);
+    }
+
+    /// A sound path planted by another local user must never be followed:
+    /// otherwise enabling a chime could overwrite any file that user can
+    /// write, and the player could be handed the attacker's file instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_preplanted_chime_symlink_cannot_overwrite_its_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = crate::atomic::tests::scratch("sound-link");
+        let dir = root.join("sounds");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let victim = root.join("victim.wav");
+        std::fs::write(&victim, b"do not overwrite").unwrap();
+        symlink(&victim, dir.join("ding.wav")).unwrap();
+
+        let path = write_chime(&dir, Chime::Ding).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not overwrite");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), wav(&samples(Chime::Ding)));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A preplanted directory is not trusted merely because it resolves to a
+    /// directory. Failing the write also means Speaker has no path to give a
+    /// player, rather than risking a file in an attacker-controlled location.
+    #[cfg(unix)]
+    #[test]
+    fn an_untrusted_sound_directory_is_rejected() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = crate::atomic::tests::scratch("sound-dir");
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked = root.join("linked");
+        symlink(&target, &linked).unwrap();
+        assert!(write_chime(&linked, Chime::Ding).is_err());
+        assert!(!target.join("ding.wav").exists());
+
+        let loose = root.join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(write_chime(&loose, Chime::Pop).is_err());
+        assert!(!loose.join("pop.wav").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The file is a WAV a player takes: its header's sizes match its data.

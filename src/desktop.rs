@@ -148,7 +148,7 @@ pub fn front() -> Front {
 /// since gone (a crash skips the plugin's cleanup) says nothing: those
 /// streams are shut.
 fn read_viewing(dir: &Path) -> Vec<AgentId> {
-    let alive = |pid| pixtuoid_core::source::pid_start_marker(pid).is_some();
+    let start_marker = pixtuoid_core::source::pid_start_marker;
     let mut ids: Vec<AgentId> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -156,7 +156,7 @@ fn read_viewing(dir: &Path) -> Vec<AgentId> {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| std::fs::read_to_string(p).ok())
-        .filter_map(|t| viewing(&t, alive))
+        .filter_map(|t| viewing(&t, start_marker))
         .flatten()
         .collect();
     // Sorted, so the same views read the same and wake no one.
@@ -165,10 +165,11 @@ fn read_viewing(dir: &Path) -> Vec<AgentId> {
     ids
 }
 
-fn viewing(text: &str, alive: impl Fn(i32) -> bool) -> Option<Vec<AgentId>> {
+fn viewing(text: &str, start_marker: impl Fn(i32) -> Option<u64>) -> Option<Vec<AgentId>> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let pid = i32::try_from(v.get("pid")?.as_i64()?).ok()?;
-    if !alive(pid) {
+    let recorded = v.get("startMarker")?.as_u64()?;
+    if start_marker(pid)? != recorded {
         return None;
     }
     Some(
@@ -354,32 +355,142 @@ mod tests {
     }
 
     /// The plugin's file names sessions by dsh's own id, the one the office's
-    /// dsh figures go by. One left by a host that is gone says nothing, or a
-    /// crash would leave its last session read for good.
+    /// dsh figures go by. A live pid alone is not enough: after a crash the
+    /// kernel can give it to an unrelated process, whose different start
+    /// marker must not make the old host's sessions read.
     #[test]
-    fn the_viewing_file_counts_only_while_its_host_runs() {
-        let text = r#"{"pid":42,"sessions":["session-a","",7]}"#;
-        assert_eq!(viewing(text, |p| p == 42), Some(vec![dsh("session-a")]));
-        assert_eq!(viewing(text, |_| false), None, "its host is gone");
-        assert_eq!(viewing(r#"{"sessions":["session-a"]}"#, |_| true), None);
-        assert_eq!(viewing(r#"{"pid":42,"sess"#, |_| true), None);
+    fn the_viewing_file_counts_only_for_the_same_process_incarnation() {
+        let text = r#"{"pid":42,"startMarker":7,"sessions":["session-a","",7]}"#;
+        assert_eq!(
+            viewing(text, |p| (p == 42).then_some(7)),
+            Some(vec![dsh("session-a")])
+        );
+        assert_eq!(
+            viewing(text, |_| Some(8)),
+            None,
+            "the pid now belongs to another process incarnation"
+        );
+        assert_eq!(viewing(text, |_| None), None, "its host is gone");
+        assert_eq!(viewing(r#"{"sessions":["session-a"]}"#, |_| Some(7)), None);
+        assert_eq!(viewing(r#"{"pid":42,"sess"#, |_| Some(7)), None);
+    }
+
+    /// A pre-marker file, or one with a value that is not an unsigned integer,
+    /// says nothing. Treating a missing marker as a wildcard would preserve
+    /// the pid-reuse bug and make a partial write mark sessions read.
+    #[test]
+    fn a_viewing_file_without_a_valid_start_marker_is_ignored() {
+        for text in [
+            r#"{"pid":42,"sessions":["session-a"]}"#,
+            r#"{"pid":42,"startMarker":null,"sessions":["session-a"]}"#,
+            r#"{"pid":42,"startMarker":"7","sessions":["session-a"]}"#,
+            r#"{"pid":42,"startMarker":-1,"sessions":["session-a"]}"#,
+            r#"{"pid":42,"startMarker":1.5,"sessions":["session-a"]}"#,
+            r#"{"pid":42,"startMarker":18446744073709551616,"sessions":["session-a"]}"#,
+        ] {
+            assert_eq!(viewing(text, |_| Some(7)), None, "{text}");
+        }
     }
 
     /// The app and a CLI can share one DSH_HOME, each host with its own
-    /// file: one's views must not hide the other's.
+    /// file: one's views must not hide the other's, but a stale file naming
+    /// one of their pids with another incarnation's marker must not count.
     #[test]
     fn every_hosts_views_count() {
         let dir = std::env::temp_dir().join(format!("ao-viewing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let me = std::process::id();
-        let host = |pid: u32, ids: &str| format!(r#"{{"pid":{pid},"sessions":[{ids}]}}"#);
-        std::fs::write(dir.join("a.json"), host(me, r#""s1","s2""#)).unwrap();
-        std::fs::write(dir.join("b.json"), host(me, r#""s2","s3""#)).unwrap();
-        std::fs::write(dir.join("b.json.tmp"), host(me, r#""half""#)).unwrap();
+        let marker = pixtuoid_core::source::pid_start_marker(me as i32).unwrap();
+        let host = |pid: u32, start_marker: u64, ids: &str| {
+            format!(r#"{{"pid":{pid},"startMarker":{start_marker},"sessions":[{ids}]}}"#)
+        };
+        std::fs::write(dir.join("a.json"), host(me, marker, r#""s1","s2""#)).unwrap();
+        std::fs::write(dir.join("b.json"), host(me, marker, r#""s2","s3""#)).unwrap();
+        std::fs::write(dir.join("stale.json"), host(me, marker + 1, r#""stale""#)).unwrap();
+        std::fs::write(dir.join("b.json.tmp"), host(me, marker, r#""half""#)).unwrap();
         let mut want = vec![dsh("s1"), dsh("s2"), dsh("s3")];
         want.sort_unstable();
         assert_eq!(read_viewing(&dir), want);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The JS side and the kernel must name the same process incarnation, or
+    /// every real viewing file is rejected (or, worse, an old one accepted).
+    /// Run the actual replaced plugin in a controlled Node host and compare
+    /// what it writes with Rust's query while that host is still alive.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_plugin_writes_the_same_start_marker_as_the_kernel() {
+        use std::io::{BufRead, Read};
+        use std::process::{Command, Stdio};
+
+        let dir = std::env::temp_dir().join(format!("ao-plugin-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let viewing_dir = dir.join("viewing");
+        let literal = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
+        // The same four substitutions as connect performs; importing this
+        // generated file exercises the plugin, not a copied ps expression.
+        let source = include_str!("dsh_plugin.mjs")
+            .replace("__HOOK_EXE__", &literal(&dir.join("agent-office")))
+            .replace("__TRANSCRIPTS__", &literal(&dir.join("transcripts")))
+            .replace("__VIEWING__", &literal(&viewing_dir))
+            .replace("__DISPATCH__", &literal(&dir.join("dispatch")));
+        let plugin = dir.join("plugin.mjs");
+        std::fs::write(&plugin, source).unwrap();
+        let harness = r#"
+const { pathToFileURL } = await import("node:url")
+const { readFileSync } = await import("node:fs")
+const { join } = await import("node:path")
+const plugin = await import(pathToFileURL(process.env.AO_TEST_PLUGIN).href)
+let injections = 0
+const history = { async *follow() {} }
+plugin.apply({
+  on() {},
+  effect() {},
+  inject(_services, callback) {
+    injections += 1
+    if (injections !== 1) return
+    callback({ sessionController: { history }, effect() {} })
+  },
+})
+const file = join(process.env.AO_TEST_VIEWING, `${process.pid}.json`)
+console.log(readFileSync(file, "utf8"))
+setTimeout(() => {}, 30_000)
+"#;
+        let mut child = Command::new("node")
+            .args(["--input-type=module", "--eval", harness])
+            .env("AO_TEST_PLUGIN", &plugin)
+            .env("AO_TEST_VIEWING", &viewing_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run the generated plugin in Node");
+        let pid = child.id();
+        let mut line = String::new();
+        let read = std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+        let kernel = pixtuoid_core::source::pid_start_marker(pid as i32);
+        let recorded = serde_json::from_str::<serde_json::Value>(&line);
+        let _ = child.kill();
+        child.wait().unwrap();
+        let mut errors = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut errors)
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            read.unwrap() > 0,
+            "plugin produced no viewing file: {errors}"
+        );
+        let recorded = recorded.unwrap();
+        let kernel = kernel.expect("the controlled Node host is alive");
+        assert_eq!(recorded["pid"].as_u64(), Some(u64::from(pid)));
+        assert_eq!(recorded["startMarker"].as_u64(), Some(kernel));
+        assert_eq!(recorded["sessions"], serde_json::json!([]));
     }
 
     /// A session's switch shows once its file is rewritten; a file caught
