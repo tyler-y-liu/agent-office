@@ -123,8 +123,10 @@ pub fn run() -> Result<()> {
         );
     }
 
-    let (all_in, roles) = crate::roles::doctor_line();
+    let (all_in, roles) = crate::roles::doctor_line(crate::roles::Backend::Claude);
     println!("[{}] roles     {roles}", if all_in { "✓" } else { " " });
+    let (cursor_roles_in, cursor_roles) = crate::roles::doctor_line(crate::roles::Backend::Cursor);
+    println!("[{}] cursor roles {cursor_roles}", if cursor_roles_in { "✓" } else { " " });
     let (dsh_roles_in, dsh_roles) = crate::dsh_roles::doctor_line();
     println!("[{}] dsh roles {dsh_roles}", if dsh_roles_in { "✓" } else { " " });
 

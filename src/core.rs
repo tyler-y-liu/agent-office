@@ -51,10 +51,11 @@ pub struct DispatchPlan {
     pub dir: std::path::PathBuf,
     pub backend: crate::roles::Backend,
     pub relay: Option<Relay>,
-    /// Whether the picker could switch to the other host. Read once, when
-    /// the plan is made: the paint path draws every beat and the answer costs
-    /// a walk of the role files.
-    pub switchable: bool,
+    /// The host `h` in the picker switches to: the next one round
+    /// [`crate::roles::Backend::ALL`] that could take the dispatch, if any.
+    /// Read once, when the plan is made: the paint path draws every beat and
+    /// the answer costs a walk of the role files.
+    pub switch_to: Option<crate::roles::Backend>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,10 +90,11 @@ fn dispatch_worker(scene: &SceneState, selected: Option<AgentId>) -> Option<&Age
 
 /// The host a session runs in, which a dispatch from it follows by default.
 fn host_of(slot: &AgentSlot) -> crate::roles::Backend {
-    if &*slot.source == crate::dsh::SOURCE {
-        crate::roles::Backend::Dsh
-    } else {
-        crate::roles::Backend::Claude
+    match &*slot.source {
+        crate::dsh::SOURCE => crate::roles::Backend::Dsh,
+        crate::pipeline::CURSOR_SOURCE => crate::roles::Backend::Cursor,
+        // Codex has no dispatch of its own yet: its workers send to Claude.
+        _ => crate::roles::Backend::Claude,
     }
 }
 
@@ -196,6 +198,10 @@ pub struct Core {
     jumps: Jumps,
     /// The real jump by default; tests substitute one that never opens an app.
     open_agent: fn(&SceneState, AgentId) -> Result<&'static str, String>,
+    /// What a host lacks to take a dispatch, `None` when it could: the real
+    /// check by default; tests substitute one, since the real one reads the
+    /// machine's CLIs and role files.
+    host_missing: fn(crate::roles::Backend) -> Option<String>,
     /// Dispatch waits for a desktop app or Host without freezing the event loop.
     dispatches: Dispatches,
     /// When the role bar's host was last worked out, and what it was: the
@@ -255,7 +261,7 @@ fn dispatch_success(
     message: String,
 ) -> String {
     match backend {
-        crate::roles::Backend::Dsh => message,
+        crate::roles::Backend::Dsh | crate::roles::Backend::Cursor => message,
         crate::roles::Backend::Claude if relay => crate::tr!(
             "已在 Claude 开好「{}」接力会话，看一眼就发送",
             "opened a {} relay in Claude: check it and send",
@@ -590,7 +596,7 @@ impl Core {
             ui: PanelState {
                 summaries: summarizer_on,
                 hooks: crate::hook::installed(),
-                roles: crate::roles::doctor_line().0,
+                roles: crate::roles::doctor_line(crate::roles::Backend::Claude).0,
                 ..PanelState::default()
             },
             head_labels: true,
@@ -609,6 +615,7 @@ impl Core {
             banners: notify::banners_on(),
             jumps: Jumps::default(),
             open_agent: jump::open_agent,
+            host_missing: crate::roles::host_missing,
             dispatches: Dispatches::default(),
             host_at: None,
             picked_host: None,
@@ -657,7 +664,7 @@ impl Core {
             self.setup_checked = Some(Instant::now());
             self.ui.hooks = crate::hook::installed();
             self.hooks = self.ui.hooks;
-            self.ui.roles = crate::roles::doctor_line().0;
+            self.ui.roles = crate::roles::doctor_line(crate::roles::Backend::Claude).0;
         }
         let order = panel::order(&scene, &views, now, &self.ui.seen);
         if self
@@ -1024,12 +1031,12 @@ impl Core {
         // The worker's own host unless AGENT_OFFICE_DISPATCH_HOST names one,
         // and `h` in the picker can still switch it before a role is picked.
         let backend = self.dispatch_backend(host_of(slot));
-        let switchable = crate::roles::host_ready(backend.other());
+        let switch_to = backend.next_ready(|h| self.host_ready(h));
         Some(DispatchPlan {
             dir,
             backend,
             relay,
-            switchable,
+            switch_to,
         })
     }
 
@@ -1047,7 +1054,7 @@ impl Core {
             .worker_host()
             .and_then(|(following, dir)| {
                 let host = self.dispatch_backend(following);
-                crate::roles::host_ready(host).then(|| {
+                self.host_ready(host).then(|| {
                     let repo = dir.file_name().map_or_else(
                         || dir.display().to_string(),
                         |n| n.to_string_lossy().into_owned(),
@@ -1060,7 +1067,7 @@ impl Core {
                         // clicking it can say what it is missing.
                         hosts: crate::roles::Backend::ALL
                             .iter()
-                            .map(|host| (*host, crate::roles::host_ready(*host)))
+                            .map(|host| (*host, self.host_ready(*host)))
                             .collect(),
                     }
                 })
@@ -1075,22 +1082,43 @@ impl Core {
     /// take a dispatch never wins, so a stale pick cannot break `p`.
     fn dispatch_backend(&self, following: crate::roles::Backend) -> crate::roles::Backend {
         match self.picked_host {
-            Some(host) if crate::roles::host_ready(host) => host,
-            _ => crate::roles::dispatch_host(following),
+            Some(host) if self.host_ready(host) => host,
+            _ => {
+                // A worker whose host cannot take a dispatch (Cursor hooks
+                // from the IDE, no cursor-agent CLI) still gets one: from the
+                // first host that can, not none at all.
+                let following = if self.host_ready(following) {
+                    following
+                } else {
+                    crate::roles::Backend::ALL
+                        .iter()
+                        .copied()
+                        .find(|h| self.host_ready(*h))
+                        .unwrap_or(following)
+                };
+                crate::roles::dispatch_host(following, |h| self.host_ready(h))
+            }
         }
+    }
+
+    fn host_ready(&self, host: crate::roles::Backend) -> bool {
+        (self.host_missing)(host).is_none()
     }
 
     /// Dispatch into `host` from now on, if it could take it; otherwise say
     /// what it is missing, since that is how a host that was never set up
     /// gets found out.
     pub fn choose_dispatch_host(&mut self, host: crate::roles::Backend) {
-        let current = self
-            .dispatch_bar()
-            .map_or(crate::roles::Backend::Claude, |bar| bar.active);
+        // Worked out as a dispatch would be, not read off the bar: with no
+        // bar, a guessed Claude would make a switch to Claude a no-op.
+        let following = self
+            .worker_host()
+            .map_or(crate::roles::Backend::Claude, |(host, _)| host);
+        let current = self.dispatch_backend(following);
         if host == current {
             return;
         }
-        match crate::roles::host_missing(host) {
+        match (self.host_missing)(host) {
             None => {
                 self.picked_host = Some(host);
                 // The bar and the next plan both read this cache.
@@ -1112,16 +1140,17 @@ impl Core {
         Some((host_of(slot), dir))
     }
 
-    /// Switch the picker's host to the other one, when that host could take
-    /// the dispatch; otherwise say what it is missing, since `h` is the only
-    /// way to learn a host is not set up without losing the pick.
+    /// Switch the picker's host to the next one that could take the
+    /// dispatch; with none, try the next host anyway so the note says what it
+    /// is missing, since `h` is the only way to learn a host is not set up
+    /// without losing the pick.
     pub fn toggle_dispatch_host(&mut self, plan: &mut DispatchPlan) {
-        self.choose_dispatch_host(plan.backend.other());
+        self.choose_dispatch_host(plan.switch_to.unwrap_or(plan.backend.next()));
         // A refused switch leaves the plan as it was.
         if let Some(bar) = self.dispatch_bar() {
             let host = bar.active;
             plan.backend = host;
-            plan.switchable = crate::roles::host_ready(host.other());
+            plan.switch_to = host.next_ready(|h| self.host_ready(h));
         }
     }
 
@@ -1169,6 +1198,10 @@ impl Core {
                 crate::roles::Backend::Claude => crate::i18n::t(
                     "正在让 Claude 打开会话…",
                     "asking Claude to open the session…",
+                ),
+                crate::roles::Backend::Cursor => crate::i18n::t(
+                    "正在打开终端启动 Cursor…",
+                    "opening a terminal for Cursor…",
                 ),
             },
             Tone::Ok,
@@ -1527,6 +1560,7 @@ mod tests {
             banners: false,
             jumps: Jumps::default(),
             open_agent: jump::open_agent,
+            host_missing: crate::roles::host_missing,
             dispatches: Dispatches::default(),
             host_at: None,
             picked_host: None,
@@ -1701,6 +1735,18 @@ mod tests {
             ),
             "created and submitted a QA relay (shop · abc123)"
         );
+        // Cursor's note says where the terminal opened and whether it
+        // submitted: the generic Claude wording would tell the user to send
+        // a prompt that is already running.
+        assert_eq!(
+            dispatch_success(
+                crate::roles::Backend::Cursor,
+                crate::roles::Role::Qa,
+                false,
+                "opened a Cursor QA session in Terminal; it asks you what to do first (shop)".into(),
+            ),
+            "opened a Cursor QA session in Terminal; it asks you what to do first (shop)"
+        );
     }
 
     /// Claude's checked URL open may take seconds. It must happen off the UI
@@ -1714,7 +1760,7 @@ mod tests {
             dir: std::env::temp_dir(),
             backend: crate::roles::Backend::Claude,
             relay: None,
-            switchable: false,
+            switch_to: None,
         };
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -1780,12 +1826,12 @@ mod tests {
         use crate::i18n::{Lang, with};
         use crate::roles::Backend;
 
-        let rejected = in_flight.other();
-        let plan = |backend| DispatchPlan {
+        let rejected = in_flight.next();
+        let plan = |backend: Backend| DispatchPlan {
             dir: std::env::temp_dir(),
             backend,
             relay: None,
-            switchable: true,
+            switch_to: Some(backend.next()),
         };
         let mut core = core_with_scene(SceneState::uniform(8));
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -1809,6 +1855,7 @@ mod tests {
         let lost = match in_flight {
             Backend::Dsh => "上一次 DSH 派活还没完成，等它出结果再派",
             Backend::Claude => "上一次 Claude 派活还没完成，等它出结果再派",
+            Backend::Cursor => "上一次 Cursor 派活还没完成，等它出结果再派",
         };
         assert_eq!(note, lost);
         assert_eq!(*tone, Tone::Failed);
@@ -1861,6 +1908,131 @@ mod tests {
     #[test]
     fn claude_in_flight_rejection_does_not_blame_dsh() {
         assert_busy_dispatch_names_in_flight_host(crate::roles::Backend::Claude);
+    }
+
+    #[test]
+    fn cursor_in_flight_rejection_does_not_blame_claude() {
+        assert_busy_dispatch_names_in_flight_host(crate::roles::Backend::Cursor);
+    }
+
+    /// A scene with one session from `source`, as the hooks would start it.
+    fn one_worker(source: &str) -> (SceneState, AgentId) {
+        let mut scene = SceneState::uniform(8);
+        let id = AgentId::from_parts(source, "w1");
+        Reducer::new().apply(
+            &mut scene,
+            AgentEvent::SessionStart {
+                agent_id: id,
+                source: source.into(),
+                session_id: "w1".into(),
+                cwd: "/work/shop-app".into(),
+                parent_id: None,
+            },
+            SystemTime::now(),
+            Transport::Hook,
+        );
+        (scene, id)
+    }
+
+    /// `p` follows the picked worker's host: a Cursor worker read as Claude
+    /// would send its relay to the wrong CLI, and Codex, with no dispatch of
+    /// its own, must still land somewhere that has one.
+    #[test]
+    fn a_worker_dispatches_into_the_host_it_runs_in() {
+        use crate::roles::Backend;
+        for (source, host) in [
+            (pipeline::CURSOR_SOURCE, Backend::Cursor),
+            (crate::dsh::SOURCE, Backend::Dsh),
+            (pipeline::CC_SOURCE, Backend::Claude),
+            (pipeline::CODEX_SOURCE, Backend::Claude),
+        ] {
+            let (scene, id) = one_worker(source);
+            assert_eq!(host_of(&scene.agents[&id]), host, "{source}");
+        }
+    }
+
+    /// With three hosts, `h` has to walk round them and skip one not set up,
+    /// or it would park on DSH and only answer with an error; and the plan's
+    /// next host has to move with it, since that is what the hint prints.
+    #[test]
+    fn h_walks_round_the_ready_hosts_and_skips_the_rest() {
+        use crate::roles::Backend;
+        fn dsh_missing(h: Backend) -> Option<String> {
+            (h == Backend::Dsh).then(|| "DSH 没装".to_owned())
+        }
+        let (scene, _) = one_worker(pipeline::CC_SOURCE);
+        let mut core = core_with_scene(scene);
+        core.host_missing = dsh_missing;
+        // Pinned, so a dispatch host configured on this machine plays no part.
+        core.picked_host = Some(Backend::Claude);
+        let mut plan = DispatchPlan {
+            dir: std::env::temp_dir(),
+            backend: Backend::Claude,
+            relay: None,
+            switch_to: Backend::Claude.next_ready(|h| core.host_ready(h)),
+        };
+        assert_eq!(plan.switch_to, Some(Backend::Cursor), "DSH is skipped");
+        core.toggle_dispatch_host(&mut plan);
+        assert_eq!((plan.backend, plan.switch_to), (Backend::Cursor, Some(Backend::Claude)));
+        core.toggle_dispatch_host(&mut plan);
+        assert_eq!((plan.backend, plan.switch_to), (Backend::Claude, Some(Backend::Cursor)));
+        assert!(core.note.as_ref().is_none_or(|(_, tone, _)| *tone != Tone::Failed));
+    }
+
+    /// Cursor's hooks also report the IDE's sessions, so a Cursor worker
+    /// can be on a machine without the cursor-agent CLI. Its `p` must still
+    /// dispatch (through the first host that can), the bar must stay, and
+    /// `h` must really move off that host rather than be swallowed.
+    #[test]
+    fn a_worker_whose_host_is_not_ready_dispatches_through_one_that_is() {
+        use crate::roles::Backend;
+        fn cursor_missing(h: Backend) -> Option<String> {
+            (h == Backend::Cursor).then(|| "找不到 cursor-agent".to_owned())
+        }
+        let (scene, _) = one_worker(pipeline::CURSOR_SOURCE);
+        let mut core = core_with_scene(scene);
+        core.host_missing = cursor_missing;
+        let ready = |h: Backend| h != Backend::Cursor;
+        // What a Claude worker would get here, the machine's configured
+        // default included: on a machine without one, that is Claude.
+        let fallback = crate::roles::dispatch_host(Backend::Claude, ready);
+        let mut plan = core.plan_dispatch().expect("a worker is in the office");
+        assert_eq!(plan.backend, fallback);
+        assert_ne!(plan.backend, Backend::Cursor);
+        assert_eq!(plan.switch_to, plan.backend.next_ready(ready));
+        let bar = core.dispatch_bar().expect("the bar stays");
+        assert_eq!(bar.active, fallback);
+        let target = plan.switch_to.expect("another host is ready");
+        core.toggle_dispatch_host(&mut plan);
+        assert_eq!(plan.backend, target, "h switched off {fallback:?}");
+        assert_eq!(core.picked_host, Some(target));
+    }
+
+    /// With no other host ready, `h` must leave the pick where it was and say
+    /// what the next host lacks: that note is how a user finds out a host was
+    /// never set up.
+    #[test]
+    fn h_with_no_other_host_ready_keeps_the_plan_and_says_why() {
+        use crate::roles::Backend;
+        fn only_claude(h: Backend) -> Option<String> {
+            (h != Backend::Claude).then(|| format!("{} 没装", h.short()))
+        }
+        let (scene, _) = one_worker(pipeline::CC_SOURCE);
+        let mut core = core_with_scene(scene);
+        core.host_missing = only_claude;
+        core.picked_host = Some(Backend::Claude);
+        let mut plan = DispatchPlan {
+            dir: std::env::temp_dir(),
+            backend: Backend::Claude,
+            relay: None,
+            switch_to: Backend::Claude.next_ready(|h| core.host_ready(h)),
+        };
+        assert_eq!(plan.switch_to, None);
+        let before = plan.clone();
+        core.toggle_dispatch_host(&mut plan);
+        assert_eq!(plan, before);
+        let (note, tone, _) = core.note.as_ref().unwrap();
+        assert_eq!((note.as_str(), *tone), ("DSH 没装", Tone::Failed));
     }
 
     /// Two fresh sessions must not edit one ordinary git worktree at once, but

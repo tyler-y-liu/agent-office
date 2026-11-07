@@ -2550,19 +2550,20 @@ fn picker_rows(suggested: &[Role]) -> Vec<(char, Role)> {
 /// The picker's two lines above the roles: where it dispatches to, and what
 /// a pick will do there. The host is named, because the same keys send to
 /// either CLI and the guard names differ.
-fn picker_heading(plan: &crate::core::DispatchPlan, switchable: bool) -> (String, String) {
+fn picker_heading(plan: &crate::core::DispatchPlan) -> (String, String) {
     let repo = plan.repo();
     let host = plan.backend.label();
-    let other = plan.backend.other().label();
     // A host that is not set up cannot be switched to, so the hint would
     // promise a key that only answers with an error.
-    let cancel = if switchable {
-        crate::tr!(
-            "（h 换成 {other}，其他键取消）",
-            "(h switches to {other}; any other key cancels)"
-        )
-    } else {
-        crate::tr!("（其他键取消）", "(any other key cancels)")
+    let cancel = match plan.switch_to {
+        Some(next) => {
+            let next = next.label();
+            crate::tr!(
+                "（h 换成 {next}，其他键取消）",
+                "(h switches to {next}; any other key cancels)"
+            )
+        }
+        None => crate::tr!("（其他键取消）", "(any other key cancels)"),
     };
     let head = match &plan.relay {
         Some(r) => crate::tr!(
@@ -2578,16 +2579,19 @@ fn picker_heading(plan: &crate::core::DispatchPlan, switchable: bool) -> (String
             "into {repo}, carrying its task and result{cancel}"
         ),
         None => {
-            let body = if plan.backend == crate::roles::Backend::Dsh {
-                crate::i18n::t(
+            let body = match plan.backend {
+                crate::roles::Backend::Dsh => crate::i18n::t(
                     "开一个新 DSH 会话，在会话列表打开后写任务",
                     "a new DSH session; open it from the session list and write its task",
-                )
-            } else {
-                crate::i18n::t(
+                ),
+                crate::roles::Backend::Cursor => crate::i18n::t(
+                    "在 Terminal 开一个新 Cursor 会话，它会先问你要做什么",
+                    "a new Cursor session in Terminal; it asks you what to do first",
+                ),
+                crate::roles::Backend::Claude => crate::i18n::t(
                     "开一个新会话，任务在 Claude 里写",
                     "a new session; write its task in Claude",
-                )
+                ),
             };
             format!("{body}{cancel}")
         }
@@ -2608,7 +2612,7 @@ fn paint_picker(
     let px = pt_px(ABOUT_PT, scale_factor);
     let pad = 2 * tag_pad(scale_factor);
     let cell = faces.cell_w(px).max(1);
-    let (head, sub) = picker_heading(plan, plan.switchable);
+    let (head, sub) = picker_heading(plan);
     let suggested = plan.relay.as_ref().map_or(&[][..], |r| &r.suggested[..]);
     let tag = crate::i18n::t(" 建议", " suggested");
     let rows: Vec<(char, Role, String, bool)> = picker_rows(suggested)
@@ -4047,7 +4051,7 @@ mod tests {
             dir: std::path::PathBuf::from("/tmp/agent-office"),
             backend,
             relay: None,
-            switchable: false,
+            switch_to: None,
         }
     }
 
@@ -4058,11 +4062,11 @@ mod tests {
     fn the_picker_names_the_host_a_pick_would_open() {
         use crate::i18n::{with, Lang};
         with(Lang::Zh, || {
-            let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Dsh), false);
+            let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Dsh));
             assert!(head.contains("agent-office"), "{head}");
             assert!(head.contains("DeepSeek Harness"), "{head}");
             assert!(sub.contains("DSH"), "{sub}");
-            let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Claude), false);
+            let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Claude));
             assert!(head.contains("Claude Code"), "{head}");
             assert!(sub.contains("Claude"), "{sub}");
         });
@@ -4074,13 +4078,46 @@ mod tests {
     fn the_switch_hint_appears_only_when_the_other_host_can_take_it() {
         use crate::i18n::{with, Lang};
         with(Lang::Zh, || {
-            let plan = plan_into(crate::roles::Backend::Claude);
-            let (_, with_switch) = picker_heading(&plan, true);
+            let mut plan = plan_into(crate::roles::Backend::Claude);
+            plan.switch_to = Some(crate::roles::Backend::Dsh);
+            let (_, with_switch) = picker_heading(&plan);
             assert!(with_switch.contains('h'), "{with_switch}");
             assert!(with_switch.contains("DeepSeek Harness"), "{with_switch}");
-            let (_, without) = picker_heading(&plan, false);
+            plan.switch_to = None;
+            let (_, without) = picker_heading(&plan);
             assert!(!without.contains('h'), "{without}");
             assert!(without.contains("取消"), "{without}");
+        });
+    }
+
+    /// With three hosts `h` no longer means "the other one": the hint has to
+    /// name the host it lands on (DSH skipped when not set up), or a pick
+    /// read as going to DSH would open Cursor. A fresh Cursor dispatch starts
+    /// working at once in a terminal, unlike Claude's prefilled draft, so the
+    /// line says where it opens and that it will ask for its task.
+    #[test]
+    fn the_picker_names_the_next_host_and_says_where_cursor_opens() {
+        use crate::i18n::{with, Lang};
+        use crate::roles::Backend;
+        let mut plan = plan_into(Backend::Claude);
+        plan.switch_to = Some(Backend::Cursor);
+        with(Lang::Zh, || {
+            let (_, sub) = picker_heading(&plan);
+            assert!(sub.contains("h 换成 Cursor"), "{sub}");
+            assert!(!sub.contains("DeepSeek"), "{sub}");
+        });
+        let mut cursor = plan_into(Backend::Cursor);
+        cursor.switch_to = Some(Backend::Claude);
+        with(Lang::Zh, || {
+            let (head, sub) = picker_heading(&cursor);
+            assert!(head.contains("（Cursor）"), "{head}");
+            assert!(sub.starts_with("在 Terminal 开一个新 Cursor 会话，它会先问你要做什么"), "{sub}");
+            assert!(sub.contains("h 换成 Claude Code"), "{sub}");
+        });
+        with(Lang::En, || {
+            let (_, sub) = picker_heading(&cursor);
+            assert!(sub.starts_with("a new Cursor session in Terminal; it asks you what to do first"), "{sub}");
+            assert!(sub.contains("h switches to Claude Code"), "{sub}");
         });
     }
 }

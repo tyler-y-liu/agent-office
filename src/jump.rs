@@ -553,7 +553,7 @@ const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// How `child` exited, or `None` if it is still running after `limit`; then
 /// it is reaped off this thread so it does not become a zombie.
-fn exit_within(
+pub(crate) fn exit_within(
     mut child: std::process::Child,
     limit: std::time::Duration,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {

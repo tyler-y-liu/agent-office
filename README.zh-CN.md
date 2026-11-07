@@ -133,20 +133,22 @@ Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它�
 
 ### 角色
 
-`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。
+`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。`agent-office roles install --agent cursor` 把同一套角色装成 Cursor agents（`~/.cursor/agents/office-*.md`，认 `CURSOR_CONFIG_DIR`），新开的 `cursor-agent` 才看得到，项目里 `.cursor/agents/` 下的同名文件会盖过这里的；Cursor 里的 PM 用 Task 工具派活。派给 Cursor 要先装好 Cursor CLI（`cursor-agent`）并跑 `agent-office connect cursor`。
 
-按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人；按 `h` 可以在 Claude Code 和 DeepSeek Harness 之间换，`AGENT_OFFICE_DISPATCH_HOST` 改的是打开时的默认值。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
+按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人；按 `h` 在 Claude Code、DeepSeek Harness、Cursor 三个宿主间轮换，跳过没装好的，`AGENT_OFFICE_DISPATCH_HOST` 改的是打开时的默认值。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
 
 - 在完成或卡住的卡片上发起是接力：建议接手的角色排在前面，任务里带上一棒原来的任务、结论和改动目录。
 - 其他情况是开新会话：目录用这个小人的仓库，没选中时用最近活动小人的仓库；打开后等你给任务，没给前就在你的办公室排队。
 
 新会话开在哪个目录：接力用那个小人自己的目录（可能是 worktree）；新会话折算到它的仓库根（`project_root`），目录不存在就报错不换地方。Harness 那边按目录归档 workspace，所以会话落在"这个目录的 workspace"，不是你当前打开的那个 —— bar 的宿主行会先写出仓库名。
 
-任务栏底部常驻一排角色，点一下就派给那个角色；那行先写目标仓库，后面是一个宿主一个名章（Claude / DSH），点哪个就派给哪个，换了这次运行里一直算数（要长期默认还是 `AGENT_OFFICE_DISPATCH_HOST`）。再加宿主只要往 `Backend::ALL` 里加一项，那行自己会长出一个名章。要重看接力的建议，还是按 `p`。
+任务栏底部常驻一排角色，点一下就派给那个角色；那行先写目标仓库，后面是一个宿主一个名章（Claude / DSH / Cursor），点哪个就派给哪个，换了这次运行里一直算数（要长期默认还是 `AGENT_OFFICE_DISPATCH_HOST`）。再加宿主只要往 `Backend::ALL` 里加一项，那行自己会长出一个名章。要重看接力的建议，还是按 `p`。
 
 DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提交；新会话则创建空白的角色会话。派完会把 Harness 窗口提到前面（`dsh://open`），新会话在会话列表最上面，打开后给任务。不支持 `--terminal`。只有还没被 Host 认领的请求才会在超时后撤回；已经认领的请求会继续等最终结果和会话 ID，不会把晚到的结果丢掉。Host 中途退出时结果未知，先检查 DSH 会话列表再决定是否重试。如果错误带会话 ID，先打开原会话继续。还没开始处理就已过期的请求会被拒绝，不会在下次启动时补跑。
 
-终端里用 `agent-office dispatch --role qa "跑全量测试"`（`--dir`、`--terminal`，PM 用 `--auto`）；派给 DeepSeek Harness 时加 `--agent dsh`。`agent-office roles remove [--agent dsh]` 只移除对应宿主的角色，不影响另一个宿主。
+Cursor 派活会新开一个 Terminal.app 窗口，在目标目录里启动 `cursor-agent` 并直接提交：prompt 里带上角色说明（cursor-agent 没有以 agent 身份启动的参数），接力带着任务直接开干；新会话会先问你要做什么。PM 要先把 Cursor 角色装齐。命令行里加 `--terminal` 则不开新窗口，在当前终端里直接启动 `cursor-agent`。
+
+终端里用 `agent-office dispatch --role qa "跑全量测试"`（`--dir`、`--terminal`，PM 用 `--auto`）；派给 DeepSeek Harness 时加 `--agent dsh`，派给 Cursor 时加 `--agent cursor`。`agent-office roles remove [--agent dsh|cursor]` 只移除对应宿主的角色，不影响其他宿主。
 
 ## 配置
 
@@ -157,7 +159,7 @@ DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提�
 | `AGENT_OFFICE_API_BASE` / `_API_KEY` / `_MODEL` | 摘要接口。三个都配了才开启摘要 |
 | `AGENT_OFFICE_SUMMARY=off` | 不发任何内容出去，任务栏显示原始指令 |
 | `AGENT_OFFICE_LANG` | 界面和摘要的语言：`zh` 或 `en`。默认看 macOS 的系统语言，其次看 `LANG`；不是中文就用英文 |
-| `AGENT_OFFICE_DISPATCH_HOST` | `p` 派活默认派给谁：`claude`、`dsh`，或 `follow`（默认，跟着选中的小人）。写的那家没装好时退回 `follow` |
+| `AGENT_OFFICE_DISPATCH_HOST` | `p` 派活默认派给谁：`claude`、`dsh`、`cursor`，或 `follow`（默认，跟着选中的小人）。写的那家没装好时退回 `follow` |
 | `AGENT_OFFICE_NOTIFY=off` | 不弹系统通知、Dock 图标不跳；角标照常显示 |
 | `AGENT_OFFICE_SOUND=on` | 打开音效（默认关）：有人开始等你批准时「叮」一声，撒彩纸时「啵」一声 |
 | `AGENT_OFFICE_STUCK_FAILS` / `_STUCK_QUIET` / `_STUCK_QUIET_LONG` | 「可能卡住」的门槛：连续失败次数（默认 3），干活时几分钟没动静（默认 5），长调用时几分钟（默认 20）。`doctor` 显示当前值 |

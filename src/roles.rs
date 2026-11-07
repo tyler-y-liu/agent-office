@@ -25,23 +25,33 @@ pub enum Role {
 pub enum Backend {
     Claude,
     Dsh,
+    Cursor,
 }
 
 impl Backend {
+    /// Case aside, so `--agent Cursor` is not refused for its capital.
     fn of_id(id: &str) -> Option<Self> {
-        match id {
+        match id.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => Some(Self::Claude),
             "dsh" => Some(Self::Dsh),
+            "cursor" | "cursor-agent" => Some(Self::Cursor),
             _ => None,
         }
     }
 
-    /// The other host: what a toggle in the picker offers.
-    pub fn other(self) -> Self {
-        match self {
-            Self::Claude => Self::Dsh,
-            Self::Dsh => Self::Claude,
-        }
+    /// The host after this one in [`Self::ALL`], wrapping round.
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|b| *b == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// The first host after this one, going round once, that `ready` passes:
+    /// what `h` in the picker switches to. A host not set up is skipped, so
+    /// one key never lands on a host that would only answer with an error.
+    pub fn next_ready(self, ready: impl Fn(Self) -> bool) -> Option<Self> {
+        std::iter::successors(Some(self.next()), |h| Some(h.next()))
+            .take(Self::ALL.len() - 1)
+            .find(|h| ready(*h))
     }
 
     /// Its name as the picker and notes say it.
@@ -49,6 +59,7 @@ impl Backend {
         match self {
             Self::Claude => "Claude Code",
             Self::Dsh => "DeepSeek Harness",
+            Self::Cursor => "Cursor",
         }
     }
 
@@ -58,13 +69,14 @@ impl Backend {
         match self {
             Self::Claude => "Claude",
             Self::Dsh => "DSH",
+            Self::Cursor => "Cursor",
         }
     }
 
     /// Every host a dispatch could go to, in the order the bar lists them.
     /// A new host is added here and in [`Self::short`], and the bar picks it
     /// up without another layout.
-    pub const ALL: &'static [Self] = &[Self::Claude, Self::Dsh];
+    pub const ALL: &'static [Self] = &[Self::Claude, Self::Dsh, Self::Cursor];
 }
 
 /// `AGENT_OFFICE_DISPATCH_HOST` as a host. `follow` (and anything unknown)
@@ -301,18 +313,62 @@ pub(crate) fn frontmatter_end(template: &str) -> usize {
 /// The short part of a role's brief: what it does, without its checklist,
 /// for a prompt to carry in full.
 pub fn card(role: Role) -> &'static str {
-    let t = role.post().template();
+    brief_head(role.post().template())
+}
+
+fn brief_head(t: &str) -> &str {
     let body = &t[frontmatter_end(t)..];
     body.split("\n## ").next().unwrap_or(body).trim()
+}
+
+/// [`card`] as a Cursor session reads it: the prompt is the only place a
+/// Cursor PM learns how to delegate, so it must name Cursor's tool too.
+pub fn cursor_card(role: Role) -> String {
+    cursor_brief(role.post(), card(role))
 }
 
 /// What sits under our ownership mark: the text the hash in it covers.
 const MARK: &str = "<!-- agent-office role=";
 
-/// A role's file as installed: its template and our mark, with a hash of
-/// the template so an edit by hand is told from a stale copy.
-fn rendered(post: &Post) -> String {
-    render(post, post.template())
+/// A role's file as installed for `host`: its template and our mark, with a
+/// hash of the template so an edit by hand is told from a stale copy.
+fn rendered(post: &Post, host: Backend) -> String {
+    render(post, &host_template(post, host, post.template()))
+}
+
+/// `template` (one language's) as `host` reads it.
+fn host_template(post: &Post, host: Backend, template: &str) -> String {
+    match host {
+        Backend::Cursor => cursor_template(post, template),
+        Backend::Claude | Backend::Dsh => template.to_owned(),
+    }
+}
+
+/// A role for Cursor's agents: its name and description, the model the
+/// session runs, and the same brief. `tools:` goes, since Cursor reads no
+/// tool list; a read-only role keeps that promise in its brief, as the
+/// Claude one does with Bash in hand. Cursor's PM hands work on with the
+/// Task tool, which takes the same `subagent_type`. The templates are built
+/// in, so a test (not a runtime check) holds the rewrite to their wording.
+fn cursor_template(post: &Post, template: &str) -> String {
+    let end = frontmatter_end(template);
+    let meta: Vec<&str> = template[..end]
+        .lines()
+        .filter(|l| l.starts_with("name:") || l.starts_with("description:"))
+        .collect();
+    let body = cursor_brief(post, &template[end..]);
+    format!("---\n{}\nmodel: inherit\n---\n{body}", meta.join("\n"))
+}
+
+/// A role's brief as a Cursor session reads it: the PM's delegation goes
+/// through the Task tool, every other role's is the same text.
+fn cursor_brief(post: &Post, brief: &str) -> String {
+    if post.role != Role::Pm {
+        return brief.to_owned();
+    }
+    brief
+        .replace("Agent 工具", "Task 工具")
+        .replace("Agent tool", "Task tool")
 }
 
 fn render(post: &Post, template: &str) -> String {
@@ -337,7 +393,7 @@ pub enum State {
     Foreign,
 }
 
-fn state_of(post: &Post, text: Option<&str>) -> State {
+fn state_of(post: &Post, host: Backend, text: Option<&str>) -> State {
     let Some(text) = text else {
         return State::Missing;
     };
@@ -358,20 +414,26 @@ fn state_of(post: &Post, text: Option<&str>) -> State {
     if sha != Some(crate::tasks::memo::key(&[body]).as_str()) || !text[end..].trim().is_empty() {
         return State::Edited;
     }
-    if text == rendered(post) {
+    if text == rendered(post, host) {
         return State::Ours { current: true };
     }
     let other = crate::i18n::t(post.template_en, post.template);
-    if text == render(post, other) {
+    if text == render(post, &host_template(post, host, other)) {
         return State::OtherLang;
     }
     State::Ours { current: false }
 }
 
-pub fn agents_dir() -> Result<PathBuf> {
-    Ok(crate::tasks::claude_dir()
-        .context("找不到 Claude 配置目录")?
-        .join("agents"))
+/// Where `host` reads agent files from. DSH takes its roles as one plugin
+/// instead ([`crate::dsh_roles`]), so it has no such directory.
+pub fn agents_dir(host: Backend) -> Result<PathBuf> {
+    match host {
+        Backend::Claude => Ok(crate::tasks::claude_dir()
+            .context("找不到 Claude 配置目录")?
+            .join("agents")),
+        Backend::Cursor => crate::cursor::agents_dir().context("找不到 Cursor 配置目录"),
+        Backend::Dsh => anyhow::bail!("DSH 的角色装成插件，没有 agents 目录"),
+    }
 }
 
 fn path_of(dir: &Path, post: &Post) -> PathBuf {
@@ -386,10 +448,10 @@ fn read(path: &Path) -> Result<Option<String>> {
     }
 }
 
-pub fn status(dir: &Path) -> Result<Vec<(&'static Post, State)>> {
+pub fn status(dir: &Path, host: Backend) -> Result<Vec<(&'static Post, State)>> {
     ROSTER
         .iter()
-        .map(|p| Ok((p, state_of(p, read(&path_of(dir, p))?.as_deref()))))
+        .map(|p| Ok((p, state_of(p, host, read(&path_of(dir, p))?.as_deref()))))
         .collect()
 }
 
@@ -416,10 +478,10 @@ pub struct Outcome {
 
 /// Write every role missing or out of date. One edited by hand is kept
 /// unless `force`; a file of the same name that is not ours never is.
-pub fn install(dir: &Path, force: bool) -> Result<Outcome> {
+pub fn install(dir: &Path, host: Backend, force: bool) -> Result<Outcome> {
     std::fs::create_dir_all(dir).with_context(|| format!("建 {} 失败", dir.display()))?;
     let mut out = Outcome::default();
-    for (post, state) in status(dir)? {
+    for (post, state) in status(dir, host)? {
         match state {
             State::Ours { current: true } => continue,
             State::Foreign => {
@@ -432,7 +494,7 @@ pub fn install(dir: &Path, force: bool) -> Result<Outcome> {
             }
             _ => {}
         }
-        write(&path_of(dir, post), &rendered(post))?;
+        write(&path_of(dir, post), &rendered(post, host))?;
         out.written.push(post.id);
     }
     Ok(out)
@@ -440,9 +502,9 @@ pub fn install(dir: &Path, force: bool) -> Result<Outcome> {
 
 /// Delete our roles. One edited by hand is kept unless `force`; a file that
 /// is not ours never goes.
-pub fn remove(dir: &Path, force: bool) -> Result<Outcome> {
+pub fn remove(dir: &Path, host: Backend, force: bool) -> Result<Outcome> {
     let mut out = Outcome::default();
-    for (post, state) in status(dir)? {
+    for (post, state) in status(dir, host)? {
         match state {
             State::Missing => {}
             State::Foreign => out.kept_foreign.push(post.id),
@@ -489,13 +551,13 @@ fn take_backend<'a>(args: &'a [&'a str]) -> Result<(Backend, Vec<&'a str>)> {
     let mut it = args.iter().copied();
     while let Some(arg) = it.next() {
         let id = if arg == "--agent" {
-            Some(it.next().context("--agent 需要 claude 或 dsh")?)
+            Some(it.next().context("--agent 需要 claude、dsh 或 cursor")?)
         } else {
             arg.strip_prefix("--agent=")
         };
         if let Some(id) = id {
             anyhow::ensure!(!seen, "--agent 只能给一个");
-            backend = Backend::of_id(id).with_context(|| format!("不认识 agent {id}：可选 claude、dsh"))?;
+            backend = Backend::of_id(id).with_context(|| format!("不认识 agent {id}：可选 claude、dsh、cursor"))?;
             seen = true;
         } else {
             rest.push(arg);
@@ -504,17 +566,17 @@ fn take_backend<'a>(args: &'a [&'a str]) -> Result<(Backend, Vec<&'a str>)> {
     Ok((backend, rest))
 }
 
-/// `agent-office roles [install|remove] [--force] [--agent claude|dsh]`.
+/// `agent-office roles [install|remove] [--force] [--agent claude|dsh|cursor]`.
 pub fn cli(args: &[&str]) -> Result<()> {
     let (backend, args) = take_backend(args)?;
     if backend == Backend::Dsh {
         return crate::dsh_roles::cli(&args);
     }
     let args: &[&str] = &args;
-    let dir = agents_dir()?;
+    let dir = agents_dir(backend)?;
     match args {
         [] => {
-            for (post, state) in status(&dir)? {
+            for (post, state) in status(&dir, backend)? {
                 let s = match state {
                     State::Missing => "没装",
                     State::Ours { current: true } => "已装",
@@ -528,27 +590,32 @@ pub fn cli(args: &[&str]) -> Result<()> {
             println!("目录：{}", dir.display());
         }
         ["install", rest @ ..] if rest.iter().all(|a| *a == "--force") => {
-            let out = install(&dir, rest.contains(&"--force"))?;
+            let out = install(&dir, backend, rest.contains(&"--force"))?;
             report(&dir, "写入", &out);
             println!(
-                "新开的 Claude 会话才看得到。项目里 .claude/agents/ 下的同名文件会盖过这里的。"
+                "{}",
+                if backend == Backend::Cursor {
+                    "新开的 cursor-agent 才看得到。项目里 .cursor/agents/ 下的同名文件会盖过这里的。"
+                } else {
+                    "新开的 Claude 会话才看得到。项目里 .claude/agents/ 下的同名文件会盖过这里的。"
+                }
             );
         }
         ["remove", rest @ ..] if rest.iter().all(|a| *a == "--force") => {
-            let out = remove(&dir, rest.contains(&"--force"))?;
+            let out = remove(&dir, backend, rest.contains(&"--force"))?;
             report(&dir, "删除", &out);
         }
-        _ => anyhow::bail!("用法：agent-office roles [install|remove] [--force]"),
+        _ => anyhow::bail!("用法：agent-office roles [install|remove] [--force] [--agent claude|dsh|cursor]"),
     }
     Ok(())
 }
 
-/// The doctor's line on the roles, and whether every one is in.
-pub fn doctor_line() -> (bool, String) {
-    let Ok(dir) = agents_dir() else {
-        return (false, "找不到 Claude 配置目录".into());
+/// The doctor's line on `host`'s roles, and whether every one is in.
+pub fn doctor_line(host: Backend) -> (bool, String) {
+    let Ok(dir) = agents_dir(host) else {
+        return (false, format!("找不到 {} 配置目录", host.short()));
     };
-    let Ok(states) = status(&dir) else {
+    let Ok(states) = status(&dir, host) else {
         return (false, format!("读不了 {}", dir.display()));
     };
     let count = |f: fn(&State) -> bool| states.iter().filter(|(_, s)| f(s)).count();
@@ -559,11 +626,15 @@ pub fn doctor_line() -> (bool, String) {
     if edited > 0 {
         line += &format!("，{edited} 个改过");
     }
+    let install = match host {
+        Backend::Cursor => "agent-office roles install --agent cursor",
+        _ => "agent-office roles install",
+    };
     if stale > 0 {
-        line += &format!("，{stale} 个是旧版（agent-office roles install 升级）");
+        line += &format!("，{stale} 个是旧版（{install} 升级）");
     }
     if ours == 0 {
-        line += "；agent-office roles install 安装";
+        line += &format!("；{install} 安装");
     }
     (
         ours == ROSTER.len(),
@@ -576,6 +647,15 @@ pub fn doctor_line() -> (bool, String) {
 /// agent itself (the desktop app takes no agent), then the task. Without a
 /// task it says to ask for one, so a link sent as it is still makes sense.
 pub fn prompt(role: Role, task: &str, with_card: bool) -> String {
+    prompt_with(role, task, with_card.then(|| card(role)))
+}
+
+/// [`prompt`] for Cursor: the card it carries is [`cursor_card`].
+pub fn cursor_prompt(role: Role, task: &str) -> String {
+    prompt_with(role, task, Some(&cursor_card(role)))
+}
+
+fn prompt_with(role: Role, task: &str, card: Option<&str>) -> String {
     let post = role.post();
     let task = task.trim();
     let task = if task.is_empty() {
@@ -583,11 +663,7 @@ pub fn prompt(role: Role, task: &str, with_card: bool) -> String {
     } else {
         task
     };
-    let card = if with_card {
-        format!("\n{}\n", card(role))
-    } else {
-        String::new()
-    };
+    let card = card.map_or_else(String::new, |c| format!("\n{c}\n"));
     let label = crate::i18n::t("角色：", "Role: ");
     format!(
         "[office:{}] {label}{}\n{card}\n{}{task}",
@@ -755,7 +831,7 @@ fn roster_ids() -> String {
 }
 
 const DISPATCH_USAGE: &str =
-    "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh] [--dir <目录>] [--terminal] [任务…]";
+    "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh|cursor] [--dir <目录>] [--terminal] [任务…]";
 
 /// `dispatch`'s arguments: a role or `--auto` (the PM), and the words left
 /// over are the task.
@@ -808,8 +884,17 @@ pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String>
         }
         return host_missing(Backend::Dsh);
     }
-    let dir = agents_dir().ok()?;
-    let states = status(&dir).ok()?;
+    if backend == Backend::Cursor {
+        if let Some(why) = host_missing(Backend::Cursor) {
+            return Some(why);
+        }
+        let states = agents_dir(Backend::Cursor)
+            .and_then(|dir| status(&dir, Backend::Cursor))
+            .unwrap_or_default();
+        return cursor_roles_missing(role, &states);
+    }
+    let dir = agents_dir(Backend::Claude).ok()?;
+    let states = status(&dir, Backend::Claude).ok()?;
     let missing = |r: Role| {
         states
             .iter()
@@ -834,15 +919,26 @@ pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String>
         })
 }
 
-/// Whether `host` could take a dispatch at all: its connector is up and at
-/// least one office role is installed for it. The picker only offers a host
-/// that passes, so `h` never lands on one that would only answer with an
-/// error once a role is picked.
-pub fn host_ready(host: Backend) -> bool {
-    host_missing(host).is_none()
+/// Why a Cursor dispatch as `role` cannot start, given the roles installed
+/// for Cursor: the prompt carries any role's card, so only the PM, which
+/// hands work to the others as Cursor agents, needs them all. Roles that
+/// could not be read count as missing: a PM started without them could
+/// only plan.
+fn cursor_roles_missing(role: Role, states: &[(&'static Post, State)]) -> Option<String> {
+    let all_in = states.len() == ROSTER.len() && states.iter().all(|(_, s)| *s != State::Missing);
+    (role == Role::Pm && !all_in).then(|| {
+        crate::i18n::t(
+            "Cursor 角色还没装：先运行 agent-office roles install --agent cursor",
+            "Cursor roles are not installed: run agent-office roles install --agent cursor first",
+        )
+        .to_owned()
+    })
 }
 
-/// Why `host` could take no dispatch at all, if it could not.
+/// Why `host` could take no dispatch at all, if it could not: its connector
+/// is down, or (Claude, DSH) no office role is installed for it. The picker
+/// only offers a host that passes, so `h` never lands on one that would only
+/// answer with an error once a role is picked.
 pub fn host_missing(host: Backend) -> Option<String> {
     match host {
         Backend::Dsh => {
@@ -859,8 +955,22 @@ pub fn host_missing(host: Backend) -> Option<String> {
                 ).into()
             })
         }
+        Backend::Cursor => {
+            if crate::cursor::bin().is_none() {
+                return Some(crate::i18n::t(
+                    "找不到 cursor-agent 命令：先装好 Cursor CLI",
+                    "cursor-agent not found: install the Cursor CLI first",
+                ).into());
+            }
+            (!crate::cursor::installed()).then(|| {
+                crate::i18n::t(
+                    "Cursor hooks 还没接好：先运行 agent-office connect cursor",
+                    "Cursor hooks are not connected: run agent-office connect cursor",
+                ).into()
+            })
+        }
         Backend::Claude => {
-            let installed = agents_dir().and_then(|dir| status(&dir)).is_ok_and(|rows| {
+            let installed = agents_dir(Backend::Claude).and_then(|dir| status(&dir, Backend::Claude)).is_ok_and(|rows| {
                 rows.iter()
                     .any(|(_, s)| !matches!(s, State::Missing | State::Foreign))
             });
@@ -875,10 +985,10 @@ pub fn host_missing(host: Backend) -> Option<String> {
 }
 
 /// The host a dispatch goes to: `AGENT_OFFICE_DISPATCH_HOST` when it names
-/// one that can take it, else the host `following` names.
-pub fn dispatch_host(following: Backend) -> Backend {
+/// one that can take it (by `ready`), else the host `following` names.
+pub fn dispatch_host(following: Backend, ready: impl Fn(Backend) -> bool) -> Backend {
     let var = host_var();
-    host_with(following, var.as_deref(), host_ready)
+    host_with(following, var.as_deref(), ready)
 }
 
 fn host_with(following: Backend, var: Option<&str>, ready: impl Fn(Backend) -> bool) -> Backend {
@@ -940,6 +1050,9 @@ fn claude_bin() -> Option<PathBuf> {
     let on_path = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        // A relative entry (`.`) would run a `claude` from whatever
+        // directory the dispatch cd's into: the repository's, not ours.
+        .filter(|d| d.is_absolute())
         .map(|d| d.join("claude"));
     let known = [".claude/local/claude", ".local/bin/claude"]
         .into_iter()
@@ -1000,20 +1113,36 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
             ).to_owned()
         });
     }
+    if backend == Backend::Cursor {
+        // cursor-agent starts no session as a named agent, so the prompt
+        // brings the role's card; a fresh one asks for its task (NO_TASKS).
+        let prompt = cursor_prompt(role, task);
+        if terminal {
+            let bin = crate::cursor::bin().context(crate::i18n::t(
+                "找不到 cursor-agent 命令：先装好 Cursor CLI",
+                "cursor-agent not found: install the Cursor CLI first",
+            ))?;
+            return exec_in(dir, &bin, &[prompt]);
+        }
+        crate::cursor::open_in_terminal(dir, role.post().id, &prompt)?;
+        let repo = repo_name(dir);
+        return Ok(if task.trim().is_empty() {
+            crate::tr!(
+                "已在 Terminal 开好 Cursor「{}」会话，它会先问你要做什么（{repo}）",
+                "opened a Cursor {} session in Terminal; it asks you what to do first ({repo})",
+                role.name(),
+            )
+        } else {
+            crate::tr!(
+                "已在 Terminal 开好 Cursor「{}」接力会话并提交（{repo}）",
+                "opened and submitted a Cursor {} relay in Terminal ({repo})",
+                role.name(),
+            )
+        });
+    }
     if terminal {
         let bin = claude_bin().context("找不到 claude 命令：装好 Claude Code 或去掉 --terminal")?;
-        std::env::set_current_dir(dir)
-            .with_context(|| format!("进不了 {}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            let err = std::process::Command::new(&bin)
-                .args(terminal_args(role, task))
-                .exec();
-            return Err(err).with_context(|| format!("启动 {} 失败", bin.display()));
-        }
-        #[cfg(not(unix))]
-        anyhow::bail!("--terminal 只支持 macOS / Linux");
+        return exec_in(dir, &bin, &terminal_args(role, task));
     }
     let link = desktop_link(dir, &prompt(role, task, true))?;
     crate::jump::open_url_checked(&link).map_err(anyhow::Error::msg)?;
@@ -1022,6 +1151,20 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
         role.post().zh,
         dir.display()
     ))
+}
+
+/// Replace this process with `bin args…` in `dir`: `--terminal` starts the
+/// session in the terminal it was typed in.
+fn exec_in(dir: &Path, bin: &Path, args: &[String]) -> Result<String> {
+    std::env::set_current_dir(dir).with_context(|| format!("进不了 {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(bin).args(args).exec();
+        Err(err).with_context(|| format!("启动 {} 失败", bin.display()))
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("--terminal 只支持 macOS / Linux");
 }
 
 /// Kept apart from `dispatch` so a test can check it without the link ever
@@ -1084,7 +1227,7 @@ mod tests {
                     assert!(t.contains(&name), "{} {lang:?}", post.id);
                     assert!(t.contains("\ndescription: "), "{} {lang:?}", post.id);
                     assert_eq!(
-                        state_of(post, Some(&rendered(post))),
+                        state_of(post, Backend::Claude, Some(&rendered(post, Backend::Claude))),
                         State::Ours { current: true },
                         "{} {lang:?}",
                         post.id
@@ -1158,16 +1301,16 @@ mod tests {
     #[test]
     fn install_switches_the_roles_language_but_keeps_a_hand_edit() {
         let dir = temp_dir("lang");
-        with(Lang::Zh, || install(&dir, false).unwrap());
+        with(Lang::Zh, || install(&dir, Backend::Claude, false).unwrap());
         let ux = path_of(&dir, Role::Ux.post());
-        std::fs::write(&ux, rendered(Role::Ux.post()).replace("设计师", "画师")).unwrap();
+        std::fs::write(&ux, rendered(Role::Ux.post(), Backend::Claude).replace("设计师", "画师")).unwrap();
         with(Lang::En, || {
             let pm = Role::Pm.post();
             assert_eq!(
-                state_of(pm, read(&path_of(&dir, pm)).unwrap().as_deref()),
+                state_of(pm, Backend::Claude, read(&path_of(&dir, pm)).unwrap().as_deref()),
                 State::OtherLang
             );
-            let out = install(&dir, false).unwrap();
+            let out = install(&dir, Backend::Claude, false).unwrap();
             assert_eq!(out.written.len(), ROSTER.len() - 1);
             assert_eq!(out.kept_edited, ["ux"]);
             let text = std::fs::read_to_string(path_of(&dir, pm)).unwrap();
@@ -1266,7 +1409,7 @@ mod tests {
         let ux = Role::Ux.post();
         let pm = Role::Pm.post();
         std::fs::write(path_of(&dir, qa), "my own qa agent").unwrap();
-        let edited = rendered(ux).replace("你是这间办公室的", "你是我的");
+        let edited = rendered(ux, Backend::Claude).replace("你是这间办公室的", "你是我的");
         std::fs::write(path_of(&dir, ux), &edited).unwrap();
         // An older template of ours: its mark still matches its body.
         let old = "---\nname: office-pm\n---\nold\n";
@@ -1277,18 +1420,18 @@ mod tests {
         );
         std::fs::write(path_of(&dir, pm), &stale).unwrap();
 
-        let out = install(&dir, false).unwrap();
+        let out = install(&dir, Backend::Claude, false).unwrap();
         assert_eq!(out.kept_foreign, ["qa"]);
         assert_eq!(out.kept_edited, ["ux"]);
         assert!(out.written.contains(&"pm"));
         assert_eq!(out.written.len(), ROSTER.len() - 2);
         assert_eq!(
             std::fs::read_to_string(path_of(&dir, pm)).unwrap(),
-            rendered(pm)
+            rendered(pm, Backend::Claude)
         );
         assert_eq!(std::fs::read_to_string(path_of(&dir, ux)).unwrap(), edited);
 
-        let out = install(&dir, true).unwrap();
+        let out = install(&dir, Backend::Claude, true).unwrap();
         assert_eq!(out.written, ["ux"]);
         assert_eq!(
             std::fs::read_to_string(path_of(&dir, qa)).unwrap(),
@@ -1296,7 +1439,7 @@ mod tests {
         );
         // Run again, nothing left to do.
         assert_eq!(
-            install(&dir, false).unwrap(),
+            install(&dir, Backend::Claude, false).unwrap(),
             Outcome {
                 kept_foreign: vec!["qa"],
                 ..Outcome::default()
@@ -1311,20 +1454,20 @@ mod tests {
     #[test]
     fn lines_added_after_our_mark_keep_the_file_from_install_and_remove() {
         let dir = temp_dir("appended");
-        install(&dir, false).unwrap();
+        install(&dir, Backend::Claude, false).unwrap();
         let qa = path_of(&dir, Role::Qa.post());
-        let appended = format!("{}\n## 我自己加的\n- 先跑 make lint\n", rendered(Role::Qa.post()));
+        let appended = format!("{}\n## 我自己加的\n- 先跑 make lint\n", rendered(Role::Qa.post(), Backend::Claude));
         std::fs::write(&qa, &appended).unwrap();
-        assert_eq!(state_of(Role::Qa.post(), Some(&appended)), State::Edited);
-        let out = install(&dir, false).unwrap();
+        assert_eq!(state_of(Role::Qa.post(), Backend::Claude, Some(&appended)), State::Edited);
+        let out = install(&dir, Backend::Claude, false).unwrap();
         assert_eq!((out.written.len(), out.kept_edited.clone()), (0, vec!["qa"]));
         assert_eq!(std::fs::read_to_string(&qa).unwrap(), appended);
-        let out = remove(&dir, false).unwrap();
+        let out = remove(&dir, Backend::Claude, false).unwrap();
         assert_eq!(out.kept_edited, ["qa"]);
         assert_eq!(std::fs::read_to_string(&qa).unwrap(), appended);
         // Whitespace after the mark is no edit.
-        let spaced = format!("{}\n\n", rendered(Role::Qa.post()));
-        assert_eq!(state_of(Role::Qa.post(), Some(&spaced)), State::Ours { current: false });
+        let spaced = format!("{}\n\n", rendered(Role::Qa.post(), Backend::Claude));
+        assert_eq!(state_of(Role::Qa.post(), Backend::Claude, Some(&spaced)), State::Ours { current: false });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1334,9 +1477,9 @@ mod tests {
     #[test]
     fn a_role_in_the_other_language_is_not_called_old() {
         let dir = temp_dir("otherlang");
-        with(Lang::Zh, || install(&dir, false).unwrap());
+        with(Lang::Zh, || install(&dir, Backend::Claude, false).unwrap());
         with(Lang::En, || {
-            for (post, state) in status(&dir).unwrap() {
+            for (post, state) in status(&dir, Backend::Claude).unwrap() {
                 assert_eq!(state, State::OtherLang, "{}", post.id);
             }
         });
@@ -1357,17 +1500,17 @@ mod tests {
     #[test]
     fn remove_takes_only_ours() {
         let dir = temp_dir("remove");
-        install(&dir, false).unwrap();
+        install(&dir, Backend::Claude, false).unwrap();
         let qa = path_of(&dir, Role::Qa.post());
         std::fs::write(&qa, "my own qa agent").unwrap();
         let ux = path_of(&dir, Role::Ux.post());
-        std::fs::write(&ux, rendered(Role::Ux.post()).replace("设计师", "画师")).unwrap();
-        let out = remove(&dir, false).unwrap();
+        std::fs::write(&ux, rendered(Role::Ux.post(), Backend::Claude).replace("设计师", "画师")).unwrap();
+        let out = remove(&dir, Backend::Claude, false).unwrap();
         assert_eq!(out.kept_foreign, ["qa"]);
         assert_eq!(out.kept_edited, ["ux"]);
         assert!(qa.exists() && ux.exists());
         assert!(!path_of(&dir, Role::Pm.post()).exists());
-        remove(&dir, true).unwrap();
+        remove(&dir, Backend::Claude, true).unwrap();
         assert!(qa.exists() && !ux.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1607,14 +1750,164 @@ mod tests {
         assert_eq!(host_with(Backend::Claude, Some("DSH"), any), Backend::Dsh);
     }
 
-    /// The picker's `h` offers exactly the other host, so one key is enough
-    /// and the label it prints names the host it will dispatch into.
+    /// Every way a user names Cursor must reach it: a name not recognised
+    /// falls back to Claude (the env setting) or is refused (the flags), so a
+    /// miss would quietly dispatch to the wrong CLI.
     #[test]
-    fn the_toggle_offers_the_other_host_by_name() {
-        assert_eq!(Backend::Claude.other(), Backend::Dsh);
-        assert_eq!(Backend::Dsh.other(), Backend::Claude);
-        assert_eq!(Backend::Dsh.label(), "DeepSeek Harness");
-        assert!(Backend::Claude.label().contains("Claude"));
+    fn every_name_for_cursor_means_cursor() {
+        for name in ["cursor", "cursor-agent", "Cursor"] {
+            assert_eq!(Backend::of_id(name), Some(Backend::Cursor), "{name}");
+            assert_eq!(parse_host(name), Some(Backend::Cursor), "{name}");
+            let args = ["install", "--agent", name];
+            let (host, rest) = take_backend(&args).unwrap();
+            assert_eq!((host, rest), (Backend::Cursor, vec!["install"]), "{name}");
+            let flag = format!("--agent={name}");
+            assert_eq!(take_backend(&[flag.as_str()]).unwrap().0, Backend::Cursor, "{name}");
+        }
+        let d = parse_dispatch(&["--role", "qa", "--agent", "cursor", "跑测试"]).unwrap();
+        assert_eq!((d.backend, d.task.as_str()), (Backend::Cursor, "跑测试"));
+        let err = take_backend(&["--agent", "cursr"]).unwrap_err().to_string();
+        assert!(err.contains("cursor"), "the refusal lists cursor: {err}");
+        assert_eq!(Backend::Cursor.label(), "Cursor");
+        assert_eq!(Backend::Cursor.short(), "Cursor");
+    }
+
+    /// `h` goes round all three hosts and skips one not set up: with DSH
+    /// missing it goes straight from Claude to Cursor, Cursor wraps back to
+    /// Claude, and with nothing else ready there is nowhere to go (the hint
+    /// then disappears instead of promising an error).
+    #[test]
+    fn the_next_ready_host_skips_the_unready_and_wraps_round() {
+        assert_eq!(Backend::Claude.next(), Backend::Dsh);
+        assert_eq!(Backend::Cursor.next(), Backend::Claude);
+        let no_dsh = |h| h != Backend::Dsh;
+        assert_eq!(Backend::Claude.next_ready(no_dsh), Some(Backend::Cursor));
+        assert_eq!(Backend::Cursor.next_ready(no_dsh), Some(Backend::Claude));
+        assert_eq!(Backend::Dsh.next_ready(no_dsh), Some(Backend::Cursor));
+        assert_eq!(Backend::Claude.next_ready(|_| false), None);
+        // Only itself ready is still nowhere to switch to.
+        assert_eq!(Backend::Claude.next_ready(|h| h == Backend::Claude), None);
+    }
+
+    /// Cursor's PM delegates with Cursor's Task tool: a brief that still
+    /// says "Agent tool" sends it looking for a tool that is not there, and
+    /// it could only plan. `subagent_type` is what Task takes, so it stays.
+    #[test]
+    fn the_cursor_pm_delegates_with_the_task_tool() {
+        let pm = Role::Pm.post();
+        // "Task" alone proves nothing: the template already names TaskCreate.
+        for (template, tool) in [(pm.template, "Task 工具"), (pm.template_en, "Task tool")] {
+            let t = cursor_template(pm, template);
+            assert!(!t.contains("Agent 工具") && !t.contains("Agent tool"), "{t}");
+            assert!(t.contains(tool) && t.contains("subagent_type"), "{t}");
+        }
+        // The other roles' briefs come through word for word.
+        let qa = Role::Qa.post();
+        let t = cursor_template(qa, qa.template);
+        assert_eq!(&t[frontmatter_end(&t)..], &qa.template[frontmatter_end(qa.template)..]);
+    }
+
+    /// What a dispatched Cursor PM actually reads is the prompt, not the
+    /// installed file: cursor-agent starts as no named agent, so the card in
+    /// the prompt is its brief. Left as Claude's, it says to use an Agent
+    /// tool Cursor lacks and, without it, to stop at a plan.
+    #[test]
+    fn a_cursor_pm_prompt_names_the_task_tool() {
+        for (lang, tool) in [(Lang::Zh, "Task 工具"), (Lang::En, "Task tool")] {
+            with(lang, || {
+                let p = cursor_prompt(Role::Pm, "x");
+                assert!(!p.contains("Agent 工具") && !p.contains("Agent tool"), "{p}");
+                assert!(p.contains(tool) && p.contains("subagent_type"), "{p}");
+                // Still read back as the PM on its task.
+                let (role, rest) = parse_marker(&p).unwrap();
+                assert_eq!((role, task_of(rest)), (Role::Pm, Some("x")));
+                // Every other role's Cursor prompt is the Claude one.
+                assert_eq!(cursor_prompt(Role::Qa, "x"), prompt(Role::Qa, "x", true));
+            });
+        }
+    }
+
+    /// Cursor calls an agent by its frontmatter name, and the office and the
+    /// PM's `subagent_type` both use `office-<id>`; `tools:` is a Claude Code
+    /// key Cursor would not honour, so it is not carried over to look like a
+    /// restriction that is not there.
+    #[test]
+    fn cursor_role_files_keep_name_description_and_inherit_the_model() {
+        for lang in LANGS {
+            with(lang, || {
+                for post in ROSTER {
+                    let src = post.template();
+                    let t = cursor_template(post, src);
+                    let meta = &t[..frontmatter_end(&t)];
+                    let desc = src.lines().find(|l| l.starts_with("description: ")).unwrap();
+                    assert_eq!(
+                        meta,
+                        format!("---\nname: office-{}\n{desc}\nmodel: inherit\n---\n", post.id),
+                        "{} {lang:?}",
+                        post.id
+                    );
+                    assert!(!t.contains("\ntools:"), "{} {lang:?}", post.id);
+                }
+            });
+        }
+    }
+
+    /// The Cursor agents directory is the user's as much as Claude's is:
+    /// install writes Cursor's version, a re-run finds it current, a hand
+    /// edit and a same-named file of the user's survive, and remove takes
+    /// only what we wrote.
+    #[test]
+    fn cursor_roles_install_status_and_remove_touch_only_ours() {
+        let dir = temp_dir("cursor");
+        std::fs::create_dir_all(&dir).unwrap();
+        let qa = path_of(&dir, Role::Qa.post());
+        std::fs::write(&qa, "my own qa agent").unwrap();
+        let out = install(&dir, Backend::Cursor, false).unwrap();
+        assert_eq!(out.kept_foreign, ["qa"]);
+        assert_eq!(out.written.len(), ROSTER.len() - 1);
+        let pm = std::fs::read_to_string(path_of(&dir, Role::Pm.post())).unwrap();
+        assert!(pm.contains("Task") && !pm.contains("\ntools:"), "{pm}");
+        for (post, state) in status(&dir, Backend::Cursor).unwrap() {
+            let want = if post.role == Role::Qa { State::Foreign } else { State::Ours { current: true } };
+            assert_eq!(state, want, "{}", post.id);
+        }
+        // Read as Claude's, a Cursor file is not current: the two hosts'
+        // files are told apart, not upgraded into each other.
+        let rv = path_of(&dir, Role::Reviewer.post());
+        let as_claude = state_of(Role::Reviewer.post(), Backend::Claude, read(&rv).unwrap().as_deref());
+        assert_eq!(as_claude, State::Ours { current: false });
+
+        let ux = path_of(&dir, Role::Ux.post());
+        let edited = std::fs::read_to_string(&ux).unwrap().replace("model: inherit", "model: gpt-5");
+        std::fs::write(&ux, &edited).unwrap();
+        let out = install(&dir, Backend::Cursor, false).unwrap();
+        assert_eq!((out.written.len(), out.kept_edited.clone()), (0, vec!["ux"]));
+        assert_eq!(std::fs::read_to_string(&ux).unwrap(), edited);
+
+        let out = remove(&dir, Backend::Cursor, false).unwrap();
+        assert_eq!(out.kept_foreign, ["qa"]);
+        assert_eq!(out.kept_edited, ["ux"]);
+        assert_eq!(out.written.len(), ROSTER.len() - 2);
+        assert_eq!(std::fs::read_to_string(&qa).unwrap(), "my own qa agent");
+        assert!(ux.exists() && !rv.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Cursor PM hands work to the other roles as Cursor agents, so it is
+    /// stopped until all nine are in; any other role carries its own card in
+    /// the prompt and must not be stopped for roles it never calls.
+    #[test]
+    fn only_a_cursor_pm_needs_the_cursor_roles() {
+        let all: Vec<_> = ROSTER.iter().map(|p| (p, State::Ours { current: true })).collect();
+        let mut one_short = all.clone();
+        one_short[0].1 = State::Missing;
+        let blocked = with(Lang::En, || cursor_roles_missing(Role::Pm, &one_short)).unwrap();
+        assert!(blocked.contains("roles install --agent cursor"), "{blocked}");
+        assert!(cursor_roles_missing(Role::Pm, &[]).is_some(), "unreadable counts as missing");
+        assert_eq!(cursor_roles_missing(Role::Pm, &all), None);
+        for post in ROSTER.iter().filter(|p| p.role != Role::Pm) {
+            assert_eq!(cursor_roles_missing(post.role, &[]), None, "{}", post.id);
+        }
     }
 
     /// A dispatch note has to answer "where did it go" on its own: DSH picks
