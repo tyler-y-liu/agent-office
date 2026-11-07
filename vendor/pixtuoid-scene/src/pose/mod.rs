@@ -452,14 +452,45 @@ pub(crate) fn derive_with_routing(
     let resting = matches!(slot.state, pixtuoid_core::state::ActivityState::Idle)
         && slot.exiting_at.is_none()
         && rctx.wanders;
+    // agent-office: summoned to a seat in your office, rather than to a
+    // team's meeting.
+    let in_office = |walk: &crate::walk::WalkState| match walk.wander.target.kind {
+        WanderKind::Named { wp_idx, .. } => crate::team::in_your_office(layout, wp_idx),
+        WanderKind::Aimless => false,
+    };
+    // agent-office: out of the line for a moment while still needing you
+    // (a prompt turned down leaves it done, short of the line's wait): it
+    // keeps its place rather than walk home and straight back.
+    if rctx.wanders
+        && slot.exiting_at.is_none()
+        && crate::waiting::need(slot, now).is_some()
+        && let Some(walk) = rctx.walks.get(&slot.agent_id)
+        && walk.summoned
+        && in_office(walk)
+    {
+        let seat = walk.wander.target;
+        let wf = advance_meeting(
+            slot,
+            now,
+            layout,
+            desk,
+            rctx.router,
+            rctx.overlay,
+            rctx.walks,
+            seat,
+            None,
+        );
+        return Some(wander_pose(slot, now, layout, desk, rctx, wf));
+    }
     if let Some(walk) = rctx.walks.get_mut(&slot.agent_id)
         && std::mem::take(&mut walk.summoned)
     {
         // agent-office: one read in your office, seated, walks on to rest
         // from its seat rather than home first: the phase clock is restarted
         // so `advance_wander` does not take it for a fresh stretch and seat
-        // it at its desk, and its `Line` stage moves it on.
-        if resting && matches!(walk.wander.phase, WanderPhase::AtWaypoint(_)) {
+        // it at its desk, and its `Line` stage moves it on. One let out of a
+        // meeting still walks home as it always did.
+        if resting && in_office(walk) && matches!(walk.wander.phase, WanderPhase::AtWaypoint(_)) {
             walk.wander.phase_started_at = now;
         } else {
             let at = rctx

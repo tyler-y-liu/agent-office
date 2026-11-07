@@ -63,8 +63,10 @@ fn is_guest_chair(w: crate::layout::Waypoint) -> bool {
 fn only_a_long_wait_lines_up() {
     assert!(!lines_up(&waiter("quick", 0, LINE_UP_AFTER_MS - 1), t0()));
     assert!(lines_up(&waiter("slow", 0, LINE_UP_AFTER_MS), t0()));
-    assert!(!lines_up(&asking("asked", 0, LINE_UP_AFTER_MS - 1), t0()));
-    assert!(lines_up(&asking("asked long", 0, LINE_UP_AFTER_MS), t0()));
+    // A question is a finished turn, its summary back seconds in: it lines
+    // up as a result does, or it would walk home and back once summarized.
+    assert!(!lines_up(&asking("asked", 0, DONE_LINE_UP_AFTER_MS - 1), t0()));
+    assert!(lines_up(&asking("asked", 0, DONE_LINE_UP_AFTER_MS), t0()));
     assert!(lines_up(&done("result", 0, DONE_LINE_UP_AFTER_MS), t0()));
     let mut working = waiter("busy", 0, 60_000);
     working.state = ActivityState::Running { item: None };
@@ -341,5 +343,114 @@ fn a_result_read_in_your_office_walks_to_the_pantry_not_home() {
     assert!(
         matches!(rested, Some(WaypointKind::Pantry | WaypointKind::Island)),
         "ends in the pantry: {rested:?}"
+    );
+}
+
+/// Walk `slot` into the line until it sits; its seat.
+fn seat_in_line(
+    slot: &AgentSlot,
+    l: &SceneLayout,
+    rig: &mut RouteRig<crate::pathfind::AStarRouter>,
+    now: &mut SystemTime,
+) -> usize {
+    for _ in 0..600 {
+        *now += Duration::from_millis(100);
+        rig.meetings = waiting_line(std::slice::from_ref(slot), *now, l);
+        if let Some(Pose::AtWaypoint { wp, .. }) = derive_with_routing(slot, *now, l, &mut rig.rctx())
+        {
+            return wp;
+        }
+    }
+    panic!("never sat down in the line");
+}
+
+/// Frames on, `slot` still sits at `seat` and was never set down to walk
+/// home: what it needs from you never let it go.
+fn stays_seated(
+    slot: &AgentSlot,
+    l: &SceneLayout,
+    rig: &mut RouteRig<crate::pathfind::AStarRouter>,
+    mut now: SystemTime,
+    seat: usize,
+    frames: usize,
+) {
+    for i in 0..frames {
+        now += Duration::from_millis(100);
+        rig.meetings = waiting_line(std::slice::from_ref(slot), now, l);
+        let pose = derive_with_routing(slot, now, l, &mut rig.rctx());
+        assert!(rig.walks[&slot.agent_id].lifted.is_none(), "set down, frame {i}");
+        assert!(
+            matches!(pose, Some(Pose::AtWaypoint { wp, .. }) if wp == seat),
+            "left its seat, frame {i}: {pose:?}"
+        );
+    }
+}
+
+/// agent-office: a result whose summary comes back a question changes what
+/// it needs, not whether: it keeps its seat frame by frame rather than walk
+/// home and back, so the line does not churn as summaries land.
+#[test]
+fn a_result_that_turns_out_a_question_keeps_its_seat() {
+    let l = office();
+    let mut slot = done("asker", 0, DONE_LINE_UP_AFTER_MS);
+    let mut rig = RouteRig::new(crate::pathfind::AStarRouter::new());
+    let mut now = t0();
+    let seat = seat_in_line(&slot, &l, &mut rig, &mut now);
+    slot.state = ActivityState::RequiresAction {
+        reason: Some(REPLY_REASON.into()),
+    };
+    assert!(lines_up(&slot, now + Duration::from_millis(100)), "still in line");
+    stays_seated(&slot, &l, &mut rig, now, seat, 100);
+}
+
+/// agent-office: a prompt turned down ends the turn, so the session needs
+/// you again as a result a few seconds on; it keeps its seat in between
+/// rather than walk home and straight back.
+#[test]
+fn a_prompt_turned_down_keeps_its_seat() {
+    let l = office();
+    let mut slot = waiter("refused", 0, LINE_UP_AFTER_MS);
+    let mut rig = RouteRig::new(crate::pathfind::AStarRouter::new());
+    let mut now = t0();
+    let seat = seat_in_line(&slot, &l, &mut rig, &mut now);
+    slot.state = ActivityState::Idle;
+    slot.state_started_at = now;
+    assert!(!lines_up(&slot, now + Duration::from_millis(100)), "out of the line a moment");
+    stays_seated(&slot, &l, &mut rig, now, seat, 60);
+}
+
+/// agent-office: only a seat in your office lets one out straight to rest;
+/// a team's meeting breaking up still walks its members home first, as it
+/// always has.
+#[test]
+fn a_meeting_let_out_still_walks_home_first() {
+    let l = office();
+    let slot = done("member", 0, DONE_WAITS_MS + 60_000);
+    let desk = l.home_desk(slot.desk_index.single_floor_local()).expect("desk");
+    let seat = (0..l.waypoints.len())
+        .filter(|&i| crate::team::is_team_seat(&l, i))
+        .find_map(|i| crate::team::seat_target(&l, i, desk))
+        .expect("a meeting seat");
+    let mut rig = RouteRig::new(crate::pathfind::AStarRouter::new());
+    rig.meetings.insert(slot.agent_id, seat);
+    let mut now = t0();
+    let mut sat = false;
+    for _ in 0..600 {
+        now += Duration::from_millis(100);
+        if matches!(
+            derive_with_routing(&slot, now, &l, &mut rig.rctx()),
+            Some(Pose::AtWaypoint { .. })
+        ) {
+            sat = true;
+            break;
+        }
+    }
+    assert!(sat, "never sat down at the meeting");
+    rig.meetings.clear();
+    now += Duration::from_millis(100);
+    derive_with_routing(&slot, now, &l, &mut rig.rctx());
+    assert!(
+        rig.walks[&slot.agent_id].lifted.is_some(),
+        "set down to walk home, as before"
     );
 }

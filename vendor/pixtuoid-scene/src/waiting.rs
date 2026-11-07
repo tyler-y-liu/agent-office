@@ -77,11 +77,14 @@ pub fn need(slot: &AgentSlot, now: SystemTime) -> Option<Need> {
 /// Whether `slot` has needed you long enough to line up: a prompt you would
 /// answer within seconds moves no one.
 /// agent-office: public, so the host opens the one the guest chair holds.
+/// A question is a finished turn too, timed from when it went idle: its
+/// summary comes back seconds into the line as a result, and a later
+/// threshold would walk it home and back again.
 pub fn lines_up(slot: &AgentSlot, now: SystemTime) -> bool {
     let after = match need(slot, now) {
         None => return false,
-        Some(Need::Read) => DONE_LINE_UP_AFTER_MS,
-        Some(Need::Approval | Need::Reply) => LINE_UP_AFTER_MS,
+        Some(Need::Read | Need::Reply) => DONE_LINE_UP_AFTER_MS,
+        Some(Need::Approval) => LINE_UP_AFTER_MS,
     };
     crate::anim::elapsed_ms(now, slot.state_started_at) >= after
 }
@@ -91,6 +94,38 @@ pub fn lines_up(slot: &AgentSlot, now: SystemTime) -> bool {
 /// the session it opens agree.
 pub fn line_key(slot: &AgentSlot, now: SystemTime) -> (Option<Need>, SystemTime, AgentId) {
     (need(slot, now), slot.state_started_at, slot.agent_id)
+}
+
+/// agent-office: every session among `agents` that needs you, in line
+/// order, lined up yet or not; a sub-agent of one among them is left out,
+/// as the host opens only sessions. The one place the order is decided, so
+/// the office's seats and the host's `n` cannot disagree.
+pub fn line<'a>(
+    agents: impl IntoIterator<Item = &'a AgentSlot>,
+    now: SystemTime,
+) -> Vec<&'a AgentSlot> {
+    let agents: Vec<&AgentSlot> = agents.into_iter().collect();
+    let mut out: Vec<&AgentSlot> = agents
+        .iter()
+        .copied()
+        .filter(|s| need(s, now).is_some())
+        .filter(|s| s.parent_id.is_none_or(|p| !agents.iter().any(|a| a.agent_id == p)))
+        .collect();
+    out.sort_by_key(|s| line_key(s, now));
+    out
+}
+
+/// agent-office: who `waiting_line` seats in the guest chair on `layout`'s
+/// floor, for the host to check `n` against.
+pub fn guest_chair(agents: &[AgentSlot], now: SystemTime, layout: &SceneLayout) -> Option<AgentId> {
+    let line = waiting_line(agents, now, layout);
+    line.into_iter().find_map(|(id, t)| match t.kind {
+        WanderKind::Named { wp_idx, .. } => {
+            let w = layout.waypoints[wp_idx];
+            (w.kind == WaypointKind::MeetingChair && w.facing == Facing::East).then_some(id)
+        }
+        WanderKind::Aimless => None,
+    })
 }
 
 /// The seats the line takes, first first: the guest chair at your desk (the
@@ -164,20 +199,15 @@ pub(crate) fn waiting_line(
     now: SystemTime,
     layout: &SceneLayout,
 ) -> HashMap<AgentId, WanderTarget> {
-    let mut waiting: Vec<&AgentSlot> = agents
-        .iter()
+    let waiting: Vec<&AgentSlot> = line(agents, now)
+        .into_iter()
         .filter(|s| lines_up(s, now))
-        .filter(|s| {
-            s.parent_id
-                .is_none_or(|p| !agents.iter().any(|a| a.agent_id == p))
-        })
         .filter(|s| {
             layout
                 .home_desk(s.desk_index.single_floor_local())
                 .is_some()
         })
         .collect();
-    waiting.sort_by_key(|s| line_key(s, now));
     let mut seats = seats(layout).into_iter();
     let mut out = HashMap::new();
     let mut standing = Vec::new();

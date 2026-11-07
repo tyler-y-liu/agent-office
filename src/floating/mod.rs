@@ -826,12 +826,24 @@ impl Win {
             if let Some(selected) = self.core.ui.selected {
                 paint_selected(&mut canvas, &tags, selected, fit.scale().get(), sf);
             }
+            // In your office only the guest chair wears its badge: the line
+            // behind it is a crowd of badges, and the panel names them in
+            // order.
+            let guest = crate::core::guest_of(&frame.office, self.office.current_floor(), now);
+            let line = pixtuoid_scene::waiting::line(frame.office.agents.values(), now);
+            let quiet: Vec<AgentId> = line
+                .into_iter()
+                .filter(|s| pixtuoid_scene::waiting::lines_up(s, now))
+                .map(|s| s.agent_id)
+                .filter(|id| Some(*id) != guest && Some(*id) != self.core.ui.selected)
+                .collect();
             paint_tags(
                 &mut canvas,
                 &mut self.faces,
                 &tags,
                 sf,
                 self.core.ui.selected,
+                &quiet,
             );
             self.paint_goings_on_over(
                 &mut canvas,
@@ -1257,10 +1269,10 @@ impl Win {
             .filter(|_| x < last.panel_x)
             .find(|(r, _)| r.meets(&point))
         {
-            // Your office's sign opens whoever sits in its guest chair; with
-            // no one waiting it says what the room is for, like any sign.
-            if text == office_sign() && self.core.next_waiting().is_some() {
-                self.core.act(Action::OpenNext, &mut self.office);
+            // Your office's sign opens whoever sits in its guest chair on
+            // this floor; with no one there it says what the room is for,
+            // like any sign.
+            if text == office_sign() && self.core.open_guest(&mut self.office) {
                 return;
             }
             let again = shown.is_some_and(|(t, at)| &t == text && at.elapsed() < ABOUT_FOR);
@@ -2322,8 +2334,8 @@ fn zone_about(text: &str) -> Option<&'static str> {
             "Sessions resting: ones you have read, or finished over 15 minutes ago unread. After 30 minutes idle they go up to the rooftop, or to the lounge sofa by the windows when there is none. Send one a new message and it goes back to its desk.",
         ),
         "OFFICE" => t(
-            "需要你处理的会话都在这儿排队：等你批准超过 20 秒的最先，其次是问你问题的，然后是做完还没看的，同类先来先排。排第一的坐访客椅，点这块门牌或按 n 打开它；其余坐沙发，坐满了在门外走廊排队。处理完或看过，它就离开。",
-            "Everything that needs you queues here: approvals waiting over 20 seconds first, then questions, then finished results you have not read, each in the order they came. The first sits in the guest chair; click this sign or press n to open it. The rest wait on the sofas, then in the corridor outside. Once dealt with or read, it leaves.",
+            "需要你处理的会话都在这儿排队：等你批准超过 20 秒的最先，其次是问你问题的，然后是做完还没看的，同类先来先排。排第一的坐访客椅，点这块门牌或按 n 打开它；其余坐沙发，坐满了在门外走廊排队。处理完或看过，它就离开。子代理等批准时不进来，留在团队或工位上，头顶带「!」。",
+            "Everything that needs you queues here: approvals waiting over 20 seconds first, then questions, then finished results you have not read, each in the order they came. The first sits in the guest chair; click this sign or press n to open it. The rest wait on the sofas, then in the corridor outside. Once dealt with or read, it leaves. A subagent waiting for approval stays with its team or at its desk, a \"!\" over its head.",
         ),
         "ROOF" => t(
             "闲置超过 30 分钟的会话。给它发新消息它就回工位。午饭和台风时天台关闭，大家都在茶水间。",
@@ -2881,17 +2893,19 @@ fn paint_tags(
     tags: &[Tag],
     scale_factor: f64,
     selected: Option<AgentId>,
+    quiet: &[AgentId],
 ) {
+    let tags: Vec<&Tag> = tags.iter().filter(|t| !quiet.contains(&t.agent)).collect();
     let (name_px, task_px) = (pt_px(NAME_PT, scale_factor), pt_px(TASK_PT, scale_factor));
     let pad = tag_pad(scale_factor);
     // Under every plate, so a leader runs behind the badges it passes.
     let thick = (scale_factor.round() as u32).max(1);
-    for t in tags {
+    for &t in &tags {
         if let Some(l) = leader(t, thick) {
             canvas.fill(l.x, l.y, l.w, l.h, t.marker);
         }
     }
-    for t in tags {
+    for &t in &tags {
         let r = t.badge;
         canvas.fill(r.x, r.y, r.w, r.h, t.plate);
         canvas.fill(r.x, r.y, pad, r.h, t.marker);
@@ -2924,7 +2938,7 @@ fn paint_tags(
         }
         faces.draw(canvas, x, base, &t.name, ink, name_px);
     }
-    for t in tags {
+    for &t in &tags {
         let (Some(r), Some(task)) = (t.label, &t.task) else {
             continue;
         };

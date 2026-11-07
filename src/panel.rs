@@ -98,6 +98,15 @@ impl PanelState {
 /// is waiting on them, not thinking.
 pub const ON_HELPERS: &str = "agent-office:on-helpers";
 
+/// Whether `slot` is idle without ever having run a turn: opened and not yet
+/// given anything to do, so it has no result to read. Its transcript holds
+/// no prompt, no reply and no outcome (the reply is read too, as a long
+/// transcript's first read can start past its prompt).
+pub fn never_ran(slot: &AgentSlot, view: Option<&TaskView>) -> bool {
+    matches!(slot.state, ActivityState::Idle)
+        && view.is_none_or(|v| v.prompt.is_none() && v.reply.is_none() && v.outcome.is_none())
+}
+
 /// Whether `slot` is idle and was opened since it went idle: its result is
 /// read, so it no longer waits in the pantry to be looked at.
 pub fn read_since_idle(slot: &AgentSlot, seen: &HashMap<AgentId, SystemTime>) -> bool {
@@ -164,7 +173,8 @@ impl Group {
         if waits_on_you(slot, view, read).is_some() {
             return Self::Waiting;
         }
-        if read {
+        // Nothing to read in either, so neither waits in your office.
+        if read || never_ran(slot, view) {
             return Self::Idle;
         }
         match slot.state {
@@ -330,20 +340,13 @@ pub fn waiting(
 /// judged by the office's own line ([`pixtuoid_scene::waiting`]), so the two
 /// cannot disagree.
 pub fn next_waiting(drawn: &SceneState, now: SystemTime) -> Option<AgentId> {
-    let shown = |id: &AgentId| {
+    let line = pixtuoid_scene::waiting::line(
         drawn
             .agents
-            .get(id)
-            .is_some_and(|s| crate::pipeline::is_shown_source(&s.source))
-    };
-    let mut line: Vec<&AgentSlot> = drawn
-        .agents
-        .values()
-        .filter(|s| crate::pipeline::is_shown_source(&s.source))
-        .filter(|s| !s.parent_id.as_ref().is_some_and(shown))
-        .filter(|s| pixtuoid_scene::waiting::need(s, now).is_some())
-        .collect();
-    line.sort_by_key(|s| pixtuoid_scene::waiting::line_key(s, now));
+            .values()
+            .filter(|s| crate::pipeline::is_shown_source(&s.source)),
+        now,
+    );
     line.iter()
         .find(|s| pixtuoid_scene::waiting::lines_up(s, now))
         .or(line.first())
@@ -1978,14 +1981,22 @@ mod tests {
         set(&mut scene, stuck, run(), Duration::from_secs(60));
         set(&mut scene, wait2, ask(), Duration::from_secs(30));
         set(&mut scene, wait1, ask(), Duration::from_secs(90));
+        let ran = TaskView {
+            prompt: Some("修登录页".into()),
+            ..TaskView::default()
+        };
         let views: TaskViews = std::sync::Arc::new(
-            [(
-                stuck,
-                TaskView {
-                    stuck: Some(crate::tasks::Stuck::Failing(3)),
-                    ..TaskView::default()
-                },
-            )]
+            [
+                (
+                    stuck,
+                    TaskView {
+                        stuck: Some(crate::tasks::Stuck::Failing(3)),
+                        ..TaskView::default()
+                    },
+                ),
+                (done, ran.clone()),
+                (idle, ran),
+            ]
             .into_iter()
             .collect(),
         );
@@ -2231,8 +2242,12 @@ mod tests {
         slot.state = ActivityState::Idle;
         slot.state_started_at = now - Duration::from_secs(60);
         let slot = scene.agents[&a].clone();
+        let view = TaskView {
+            prompt: Some("修登录页".into()),
+            ..TaskView::default()
+        };
         let group = |seen: &HashMap<AgentId, SystemTime>| {
-            Group::of(&slot, None, now, read_since_idle(&slot, seen))
+            Group::of(&slot, Some(&view), now, read_since_idle(&slot, seen))
         };
         assert_eq!(group(&HashMap::new()), Group::Done);
         let opened = HashMap::from([(a, now - Duration::from_secs(10))]);
@@ -2240,15 +2255,15 @@ mod tests {
         // Read a minute after it finished, it is up on the rooftop: the card
         // must say it was read, or a 1-minute idle up there reads as a bug.
         assert!(
-            status(&slot, None, true, now)
+            status(&slot, Some(&view), true, now)
                 .0
                 .starts_with("✓ 已看 · 空闲 ")
         );
-        // Unread, it is in the pantry under 做完待看: its chip says done, not
+        // Unread, it is in your office under 做完待看: its chip says done, not
         // idle, which read as nothing to look at.
-        assert!(status(&slot, None, false, now).0.starts_with("✓ 做完 "));
+        assert!(status(&slot, Some(&view), false, now).0.starts_with("✓ 做完 "));
         let later = now + Duration::from_secs(20 * 60);
-        assert!(status(&slot, None, false, later).0.starts_with("· 空闲 "));
+        assert!(status(&slot, Some(&view), false, later).0.starts_with("· 空闲 "));
         let while_working = HashMap::from([(a, now - Duration::from_secs(120))]);
         assert_eq!(
             group(&while_working),

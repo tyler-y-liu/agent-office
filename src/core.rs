@@ -259,10 +259,15 @@ pub fn as_seen(
         .collect();
     let rooftop = Duration::from_millis(pixtuoid_scene::pose::IDLE_ROOFTOP_MS);
     let ago = |d: Duration| now.checked_sub(d).unwrap_or(SystemTime::UNIX_EPOCH);
+    // One never given a task has no result either: the guest chair and `n`
+    // must not point at a session with nothing to look at.
     let read: Vec<AgentId> = scene
         .agents
         .values()
-        .filter(|s| panel::read_since_idle(s, seen))
+        .filter(|s| {
+            panel::read_since_idle(s, seen)
+                || (panel::never_ran(s, views.get(&s.agent_id)) && !asking.contains(&s.agent_id))
+        })
         .map(|s| s.agent_id)
         .collect();
     let last_pantry = ago(rooftop - PANTRY_MARGIN);
@@ -299,6 +304,12 @@ pub fn as_seen(
         }
     }
     Arc::new(drawn)
+}
+
+/// Who sits in the guest chair of your office on `floor` of `office`, the
+/// scene as the office draws it: the line of that floor alone.
+pub fn guest_of(office: &SceneState, floor: usize, now: SystemTime) -> Option<AgentId> {
+    panel::next_waiting(&pixtuoid_scene::floor::project_floor_scene(office, floor), now)
 }
 
 /// `scene` with each subagent named after its parent and its post: Claude
@@ -627,6 +638,27 @@ impl Core {
         let now = SystemTime::now();
         let office = as_seen(&self.scene(), &views, &self.ui.seen, self.in_pantry(now), now);
         panel::next_waiting(&office, now)
+    }
+
+    /// Who sits in the guest chair of your office on `floor`: that floor's
+    /// own line, as its office seats it, where `n` goes by the whole
+    /// building's.
+    pub fn guest_on(&self, floor: usize) -> Option<AgentId> {
+        let views = self.views_rx.borrow().clone();
+        let now = SystemTime::now();
+        let office = as_seen(&self.scene(), &views, &self.ui.seen, self.in_pantry(now), now);
+        guest_of(&office, floor, now)
+    }
+
+    /// Open whoever sits in the guest chair on the floor shown; false with
+    /// the chair empty.
+    pub fn open_guest(&mut self, floors: &mut impl Floors) -> bool {
+        let Some(id) = self.guest_on(floors.current_floor()) else {
+            return false;
+        };
+        self.ui.selected = Some(id);
+        self.act(Action::Open, floors);
+        true
     }
 
     /// Whether the office's resting are all in the pantry: a typhoon closes
@@ -1295,6 +1327,19 @@ mod tests {
     use pixtuoid_core::Reducer;
     use pixtuoid_core::source::{AgentEvent, Transport};
 
+    /// A view of a session that has run a turn: it has a prompt.
+    fn ran() -> tasks::TaskView {
+        tasks::TaskView {
+            prompt: Some("修登录页".into()),
+            ..tasks::TaskView::default()
+        }
+    }
+
+    /// Views of `ids`, each having run a turn.
+    fn all_ran(ids: &[AgentId]) -> tasks::TaskViews {
+        Arc::new(ids.iter().map(|&id| (id, ran())).collect())
+    }
+
     /// The footer's key hints run longer than a narrow window: drawn across
     /// the whole row, they were overwritten mid-word by the status, which
     /// left both unreadable. The hints give way and the status reads whole.
@@ -1434,7 +1479,7 @@ mod tests {
             s.state_started_at = now - Duration::from_secs(60);
         }
         let scene = Arc::new(scene);
-        let views = tasks::TaskViews::default();
+        let views = all_ran(&ids);
         assert!(Arc::ptr_eq(
             &as_seen(&scene, &views, &HashMap::new(), false, now),
             &scene
@@ -1469,9 +1514,10 @@ mod tests {
         let asked = tasks::TaskView {
             outcome: Some("问：要不要删旧接口".into()),
             outcome_summarized: true,
-            ..tasks::TaskView::default()
+            ..ran()
         };
-        let views: tasks::TaskViews = Arc::new([(ids[1], asked)].into_iter().collect());
+        let views: tasks::TaskViews =
+            Arc::new([(ids[0], ran()), (ids[1], asked)].into_iter().collect());
         for lunch in [false, true] {
             let drawn = as_seen(&scene, &views, &seen, lunch, now);
             assert_eq!(
@@ -1535,7 +1581,7 @@ mod tests {
             pixtuoid_core::ActivityState::Running { item: None };
         let scene = Arc::new(scene);
         let seen = HashMap::from([(ids[1], now - Duration::from_secs(5))]);
-        let drawn = as_seen(&scene, &tasks::TaskViews::default(), &seen, true, now);
+        let drawn = as_seen(&scene, &all_ran(&ids), &seen, true, now);
         let idle_ms = |id: &AgentId| {
             now.duration_since(drawn.agents[id].state_started_at)
                 .unwrap()
@@ -1592,16 +1638,12 @@ mod tests {
         s.state = pixtuoid_core::ActivityState::RequiresAction { reason: None };
         s.state_started_at = now - Duration::from_secs(5);
         let scene = Arc::new(scene);
-        let views = tasks::TaskViews::default();
-        // Who the office seats first: its line's order, of those lined up.
+        let views = all_ran(&[result, prompt]);
+        // Who the office really seats in the guest chair.
+        let layout = pixtuoid_scene::layout::SceneLayout::compute(240, 160, None).expect("fits");
         let in_chair = |drawn: &SceneState, now| {
-            let mut line: Vec<&AgentSlot> = drawn
-                .agents
-                .values()
-                .filter(|s| pixtuoid_scene::waiting::lines_up(s, now))
-                .collect();
-            line.sort_by_key(|s| pixtuoid_scene::waiting::line_key(s, now));
-            line.first().map(|s| s.agent_id)
+            let agents: Vec<AgentSlot> = drawn.agents.values().cloned().collect();
+            pixtuoid_scene::waiting::guest_chair(&agents, now, &layout)
         };
         for (later, first) in [(0, result), (20, prompt)] {
             let now = now + Duration::from_secs(later);
@@ -1609,6 +1651,104 @@ mod tests {
             assert_eq!(panel::next_waiting(&drawn, now), Some(first), "+{later}s");
             assert_eq!(in_chair(&drawn, now), Some(first), "+{later}s");
         }
+    }
+
+    /// Your office's sign on a floor opens whoever sits in that floor's
+    /// guest chair, which `n`, going by the whole building, may not: an
+    /// earlier prompt upstairs takes `n`, not the chair you clicked.
+    #[test]
+    fn each_floors_sign_opens_its_own_guest_chair() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut caps = [0; pixtuoid_core::state::MAX_FLOORS];
+        caps[0] = 1;
+        caps[1] = 1;
+        let mut scene = SceneState::new(caps);
+        let mut r = Reducer::new();
+        let [down, up] = ["down", "up"].map(|sid| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: None,
+                },
+                t0,
+                Transport::Hook,
+            );
+            id
+        });
+        assert_eq!((scene.agents[&down].floor_idx, scene.agents[&up].floor_idx), (0, 1));
+        let now = t0 + Duration::from_secs(600);
+        let s = scene.agents.get_mut(&down).unwrap();
+        s.state = pixtuoid_core::ActivityState::Idle;
+        s.state_started_at = now - Duration::from_secs(60);
+        let s = scene.agents.get_mut(&up).unwrap();
+        s.state = pixtuoid_core::ActivityState::RequiresAction { reason: None };
+        s.state_started_at = now - Duration::from_secs(60);
+        let drawn = as_seen(&Arc::new(scene), &all_ran(&[down, up]), &HashMap::new(), false, now);
+        assert_eq!(panel::next_waiting(&drawn, now), Some(up), "n: the prompt upstairs");
+        assert_eq!(guest_of(&drawn, 0, now), Some(down), "this floor's chair");
+        assert_eq!(guest_of(&drawn, 1, now), Some(up));
+    }
+
+    /// A session opened and never given a task has no result: the guest
+    /// chair and `n` must not point at one with nothing to look at, so it
+    /// rests and the panel files it idle. One dispatched in a role and
+    /// waiting for its task still waits on you.
+    #[test]
+    fn a_session_never_given_a_task_does_not_queue() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let [fresh, dispatched] = ["fresh", "dispatched"].map(|sid| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: None,
+                },
+                t0,
+                Transport::Hook,
+            );
+            id
+        });
+        let now = t0 + Duration::from_secs(60);
+        for id in [fresh, dispatched] {
+            let s = scene.agents.get_mut(&id).unwrap();
+            s.state = pixtuoid_core::ActivityState::Idle;
+            s.state_started_at = t0;
+        }
+        let scene = Arc::new(scene);
+        let none = tasks::TaskViews::default();
+        let drawn = as_seen(&scene, &none, &HashMap::new(), false, now);
+        assert_eq!(
+            pixtuoid_scene::waiting::need(&drawn.agents[&fresh], now),
+            None,
+            "nothing to read"
+        );
+        assert_eq!(panel::next_waiting(&drawn, now), None);
+        let group = |id: AgentId, views: &tasks::TaskViews| {
+            panel::Group::of(&scene.agents[&id], views.get(&id), now, false)
+        };
+        assert_eq!(group(fresh, &none), panel::Group::Idle);
+
+        let waiting_for_task = tasks::TaskView {
+            needs_task: true,
+            ..tasks::TaskView::default()
+        };
+        let views: tasks::TaskViews =
+            Arc::new(HashMap::from([(dispatched, waiting_for_task)]));
+        let drawn = as_seen(&scene, &views, &HashMap::new(), false, now);
+        assert_eq!(panel::next_waiting(&drawn, now), Some(dispatched));
+        assert_eq!(group(dispatched, &views), panel::Group::Waiting);
+        assert_eq!(group(fresh, &views), panel::Group::Idle);
     }
 
     /// A session already open when agent-office starts last worked hours
@@ -1708,14 +1848,17 @@ mod tests {
         for id in [lead, deep, mid, asked, done, done_helper] {
             scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
         }
-        let views: tasks::TaskViews = Arc::new(HashMap::from([(
-            asked,
-            tasks::TaskView {
-                outcome: Some("问：先合哪个？".into()),
-                outcome_summarized: true,
-                ..Default::default()
-            },
-        )]));
+        let views: tasks::TaskViews = Arc::new(HashMap::from([
+            (
+                asked,
+                tasks::TaskView {
+                    outcome: Some("问：先合哪个？".into()),
+                    outcome_summarized: true,
+                    ..Default::default()
+                },
+            ),
+            (done, ran()),
+        ]));
         let seen = HashMap::from([(lead, now)]);
         let drawn = working_through_helpers(&Arc::new(scene), &views, &seen);
         let group = |id: AgentId| {

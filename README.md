@@ -71,7 +71,7 @@ A row of four-person desks runs under the north windows, with a corridor in the 
 |---|---|
 | Desks | Working sessions. Sessions from the same repo share a desk row, with matching colours on their name tags and panel avatars |
 | Meeting rooms | A session whose subagent has run for 15 seconds goes there with it |
-| Your office | Everything that needs you: approval waits over 20 seconds first, then questions to you, then finished results you have not read, each in the order they came. The first in line sits in the visitor chair and is the one `n` opens; the rest sit on the sofas, then stand in the corridor outside |
+| Your office | Everything that needs you: approval waits over 20 seconds first, then questions to you, then finished results you have not read, each in the order they came. The first in line sits in the visitor chair and is the one `n` opens; the rest sit on the sofas, then stand in the corridor outside. A subagent waiting for approval does not queue here: it stays with its team or at its desk, a "!" over its head |
 | Pantry | Read, or finished over 15 minutes ago unread: resting here |
 | Rooftop | Idle over 30 minutes |
 
