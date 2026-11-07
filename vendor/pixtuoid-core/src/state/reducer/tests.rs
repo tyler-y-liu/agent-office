@@ -1202,6 +1202,409 @@ fn an_open_turn_showing_no_item_keeps_the_longer_of_the_tool_and_idle_windows() 
     );
 }
 
+/// A finished Cursor sub-session has to leave with its own turn. Sitting Idle
+/// would hold the desk until the 30-minute stale sweep.
+#[test]
+fn a_finished_cursor_child_leaves_on_turn_end_instead_of_idling_for_the_sweep() {
+    use crate::source::cursor::SOURCE_NAME;
+    use crate::source::{AgentEvent, Transport};
+    use crate::state::correlation::ChildEnd;
+    use crate::state::{ActivityState, TurnKey};
+    use crate::{AgentId, Reducer, SceneState};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    let parent = AgentId::from_parts(SOURCE_NAME, "parent");
+    let child = AgentId::from_parts(SOURCE_NAME, "child");
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let start = |agent_id, sid: &str, parent_id| AgentEvent::SessionStart {
+        agent_id,
+        source: SOURCE_NAME.into(),
+        session_id: sid.into(),
+        cwd: PathBuf::from("/repo"),
+        parent_id,
+    };
+    let mut r = Reducer::new();
+    let mut scene = SceneState::uniform(4);
+    r.apply(
+        &mut scene,
+        start(parent, "parent", None),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        start(child, "child", Some(parent)),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnStart {
+            agent_id: child,
+            turn: TurnKey::Seq(1),
+        },
+        t0,
+        Transport::Hook,
+    );
+    assert_eq!(
+        scene.agents[&child].parent_id,
+        Some(parent),
+        "fixture: the child is linked"
+    );
+    assert_eq!(
+        scene.agents[&child].state,
+        ActivityState::Running { item: None },
+        "fixture: the child is in its turn, so a settle would land Idle"
+    );
+
+    let ended = t0 + Duration::from_secs(1);
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnEnd {
+            agent_id: child,
+            turn: None,
+            aborted: false,
+        },
+        ended,
+        Transport::Hook,
+    );
+
+    let child_slot = &scene.agents[&child];
+    assert_eq!(
+        child_slot.exiting_at,
+        Some(ended),
+        "a finished cursor child must walk out at once"
+    );
+    assert_eq!(
+        child_slot.state,
+        ActivityState::Running { item: None },
+        "the walkout keeps the turn it was in"
+    );
+    assert!(
+        matches!(
+            r.corr.lifecycles.get(&child).and_then(|e| e.child_end),
+            Some(ChildEnd::Reported(at)) if at == ended
+        ),
+        "the child end is recorded with the walkout"
+    );
+    assert!(
+        scene.agents[&parent].exiting_at.is_none(),
+        "the parent stays in the office"
+    );
+}
+
+/// The main Cursor session has no parent. Ending its turn leaves it at the
+/// desk; only a sub-session walks out.
+#[test]
+fn a_cursor_root_turn_end_idles_in_place_and_stays_in_the_office() {
+    use crate::source::cursor::SOURCE_NAME;
+    use crate::source::{AgentEvent, Transport};
+    use crate::state::{ActivityState, TurnKey};
+    use crate::{AgentId, Reducer, SceneState};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    let root = AgentId::from_parts(SOURCE_NAME, "root");
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let mut r = Reducer::new();
+    let mut scene = SceneState::uniform(4);
+    r.apply(
+        &mut scene,
+        AgentEvent::SessionStart {
+            agent_id: root,
+            source: SOURCE_NAME.into(),
+            session_id: "root".into(),
+            cwd: PathBuf::from("/repo"),
+            parent_id: None,
+        },
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnStart {
+            agent_id: root,
+            turn: TurnKey::Seq(1),
+        },
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnEnd {
+            agent_id: root,
+            turn: None,
+            aborted: false,
+        },
+        t0 + Duration::from_secs(1),
+        Transport::Hook,
+    );
+
+    let slot = &scene.agents[&root];
+    assert_eq!(slot.state, ActivityState::Idle);
+    assert!(
+        slot.exiting_at.is_none(),
+        "a root turn end only finishes the turn"
+    );
+}
+
+/// A child still working, or still waiting on the user, has not ended its own
+/// turn. The parent's turn end must leave it at the desk.
+#[test]
+fn a_running_or_blocked_cursor_child_stays_when_only_its_parent_turn_ends() {
+    use crate::source::cursor::SOURCE_NAME;
+    use crate::source::{AgentEvent, RequestKeys, Transport};
+    use crate::state::{ActivityState, TurnKey};
+    use crate::{AgentId, Reducer, SceneState};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    let parent = AgentId::from_parts(SOURCE_NAME, "parent");
+    let running = AgentId::from_parts(SOURCE_NAME, "running");
+    let blocked = AgentId::from_parts(SOURCE_NAME, "blocked");
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let start = |agent_id, sid: &str, parent_id| AgentEvent::SessionStart {
+        agent_id,
+        source: SOURCE_NAME.into(),
+        session_id: sid.into(),
+        cwd: PathBuf::from("/repo"),
+        parent_id,
+    };
+    let mut r = Reducer::new();
+    let mut scene = SceneState::uniform(4);
+    r.apply(
+        &mut scene,
+        start(parent, "parent", None),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        start(running, "running", Some(parent)),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        start(blocked, "blocked", Some(parent)),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnStart {
+            agent_id: parent,
+            turn: TurnKey::Seq(1),
+        },
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnStart {
+            agent_id: running,
+            turn: TurnKey::Seq(1),
+        },
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::user_action_request(blocked, Some("perm".into()), RequestKeys::default()),
+        t0,
+        Transport::Hook,
+    );
+
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnEnd {
+            agent_id: parent,
+            turn: None,
+            aborted: false,
+        },
+        t0 + Duration::from_secs(1),
+        Transport::Hook,
+    );
+
+    assert_eq!(
+        scene.agents[&running].state,
+        ActivityState::Running { item: None },
+    );
+    assert!(scene.agents[&running].exiting_at.is_none());
+    assert!(matches!(
+        scene.agents[&blocked].state,
+        ActivityState::RequiresAction { .. }
+    ));
+    assert!(scene.agents[&blocked].exiting_at.is_none());
+    assert_eq!(scene.agents[&parent].state, ActivityState::Idle);
+    assert!(
+        scene.agents[&parent].exiting_at.is_none(),
+        "the parent only finished its turn"
+    );
+}
+
+/// The parent's dispatch is still in `tasks_in_flight`. Its own turn end must
+/// not walk the children out.
+#[test]
+fn a_cursor_parent_turn_end_does_not_cascade_while_its_task_is_in_flight() {
+    use crate::source::cursor::SOURCE_NAME;
+    use crate::source::{AgentEvent, ToolDetail, Transport};
+    use crate::state::{ActivityState, TurnKey};
+    use crate::{AgentId, Reducer, SceneState};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    let parent = AgentId::from_parts(SOURCE_NAME, "parent");
+    let child = AgentId::from_parts(SOURCE_NAME, "child");
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let start = |agent_id, sid: &str, parent_id| AgentEvent::SessionStart {
+        agent_id,
+        source: SOURCE_NAME.into(),
+        session_id: sid.into(),
+        cwd: PathBuf::from("/repo"),
+        parent_id,
+    };
+    let mut r = Reducer::new();
+    let mut scene = SceneState::uniform(4);
+    r.apply(
+        &mut scene,
+        start(parent, "parent", None),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        start(child, "child", Some(parent)),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnStart {
+            agent_id: child,
+            turn: TurnKey::Seq(1),
+        },
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::ToolUseStart {
+            agent_id: parent,
+            tool_use_id: Some("task-1".into()),
+            detail: Some(ToolDetail::Task),
+        },
+        t0,
+        Transport::Hook,
+    );
+    assert!(
+        r.corr
+            .tasks_in_flight
+            .get(&parent)
+            .is_some_and(|tasks| tasks.contains("task-1")),
+        "fixture: the dispatch is in flight"
+    );
+
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnEnd {
+            agent_id: parent,
+            turn: None,
+            aborted: false,
+        },
+        t0 + Duration::from_secs(1),
+        Transport::Hook,
+    );
+
+    assert_eq!(
+        scene.agents[&child].state,
+        ActivityState::Running { item: None },
+    );
+    assert!(
+        scene.agents[&child].exiting_at.is_none(),
+        "an in-flight dispatch keeps the child at the desk"
+    );
+    assert!(scene.agents[&parent].exiting_at.is_none());
+    assert!(
+        r.corr
+            .tasks_in_flight
+            .get(&parent)
+            .is_some_and(|tasks| tasks.contains("task-1")),
+        "the parent's turn end must not drain the dispatch"
+    );
+    assert!(
+        !r.pending_b1_cascades.contains_key(&parent),
+        "an in-flight dispatch must not arm a child cascade"
+    );
+}
+
+/// Abort, and the error stop that arrives as the same aborted turn end, is
+/// the sub-session leaving. It must not sit Idle until the stale sweep.
+#[test]
+fn an_aborted_cursor_child_turn_end_leaves_instead_of_idling_for_the_sweep() {
+    use crate::source::cursor::SOURCE_NAME;
+    use crate::source::{AgentEvent, Transport};
+    use crate::state::{ActivityState, TurnKey};
+    use crate::{AgentId, Reducer, SceneState};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    let parent = AgentId::from_parts(SOURCE_NAME, "parent");
+    let child = AgentId::from_parts(SOURCE_NAME, "child");
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let start = |agent_id, sid: &str, parent_id| AgentEvent::SessionStart {
+        agent_id,
+        source: SOURCE_NAME.into(),
+        session_id: sid.into(),
+        cwd: PathBuf::from("/repo"),
+        parent_id,
+    };
+    let mut r = Reducer::new();
+    let mut scene = SceneState::uniform(4);
+    r.apply(
+        &mut scene,
+        start(parent, "parent", None),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        start(child, "child", Some(parent)),
+        t0,
+        Transport::Hook,
+    );
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnStart {
+            agent_id: child,
+            turn: TurnKey::Seq(1),
+        },
+        t0,
+        Transport::Hook,
+    );
+    let ended = t0 + Duration::from_secs(1);
+    r.apply(
+        &mut scene,
+        AgentEvent::TurnEnd {
+            agent_id: child,
+            turn: None,
+            aborted: true,
+        },
+        ended,
+        Transport::Hook,
+    );
+
+    let child_slot = &scene.agents[&child];
+    assert_eq!(child_slot.exiting_at, Some(ended));
+    assert_eq!(
+        child_slot.state,
+        ActivityState::Running { item: None },
+        "an aborted cursor child walks out from the turn it was in"
+    );
+    assert!(scene.agents[&parent].exiting_at.is_none());
+}
+
 /// The turn axis over one agent's `Seq` stream, as `step` checks it after
 /// each event.
 mod turn_property {

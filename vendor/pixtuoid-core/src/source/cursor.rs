@@ -31,6 +31,9 @@
 //!   `7923.index.js:1` `agent-transcript/dist/paths.js`). That path links the
 //!   child (`nested_parent`), and its parent's `Task` post then ends it; the
 //!   committed delegation's child posts carry null, so its child ages out.
+//!   agent-office: a sub-session's own `stop` already walks it out; `TaskDrain`
+//!   stays for a lost `stop` whose parent's `Task` drained after the child was
+//!   linked.
 //! - `sessionEnd` FIRES on clean completion; `stop` is turn-end and did NOT fire
 //!   under `-p`. An abrupt exit rides the shim's `_pid` BEST-EFFORT: the walk
 //!   skips the `$SHELL -c` wrapper Cursor `eval`s hooks inside, but some hooks
@@ -199,11 +202,27 @@ pub(crate) fn decode_cursor_hook_payload(obj: &HookObject) -> Result<Vec<AgentEv
         // an unknown id registers blank (`shows_activity`).
         // agent-office: `stop` carries how the turn ended. `aborted` (Esc) and
         // `error` stopped short of a result: drawn done, they lined up in your
-        // office to be read with nothing in them.
+        // office to be read with nothing in them. A child can also arrive here
+        // with no tool post, and `transcript_path` is then the only parent
+        // name. That link has to precede the turn end, or the end lands on a
+        // session never tied to its parent. The end stays what `status` says;
+        // leaving the desk is the reducer's.
         "stop" if matches!(non_empty(obj, "status"), Some("aborted" | "error")) => {
-            Ok(vec![AgentEvent::aborted_turn_end(agent_id)])
+            Ok(stop_with_nested_parent(
+                obj,
+                agent_id,
+                key,
+                cwd,
+                AgentEvent::aborted_turn_end(agent_id),
+            ))
         }
-        "stop" => Ok(vec![AgentEvent::turn_end(agent_id)]),
+        "stop" => Ok(stop_with_nested_parent(
+            obj,
+            agent_id,
+            key,
+            cwd,
+            AgentEvent::turn_end(agent_id),
+        )),
         "sessionEnd" => Ok(vec![AgentEvent::SessionEnd {
             agent_id,
             as_child: false,
@@ -262,6 +281,30 @@ fn nested_parent(obj: &HookObject) -> Option<&str> {
     dir.parent()?.file_name()?.to_str()
 }
 
+/// agent-office: a nested `stop` names its parent before the turn end the
+/// caller already chose. No nested path means no `SessionStart`: the end
+/// goes out alone, so an abort is not rewritten into a normal end, and a
+/// root stop stays a turn end.
+fn stop_with_nested_parent(
+    obj: &HookObject,
+    agent_id: AgentId,
+    session_id: &str,
+    cwd: &str,
+    end: AgentEvent,
+) -> Vec<AgentEvent> {
+    nested_parent(obj)
+        .map(|parent| AgentEvent::SessionStart {
+            agent_id,
+            source: SOURCE_NAME.to_string(),
+            session_id: session_id.to_string(),
+            cwd: cwd.into(),
+            parent_id: Some(AgentId::from_parts(SOURCE_NAME, parent)),
+        })
+        .into_iter()
+        .chain([end])
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +319,11 @@ mod tests {
     fn decode(v: Value) -> AgentEvent {
         decode_all(v).pop().expect("at least one event")
     }
+
+    /// File name is not the session key: `nested_parent` reads the directory
+    /// above `subagents`, and the session id is the payload's `session_id`.
+    const NESTED_TRANSCRIPT: &str =
+        "/h/.cursor/projects/p/agent-transcripts/parent/subagents/not-the-key.jsonl";
 
     #[test]
     fn every_event_carries_the_model_and_it_can_change_mid_session() {
@@ -349,6 +397,160 @@ mod tests {
                     .any(|e| matches!(e, AgentEvent::SessionStart { .. })),
                 "{unnested}"
             );
+        }
+    }
+
+    /// agent-office: a child can finish without ever posting a tool, so
+    /// `stop` is the only hook that names its parent. The link has to come
+    /// out first, and what follows is still a normal turn end: naming the
+    /// parent does not dismiss the figure. The session id is the payload
+    /// key, not the transcript file's name.
+    #[test]
+    fn a_nested_stop_names_its_parent_before_the_same_turn_end() {
+        let evs = decode_all(json!({
+            "hook_event_name": "stop",
+            "session_id": "child",
+            "cwd": "/repo",
+            "transcript_path": NESTED_TRANSCRIPT,
+        }));
+        let child = AgentId::from_parts(SOURCE_NAME, "child");
+        let parent = AgentId::from_parts(SOURCE_NAME, "parent");
+        assert!(
+            matches!(
+                evs.as_slice(),
+                [
+                    AgentEvent::SessionStart {
+                        agent_id,
+                        source,
+                        session_id,
+                        cwd,
+                        parent_id: Some(p),
+                    },
+                    AgentEvent::TurnEnd {
+                        agent_id: end_id,
+                        turn: None,
+                        aborted: false,
+                        ..
+                    },
+                ] if *agent_id == child
+                    && *end_id == child
+                    && source.as_str() == SOURCE_NAME
+                    && session_id.as_str() == "child"
+                    && cwd.as_path() == std::path::Path::new("/repo")
+                    && *p == parent
+            ),
+            "{evs:?}"
+        );
+    }
+
+    /// agent-office: an abort or an error still has to name the parent, and
+    /// still has to read as a turn that stopped short. A normal turn end
+    /// would line that child up as finished work.
+    #[test]
+    fn an_aborted_or_errored_nested_stop_names_its_parent_and_stays_aborted() {
+        for status in ["aborted", "error"] {
+            let evs = decode_all(json!({
+                "hook_event_name": "stop",
+                "session_id": "child",
+                "cwd": "",
+                "workspace_roots": ["/repo"],
+                "status": status,
+                "transcript_path": NESTED_TRANSCRIPT,
+            }));
+            let child = AgentId::from_parts(SOURCE_NAME, "child");
+            let parent = AgentId::from_parts(SOURCE_NAME, "parent");
+            assert!(
+                matches!(
+                    evs.as_slice(),
+                    [
+                        AgentEvent::SessionStart {
+                            agent_id,
+                            source,
+                            session_id,
+                            cwd,
+                            parent_id: Some(p),
+                        },
+                        AgentEvent::TurnEnd {
+                            agent_id: end_id,
+                            turn: None,
+                            aborted: true,
+                            ..
+                        },
+                    ] if *agent_id == child
+                        && *end_id == child
+                        && source.as_str() == SOURCE_NAME
+                        && session_id.as_str() == "child"
+                        && cwd.as_path() == std::path::Path::new("/repo")
+                        && *p == parent
+                ),
+                "{status}: {evs:?}"
+            );
+        }
+    }
+
+    /// agent-office: a root session's `stop` is only its turn ending. An
+    /// empty `transcript_path`, or one that is not
+    /// `<parent>/subagents/<child>.jsonl`, must not invent a parent link,
+    /// and an abort on that path stays an abort.
+    #[test]
+    fn a_root_or_pathless_stop_stays_only_its_turn_end() {
+        let root = AgentId::from_parts(SOURCE_NAME, "root");
+        for path in [
+            json!("/h/.cursor/projects/p/agent-transcripts/child/child.jsonl"),
+            json!(null),
+            json!(""),
+        ] {
+            let evs = decode_all(json!({
+                "hook_event_name": "stop",
+                "session_id": "root",
+                "cwd": "/repo",
+                "transcript_path": path.clone(),
+            }));
+            assert!(
+                matches!(
+                    evs.as_slice(),
+                    [AgentEvent::TurnEnd {
+                        agent_id,
+                        turn: None,
+                        aborted: false,
+                        ..
+                    }] if *agent_id == root
+                ),
+                "{path}: {evs:?}"
+            );
+        }
+        let missing = decode_all(json!({
+            "hook_event_name": "stop", "session_id": "root", "cwd": "/repo",
+        }));
+        assert!(
+            matches!(
+                missing.as_slice(),
+                [AgentEvent::TurnEnd { agent_id, turn: None, aborted: false, .. }]
+                    if *agent_id == root
+            ),
+            "a missing transcript_path is a root stop: {missing:?}"
+        );
+        for status in ["aborted", "error"] {
+            for path in [
+                json!("/h/.cursor/projects/p/agent-transcripts/child/child.jsonl"),
+                json!(null),
+            ] {
+                let evs = decode_all(json!({
+                    "hook_event_name": "stop",
+                    "session_id": "root",
+                    "cwd": "/repo",
+                    "status": status,
+                    "transcript_path": path.clone(),
+                }));
+                assert!(
+                    matches!(
+                        evs.as_slice(),
+                        [AgentEvent::TurnEnd { agent_id, turn: None, aborted: true, .. }]
+                            if *agent_id == root
+                    ),
+                    "{status} {path} must stay an aborted turn end: {evs:?}"
+                );
+            }
         }
     }
 

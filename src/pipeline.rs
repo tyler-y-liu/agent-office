@@ -641,6 +641,72 @@ mod tests {
         assert_eq!(states[6], ActivityState::Idle);
     }
 
+    /// A nested transcript is a sub-session. Its `stop` walks that child out;
+    /// the parent, which has no such path, stays at its desk.
+    #[test]
+    fn a_nested_cursor_stop_walks_the_subsession_out_and_leaves_its_parent() {
+        use pixtuoid_core::source::decoder::{SOURCE_STAMP, decode_hook_payload};
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let parent_sid = "parent-sess";
+        let child_sid = "child-sess";
+        let parent = AgentId::from_parts(CURSOR_SOURCE, parent_sid);
+        let child = AgentId::from_parts(CURSOR_SOURCE, child_sid);
+        let transcript = format!(
+            "/h/.cursor/projects/p/agent-transcripts/{parent_sid}/subagents/{child_sid}.jsonl"
+        );
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let mut now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let feed = |r: &mut Reducer, scene: &mut SceneState, v: serde_json::Value, at| {
+            for ev in decode_hook_payload(v).expect("decodes") {
+                r.apply(scene, ev, at, Transport::Hook);
+            }
+        };
+        feed(
+            &mut r,
+            &mut scene,
+            json!({
+                "hook_event_name": "sessionStart",
+                "session_id": parent_sid,
+                "cwd": "",
+                "workspace_roots": ["/repo"],
+                SOURCE_STAMP: CURSOR_SOURCE,
+            }),
+            now,
+        );
+        now += Duration::from_secs(1);
+        for event in ["preToolUse", "postToolUse", "stop"] {
+            feed(
+                &mut r,
+                &mut scene,
+                json!({
+                    "hook_event_name": event,
+                    "session_id": child_sid,
+                    "cwd": "",
+                    "workspace_roots": ["/repo"],
+                    "tool_name": "Shell",
+                    "tool_use_id": "call-1",
+                    "tool_input": {"command": "cargo test"},
+                    "transcript_path": transcript,
+                    SOURCE_STAMP: CURSOR_SOURCE,
+                }),
+                now,
+            );
+            now += Duration::from_secs(1);
+        }
+        assert!(
+            scene.agents[&child].exiting_at.is_some(),
+            "the nested stop walks the child out"
+        );
+        assert!(
+            scene.agents.contains_key(&parent) && scene.agents[&parent].exiting_at.is_none(),
+            "the parent stays"
+        );
+    }
+
     /// A dsh figure sits at its desk for its whole turn: the plugin's
     /// `turn_start` opens it and `turn_end` closes it. Without the start the
     /// figure left its desk after every call.

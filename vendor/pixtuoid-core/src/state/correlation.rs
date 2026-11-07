@@ -106,7 +106,7 @@ pub(super) enum ChildEnd {
 }
 
 impl ChildEnd {
-    fn at(self) -> SystemTime {
+    pub(super) fn at(self) -> SystemTime {
         match self {
             Self::Reported(at) | Self::Inferred(at) => at,
         }

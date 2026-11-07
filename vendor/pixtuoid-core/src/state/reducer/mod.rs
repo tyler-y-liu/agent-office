@@ -818,6 +818,23 @@ impl Reducer {
         if !scene.agents.contains_key(&agent_id) {
             return;
         }
+        // agent-office: a Cursor sub-session's own turn end (done, aborted, or
+        // error) is that visit leaving. Idle would hold the desk until the
+        // stale sweep. `as_child` so `note_end` records the child end. A root
+        // has no parent and still only ends this turn.
+        // A child registers on its first tool and never opens a turn, so that
+        // tool's end already sat it Idle. `enter_turn` lifts only that sit
+        // into the working posture the walk-out keeps; a turn already open
+        // is left as it is.
+        if scene.agents.get(&agent_id).is_some_and(|slot| {
+            &*slot.source == crate::source::cursor::SOURCE_NAME && slot.parent_id.is_some()
+        }) {
+            if let Some(slot) = scene.agents.get_mut(&agent_id) {
+                fsm::enter_turn(slot, now);
+            }
+            self.apply_session_end(scene, agent_id, true, from, now);
+            return;
+        }
         let (applies, implied, turnless) = match self.corr.turns.end(agent_id, turn.as_ref(), now) {
             End::Applied { implied } => (true, implied, turn.is_none()),
             End::StartUnseen => (true, None, true),
@@ -884,7 +901,10 @@ impl Reducer {
             {
                 self.pending_b1_cascades.insert(agent_id, now);
             }
-            if resolved || ends_item {
+            // agent-office: already walking out. Settling with no open turn
+            // lands Idle, and the sidebar groups on that state alone for the
+            // rest of the grace. The posture the walk-out started with stays.
+            if (resolved || ends_item) && slot.exiting_at.is_none() {
                 fsm::settle(slot, settle_ctx, now);
             }
             slot.last_event_at = now;
@@ -1119,9 +1139,24 @@ impl Reducer {
                     AttemptKind::Start => {
                         from == Transport::Hook
                             && slot.parent_id.as_ref().is_some_and(parent_lives)
-                            && slot
-                                .exiting_at
-                                .is_some_and(|exit| !corr.child_ended_since(id, exit))
+                            && slot.exiting_at.is_some_and(|exit| {
+                                // agent-office: a Cursor child's own `stop` stamps
+                                // `child_end` and `exiting_at` with one `now`.
+                                // `child_ended_since` is a strict `>`, so that
+                                // stamp does not count and the `SessionStart` a
+                                // nested tool post prepends would sit them Idle
+                                // until the 30-minute sweep. Claude Code's next
+                                // `SubagentStart` inside the grace window still
+                                // has to revive, so the `>` stays for everyone else.
+                                let cursor_stop_owns_walkout = &*slot.source
+                                    == crate::source::cursor::SOURCE_NAME
+                                    && corr
+                                        .lifecycles
+                                        .get(&id)
+                                        .and_then(|life| life.child_end)
+                                        .is_some_and(|end| end.at() >= exit);
+                                !corr.child_ended_since(id, exit) && !cursor_stop_owns_walkout
+                            })
                     }
                     AttemptKind::Identity | AttemptKind::HookActivity => false,
                 };
@@ -1569,15 +1604,23 @@ impl Reducer {
                                 item: Some(ToolUse { tool_use_id: Some(t), .. }),
                             } if **t == **tuid
                         );
-                        if matches!(
-                            slot.state,
-                            ActivityState::Running {
-                                item: Some(ToolUse {
-                                    kind: ToolKind::Task,
-                                    ..
-                                })
-                            }
-                        ) && (set.is_empty() || shown_drained)
+                        // agent-office: this drain settles here, not through
+                        // `end_item`, so that arm's walk-out skip does not
+                        // apply. A Cursor child can still be showing this Task
+                        // when its own stop starts the walk-out; settling with
+                        // no open turn lands Idle, and the sidebar groups on
+                        // that state alone for the rest of the grace.
+                        if slot.exiting_at.is_none()
+                            && matches!(
+                                slot.state,
+                                ActivityState::Running {
+                                    item: Some(ToolUse {
+                                        kind: ToolKind::Task,
+                                        ..
+                                    })
+                                }
+                            )
+                            && (set.is_empty() || shown_drained)
                         {
                             fsm::settle(slot, self.settle_ctx(agent_id), now);
                         }

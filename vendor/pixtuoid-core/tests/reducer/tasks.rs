@@ -1962,7 +1962,8 @@ fn ending_one_of_two_parallel_tasks_does_not_restart_the_parents_delegating_cloc
 /// A claude-code background launch: the Agent call returns at launch
 /// (hooks.md: `async_launched`), its PostToolUse beside the child's
 /// SubagentStart in either order, so its drain says nothing about the child:
-/// still standing past the b1 grace, gone only on its own SubagentStop (#1701).
+/// still standing past the b1 grace and past the parent's own `Stop`, gone
+/// only on its own SubagentStop (#1701).
 #[test]
 fn a_claude_code_background_child_outlives_its_launch() {
     use pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW;
@@ -2021,12 +2022,528 @@ fn a_claude_code_background_child_outlives_its_launch() {
                 .is_some_and(|s| s.exiting_at.is_none()),
             "start_first={start_first}: the launch's drain walked the running child out"
         );
+        hook(&mut r, &mut scene, json!({"hook_event_name": "Stop"}), past);
+        assert!(
+            scene
+                .agents
+                .get(&child)
+                .is_some_and(|s| s.exiting_at.is_none()),
+            "start_first={start_first}: the parent's Stop walked out an async_launched child"
+        );
         hook(&mut r, &mut scene, stopped.clone(), past);
         assert!(
             scene.agents[&child].exiting_at.is_some(),
             "start_first={start_first}: its own SubagentStop ends it"
         );
     }
+}
+
+/// A finished Cursor sub-session has to walk out. Sitting Idle would hold
+/// its desk until [`STALE_IDLE_TIMEOUT`](pixtuoid_core::state::reducer::STALE_IDLE_TIMEOUT)
+/// (30 minutes). Its own `stop` — done, aborted, or error — is the visit
+/// ending; the parent stays.
+#[test]
+fn a_finished_cursor_subsession_walks_out_on_stop_instead_of_sitting_until_the_idle_sweep() {
+    use pixtuoid_core::source::cursor::SOURCE_NAME;
+    use pixtuoid_core::source::decoder::SOURCE_STAMP;
+    use pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW;
+
+    const PARENT: &str = "parent-sess";
+    const CHILD: &str = "child-sess";
+    let transcript =
+        format!("/h/.cursor/projects/p/agent-transcripts/{PARENT}/subagents/{CHILD}.jsonl");
+    let parent = AgentId::from_parts(SOURCE_NAME, PARENT);
+    let child = AgentId::from_parts(SOURCE_NAME, CHILD);
+    let feed = |r: &mut Reducer, scene: &mut SceneState, v: serde_json::Value, at| {
+        for ev in decode_hook_payload(v).expect("a cursor hook decodes") {
+            r.apply(scene, ev, at, Transport::Hook);
+        }
+    };
+    let tool = |event: &str, call: &str| {
+        json!({
+            "hook_event_name": event,
+            "session_id": CHILD,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            "tool_name": "Shell",
+            "tool_use_id": call,
+            "tool_input": {"command": "cargo test"},
+            "transcript_path": transcript,
+            SOURCE_STAMP: SOURCE_NAME,
+        })
+    };
+
+    for status in [None, Some("aborted"), Some("error")] {
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        feed(
+            &mut r,
+            &mut scene,
+            json!({
+                "hook_event_name": "sessionStart",
+                "session_id": PARENT,
+                "cwd": "",
+                "workspace_roots": ["/repo"],
+                SOURCE_STAMP: SOURCE_NAME,
+            }),
+            t0,
+        );
+        assert!(
+            scene.agents[&parent].parent_id.is_none(),
+            "the parent session is the root"
+        );
+
+        let working = t0 + Duration::from_secs(1);
+        feed(&mut r, &mut scene, tool("preToolUse", "call-1"), working);
+        let at_work = &scene.agents[&child];
+        assert!(
+            at_work.exiting_at.is_none(),
+            "{status:?}: the child is at the desk while the call runs"
+        );
+        assert!(
+            matches!(at_work.state, ActivityState::Running { .. }),
+            "{status:?}: a nested preToolUse is the child working, got {:?}",
+            at_work.state
+        );
+
+        let posted = working + Duration::from_secs(1);
+        feed(&mut r, &mut scene, tool("postToolUse", "call-1"), posted);
+        let posted_slot = &scene.agents[&child];
+        assert_eq!(
+            posted_slot.parent_id,
+            Some(parent),
+            "{status:?}: the nested transcript names the parent"
+        );
+        assert!(
+            posted_slot.exiting_at.is_none(),
+            "{status:?}: posting the call is not the child leaving"
+        );
+
+        let stopped = posted + Duration::from_secs(1);
+        let mut stop = json!({
+            "hook_event_name": "stop",
+            "session_id": CHILD,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            "transcript_path": transcript,
+            SOURCE_STAMP: SOURCE_NAME,
+        });
+        if let Some(status) = status {
+            stop["status"] = json!(status);
+        }
+        feed(&mut r, &mut scene, stop, stopped);
+
+        let slot = &scene.agents[&child];
+        assert_eq!(
+            slot.exiting_at,
+            Some(stopped),
+            "{status:?}: the child's own stop walks it out"
+        );
+        assert!(
+            !matches!(slot.state, ActivityState::Idle),
+            "{status:?}: stop must not sit the child Idle, got {:?}",
+            slot.state
+        );
+        assert!(
+            scene.agents[&parent].exiting_at.is_none(),
+            "{status:?}: the child's stop sent the parent away"
+        );
+
+        let still = stopped + EXIT_GRACE_WINDOW;
+        r.tick(&mut scene, still);
+        assert!(
+            scene.agents.contains_key(&child),
+            "{status:?}: the grace window itself has not reaped the child"
+        );
+        let gone = still + Duration::from_millis(1);
+        r.tick(&mut scene, gone);
+        assert!(
+            !scene.agents.contains_key(&child),
+            "{status:?}: past the exit grace the desk is free, without waiting out the idle sweep"
+        );
+        assert!(
+            scene.agents.contains_key(&parent) && scene.agents[&parent].exiting_at.is_none(),
+            "{status:?}: the parent is still in the office"
+        );
+    }
+}
+
+/// A Cursor child already walking out has to keep walking out. The next nested
+/// tool post, still inside the exit grace, opens with a `SessionStart`. Reviving
+/// on it would clear the walkout and sit the child Idle until the 30-minute
+/// sweep. A failed post is the same shape.
+#[test]
+fn an_exiting_cursor_subsession_is_not_pulled_back_to_idle_by_the_next_tool_end() {
+    use pixtuoid_core::source::cursor::SOURCE_NAME;
+    use pixtuoid_core::source::decoder::SOURCE_STAMP;
+    use pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW;
+
+    const PARENT: &str = "parent-sess";
+    const CHILD: &str = "child-sess";
+    let transcript =
+        format!("/h/.cursor/projects/p/agent-transcripts/{PARENT}/subagents/{CHILD}.jsonl");
+    let parent = AgentId::from_parts(SOURCE_NAME, PARENT);
+    let child = AgentId::from_parts(SOURCE_NAME, CHILD);
+    let feed = |r: &mut Reducer, scene: &mut SceneState, v: serde_json::Value, at| {
+        for ev in decode_hook_payload(v).expect("a cursor hook decodes") {
+            r.apply(scene, ev, at, Transport::Hook);
+        }
+    };
+    let tool = |event: &str, call: &str| {
+        json!({
+            "hook_event_name": event,
+            "session_id": CHILD,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            "tool_name": "Shell",
+            "tool_use_id": call,
+            "tool_input": {"command": "cargo test"},
+            "transcript_path": transcript,
+            SOURCE_STAMP: SOURCE_NAME,
+        })
+    };
+
+    for event in ["postToolUse", "postToolUseFailure"] {
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        feed(
+            &mut r,
+            &mut scene,
+            json!({
+                "hook_event_name": "sessionStart",
+                "session_id": PARENT,
+                "cwd": "",
+                "workspace_roots": ["/repo"],
+                SOURCE_STAMP: SOURCE_NAME,
+            }),
+            t0,
+        );
+        let working = t0 + Duration::from_secs(1);
+        feed(&mut r, &mut scene, tool("preToolUse", "call-1"), working);
+        let posted = working + Duration::from_secs(1);
+        feed(&mut r, &mut scene, tool("postToolUse", "call-1"), posted);
+
+        let stopped = posted + Duration::from_secs(1);
+        feed(
+            &mut r,
+            &mut scene,
+            json!({
+                "hook_event_name": "stop",
+                "session_id": CHILD,
+                "cwd": "",
+                "workspace_roots": ["/repo"],
+                "transcript_path": transcript,
+                SOURCE_STAMP: SOURCE_NAME,
+            }),
+            stopped,
+        );
+        let leaving = &scene.agents[&child];
+        assert_eq!(
+            leaving.exiting_at,
+            Some(stopped),
+            "{event}: the nested stop walks the child out"
+        );
+        assert!(
+            !matches!(leaving.state, ActivityState::Idle),
+            "{event}: stop must not sit the child Idle, got {:?}",
+            leaving.state
+        );
+
+        let late = stopped + EXIT_GRACE_WINDOW - Duration::from_millis(1);
+        feed(&mut r, &mut scene, tool(event, "call-2"), late);
+        let slot = &scene.agents[&child];
+        assert_eq!(
+            slot.exiting_at,
+            Some(stopped),
+            "{event}: a tool end inside the grace must not cancel the walkout"
+        );
+        assert!(
+            !matches!(slot.state, ActivityState::Idle),
+            "{event}: the tool end sat the leaving child Idle, got {:?}",
+            slot.state
+        );
+        assert!(
+            scene.agents.contains_key(&parent) && scene.agents[&parent].exiting_at.is_none(),
+            "{event}: the parent is still in the office"
+        );
+    }
+}
+
+/// A Cursor child already walking out can still be showing its own Task. That
+/// call's post, still inside the exit grace, drains the dispatch here instead
+/// of through `end_item`. Settling it would sit the child Idle, and the sidebar
+/// groups on that state alone, so the card would count as finished for the rest
+/// of the walk-out.
+#[test]
+fn an_exiting_cursor_child_is_not_sat_idle_by_the_end_of_its_own_still_shown_task() {
+    use pixtuoid_core::source::cursor::SOURCE_NAME;
+    use pixtuoid_core::source::decoder::SOURCE_STAMP;
+    use pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW;
+    use pixtuoid_core::state::ToolKind;
+
+    const PARENT: &str = "parent-sess";
+    const CHILD: &str = "child-sess";
+    const CALL: &str = "task-1";
+    let transcript =
+        format!("/h/.cursor/projects/p/agent-transcripts/{PARENT}/subagents/{CHILD}.jsonl");
+    let parent = AgentId::from_parts(SOURCE_NAME, PARENT);
+    let child = AgentId::from_parts(SOURCE_NAME, CHILD);
+    let feed = |r: &mut Reducer, scene: &mut SceneState, v: serde_json::Value, at| {
+        for ev in decode_hook_payload(v).expect("a cursor hook decodes") {
+            r.apply(scene, ev, at, Transport::Hook);
+        }
+    };
+    let showing_task = |state: &ActivityState| {
+        matches!(
+            state,
+            ActivityState::Running {
+                item: Some(ToolUse {
+                    kind: ToolKind::Task,
+                    tool_use_id: Some(id),
+                    ..
+                })
+            } if id.as_ref() == CALL
+        )
+    };
+
+    let mut scene = SceneState::uniform(8);
+    let mut r = Reducer::new();
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "hook_event_name": "sessionStart",
+            "session_id": PARENT,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        t0,
+    );
+
+    let working = t0 + Duration::from_secs(1);
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "hook_event_name": "preToolUse",
+            "session_id": CHILD,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            "tool_name": "Task",
+            "tool_use_id": CALL,
+            "tool_input": {"subagent_type": "generalPurpose", "prompt": "look"},
+            "transcript_path": transcript,
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        working,
+    );
+    let at_work = &scene.agents[&child];
+    assert!(
+        showing_task(&at_work.state),
+        "the child's own Task is what the desk shows, got {:?}",
+        at_work.state
+    );
+    assert!(
+        at_work.exiting_at.is_none(),
+        "the child is at the desk while its Task runs"
+    );
+
+    let stopped = working + Duration::from_secs(1);
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "hook_event_name": "stop",
+            "session_id": CHILD,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            "transcript_path": transcript,
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        stopped,
+    );
+    let leaving = &scene.agents[&child];
+    assert_eq!(
+        leaving.exiting_at,
+        Some(stopped),
+        "the nested stop walks the child out"
+    );
+    assert!(
+        showing_task(&leaving.state),
+        "stop must keep the Task the child is still showing, got {:?}",
+        leaving.state
+    );
+
+    let late = stopped + EXIT_GRACE_WINDOW - Duration::from_millis(1);
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "hook_event_name": "postToolUse",
+            "session_id": CHILD,
+            "cwd": "",
+            "workspace_roots": ["/repo"],
+            "tool_name": "Task",
+            "tool_use_id": CALL,
+            "tool_input": {"subagent_type": "generalPurpose", "prompt": "look"},
+            "transcript_path": transcript,
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        late,
+    );
+    let slot = &scene.agents[&child];
+    assert_eq!(
+        slot.exiting_at,
+        Some(stopped),
+        "the Task's own end inside the grace must not restart the walkout"
+    );
+    assert!(
+        !matches!(slot.state, ActivityState::Idle),
+        "the Task's own end sat the leaving child Idle, got {:?}",
+        slot.state
+    );
+    assert!(
+        scene.agents.contains_key(&parent) && scene.agents[&parent].exiting_at.is_none(),
+        "the parent is still in the office"
+    );
+}
+
+/// A dsh child's `turn_end` only finishes the turn. Walking out on it would
+/// dismiss a session that keeps going; `session_end` carrying `parentSession`
+/// is the visit leaving.
+#[test]
+fn a_dsh_child_idles_on_turn_end_and_walks_out_only_on_session_end() {
+    use pixtuoid_core::source::decoder::SOURCE_STAMP;
+    use pixtuoid_core::source::dsh::SOURCE_NAME;
+    use pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW;
+
+    const PARENT: &str = "01b00000-0000-7000-8000-0000000000aa";
+    const CHILD: &str = "01b00000-0000-7000-8000-0000000000bb";
+    let parent = AgentId::from_parts(SOURCE_NAME, PARENT);
+    let child = AgentId::from_parts(SOURCE_NAME, CHILD);
+    let feed = |r: &mut Reducer, scene: &mut SceneState, v: serde_json::Value, at| {
+        for ev in decode_hook_payload(v).expect("a dsh payload decodes") {
+            r.apply(scene, ev, at, Transport::Hook);
+        }
+    };
+    let mut scene = SceneState::uniform(8);
+    let mut r = Reducer::new();
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let at = |secs| t0 + Duration::from_secs(secs);
+
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "type": "session_start",
+            "sessionId": PARENT,
+            "cwd": "/repo",
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        at(0),
+    );
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "type": "session_start",
+            "sessionId": CHILD,
+            "cwd": "/repo",
+            "parentSession": PARENT,
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        at(1),
+    );
+    for (secs, ty) in [(2, "turn_start"), (3, "tool_call"), (4, "tool_result")] {
+        feed(
+            &mut r,
+            &mut scene,
+            json!({
+                "type": ty,
+                "sessionId": CHILD,
+                "cwd": "/repo",
+                "parentSession": PARENT,
+                "callId": "c1",
+                "toolName": "bash",
+                SOURCE_STAMP: SOURCE_NAME,
+            }),
+            at(secs),
+        );
+    }
+    assert!(
+        scene.agents[&child].exiting_at.is_none(),
+        "the child is at the desk while the call runs"
+    );
+    assert!(
+        matches!(scene.agents[&child].state, ActivityState::Running { .. }),
+        "the call is the child working, got {:?}",
+        scene.agents[&child].state
+    );
+
+    let ended = at(5);
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "type": "turn_end",
+            "sessionId": CHILD,
+            "cwd": "/repo",
+            "parentSession": PARENT,
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        ended,
+    );
+    assert_eq!(
+        scene.agents[&child].state,
+        ActivityState::Idle,
+        "a dsh child's turn end sits it idle"
+    );
+    assert!(
+        scene.agents[&child].exiting_at.is_none(),
+        "a dsh turn end must not walk the child out"
+    );
+    r.tick(
+        &mut scene,
+        ended + EXIT_GRACE_WINDOW + Duration::from_millis(1),
+    );
+    assert!(
+        scene.agents.contains_key(&child) && scene.agents[&child].exiting_at.is_none(),
+        "the idle child is still at its desk after the exit grace"
+    );
+
+    let left = ended + EXIT_GRACE_WINDOW + Duration::from_secs(2);
+    feed(
+        &mut r,
+        &mut scene,
+        json!({
+            "type": "session_end",
+            "sessionId": CHILD,
+            "parentSession": PARENT,
+            SOURCE_STAMP: SOURCE_NAME,
+        }),
+        left,
+    );
+    assert!(
+        scene.agents[&child].exiting_at.is_some(),
+        "session_end with parentSession walks the child out"
+    );
+    assert!(
+        scene.agents[&parent].exiting_at.is_none(),
+        "the child's session end sent the parent away"
+    );
+    r.tick(
+        &mut scene,
+        left + EXIT_GRACE_WINDOW + Duration::from_millis(1),
+    );
+    assert!(!scene.agents.contains_key(&child));
+    assert!(
+        scene.agents.contains_key(&parent) && scene.agents[&parent].exiting_at.is_none(),
+        "the parent is still in the office"
+    );
 }
 
 /// A source whose subagents' hooks name the subagent drops nothing: with a
