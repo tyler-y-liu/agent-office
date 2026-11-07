@@ -231,13 +231,15 @@ const PANTRY_MIN_H: u16 = 26;
 /// agent-office: a pantry counter's routing clearance each side.
 const COUNTER_SIDE_CLEARANCE: u16 = 2;
 
-/// agent-office: the south row's widths. The waiting area seats a short line;
-/// your office its desk, guest chair and sofa; the pantry its counter.
-const WAITING_W: u16 = 30;
+/// agent-office: the south row's widths. Your office seats its line on a
+/// guest chair and a sofa pair; the pantry its counter.
 const OFFICE_W: u16 = 44;
 const PANTRY_W: u16 = 44;
 /// The narrowest pantry, its compact counter and a lane each side.
 const PANTRY_MIN_W: u16 = 28;
+/// agent-office: each meeting room's narrowest width before a third opens,
+/// so three still read as rooms rather than as cupboards.
+const THIRD_MEETING_MIN_W: u16 = 40;
 
 /// agent-office: the south row, west to east, each room's interior; the
 /// walls between them stand in the [`WALL_THICK_V`] columns east of each.
@@ -245,15 +247,15 @@ const PANTRY_MIN_W: u16 = 28;
 struct SouthRow {
     meeting: Vec<Bounds>,
     pantry: Option<Bounds>,
-    waiting: Option<Bounds>,
     office: Option<Bounds>,
 }
 
 impl SouthRow {
     /// The row `x0..x0 + w` wide, from `y` down `h` rows. A narrow row gives
-    /// up, in order: the second meeting room (merged into one), pantry width
-    /// down to its narrowest, the meeting room, the pantry, your office. The
-    /// waiting area always stays.
+    /// up, in order: the third meeting room, the second (merged into one),
+    /// pantry width down to its narrowest, the meeting room, the pantry. Your
+    /// office always stays, easternmost: everything that needs you queues
+    /// there.
     fn of(x0: u16, w: u16, y: u16, h: u16) -> Self {
         let wall = WALL_THICK_V;
         let room = |x: u16, width: u16| Bounds {
@@ -266,16 +268,19 @@ impl SouthRow {
         let mut x = x0;
         let mut left = w;
         if h < WALLED_ROOM_MIN_H {
-            out.waiting = Some(room(x, left));
             return out;
         }
-        let office = left >= WAITING_W + wall + OFFICE_W;
-        let fixed = WAITING_W + if office { wall + OFFICE_W } else { 0 };
-        let rest = left.saturating_sub(fixed);
+        if left < OFFICE_W + wall + PANTRY_MIN_W + wall {
+            out.office = Some(room(x, left));
+            return out;
+        }
+        let rest = left - OFFICE_W;
         // What the pantry and meeting rooms share, each closed by a wall.
         let meeting_min = MEETING_FURNITURE_MIN_W;
         let (meetings, mut pantry_w) = if h < PANTRY_MIN_H {
             (usize::from(rest >= meeting_min + wall) as u16, 0)
+        } else if rest >= 3 * (THIRD_MEETING_MIN_W + wall) + PANTRY_W + wall {
+            (3, PANTRY_W)
         } else if rest >= 2 * (meeting_min + wall) + PANTRY_W + wall {
             (2, PANTRY_W)
         } else if rest >= meeting_min + wall + PANTRY_W + wall {
@@ -293,9 +298,8 @@ impl SouthRow {
             _ => rest - pantry_w - wall,
         };
         // A wide row shares its slack: past a fifth of the row each, the
-        // meeting rooms give the rest to the pantry, the waiting area and your
-        // office, up to their own shares.
-        let mut office_w = OFFICE_W;
+        // meeting rooms give the rest to the pantry and your office, up to
+        // their own shares.
         if meetings > 0 {
             let keep = meetings * (pct(w, 20).max(meeting_min) + wall);
             let mut spare = meeting_total.saturating_sub(keep);
@@ -305,21 +309,15 @@ impl SouthRow {
                 } else {
                     0
                 },
-                pct(w, 12).saturating_sub(WAITING_W),
-                if office {
-                    pct(w, 16).saturating_sub(OFFICE_W)
-                } else {
-                    0
-                },
+                pct(w, 16).saturating_sub(OFFICE_W),
             ];
-            let mut grow = [0u16; 3];
+            let mut grow = [0u16; 2];
             for (g, want) in grow.iter_mut().zip(wants) {
                 *g = want.min(spare);
                 spare -= *g;
             }
             meeting_total -= grow.iter().sum::<u16>();
             pantry_w += grow[0];
-            office_w += grow[2];
         }
         for i in 0..meetings {
             let share = meeting_total / meetings;
@@ -337,16 +335,7 @@ impl SouthRow {
             x += pantry_w + wall;
             left -= pantry_w + wall;
         }
-        let waiting_w = if office {
-            left.saturating_sub(wall + office_w)
-        } else {
-            left
-        };
-        out.waiting = Some(room(x, waiting_w));
-        if office {
-            x += waiting_w + wall;
-            out.office = Some(room(x, office_w));
-        }
+        out.office = Some(room(x, left));
         out
     }
 }
@@ -355,9 +344,9 @@ impl FloorPlan {
     /// agent-office: the zones a `buf_w`×`buf_h` floor divides into. The
     /// rooftop at the west end, out a door in the office's west wall; one row
     /// of benches under the north windows; the corridor across the middle;
-    /// and the south row west to east: meeting room A, meeting room B, the
-    /// pantry, the waiting area and your office. `floor_seed` only varies the
-    /// decor now; every floor has the same plan.
+    /// and the south row west to east: meeting room A, meeting room B (and C
+    /// when wide enough), the pantry and your office. `floor_seed` only
+    /// varies the decor now; every floor has the same plan.
     fn new(buf_w: u16, buf_h: u16, _floor_seed: u64) -> Self {
         let top_margin = top_margin(buf_h);
         let usable_h = buf_h - top_margin;
@@ -428,14 +417,13 @@ impl FloorPlan {
 
         // A room too small for its trio still occupies its slot with `trio: None`, so
         // bounds and furniture can't mis-join.
-        // agent-office: the waiting area and your office seat their sitters
-        // as a meeting room does, on a sofa pair and the chairs at a table's
-        // ends, so they follow the meeting rooms in the Vec.
+        // agent-office: your office seats its line as a meeting room does,
+        // on a sofa pair and the chairs at a table's ends, so it follows the
+        // meeting rooms in the Vec.
         let mut meeting_rooms: Vec<MeetingRoom> = south
             .meeting
             .iter()
             .map(|&mr| (mr, super::RoomStyle::Office))
-            .chain(south.waiting.map(|w| (w, super::RoomStyle::Waiting)))
             .chain(south.office.map(|o| (o, super::RoomStyle::Boss)))
             .map(|(mr, style)| {
                 // South of the north wall's rows and a lane under them, so the

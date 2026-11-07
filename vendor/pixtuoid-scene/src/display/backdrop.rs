@@ -62,8 +62,6 @@ pub(crate) enum Floor {
     Carpet,
     /// The corridor's: terrazzo, chips set in cement.
     Terrazzo,
-    /// The waiting area's: cream marble slabs, veined.
-    Marble,
     /// Your office's: rosewood in herringbone.
     Herringbone,
 }
@@ -111,12 +109,11 @@ impl Covering {
 }
 
 /// agent-office: the floors laid under each zone: the benches' carpet, the
-/// pantry's mosaic, the waiting area's marble and your office's herringbone.
+/// pantry's mosaic and your office's herringbone.
 /// The corridor's terrazzo is its runner's.
 fn zone_floors(layout: &SceneLayout) -> impl Iterator<Item = (Bounds, Covering)> + '_ {
     use crate::layout::RoomStyle;
     let rooms = layout.meeting_rooms.iter().filter_map(|r| match r.style {
-        RoomStyle::Waiting => Some((r.bounds, Covering::Floor(Floor::Marble))),
         RoomStyle::Boss => Some((r.bounds, Covering::Floor(Floor::Herringbone))),
         RoomStyle::Office | RoomStyle::Rooftop => None,
     });
@@ -194,10 +191,6 @@ mod tests {
                 .expect("the room")
                 .bounds
         };
-        assert_eq!(
-            floor_at(room(RoomStyle::Waiting)),
-            Some(Covering::Floor(Floor::Marble))
-        );
         assert_eq!(
             floor_at(room(RoomStyle::Boss)),
             Some(Covering::Floor(Floor::Herringbone))

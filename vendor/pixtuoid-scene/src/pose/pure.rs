@@ -41,11 +41,10 @@ pub(crate) const IDLE_LEAVE_DESK_MS: u64 = 3_000;
 /// it back to the same seat instead of across the floor to a new one.
 pub(crate) const LOUNGE_CYCLE: u64 = 0;
 
-/// agent-office: how long an idle agent hangs around the pantry before it gives
-/// up waiting for a next turn and heads out to the rooftop. A just-finished
-/// session in the pantry reads as "done, have a look"; one on the rooftop as
-/// "nothing doing here".
-pub const IDLE_ROOFTOP_MS: u64 = 15 * 60 * 1000;
+/// agent-office: how long an idle agent rests in the pantry before it gives
+/// up waiting for a next turn and heads up to the rooftop. One in the pantry
+/// reads as "done, resting"; one on the rooftop as "nothing doing here".
+pub const IDLE_ROOFTOP_MS: u64 = 30 * 60 * 1000;
 
 /// agent-office: which part of an idle stretch an agent is in, picking the
 /// kind of lounge it heads for.
@@ -56,6 +55,10 @@ pub(crate) enum IdleStage {
     Pantry,
     /// Idle for a while: the rooftop and the other sofas.
     Rooftop,
+    /// agent-office: in the line in your office, not resting anywhere.
+    /// [`at`](Self::at) never gives it, so one let out of the line finds its
+    /// stage changed and walks on from its seat to rest.
+    Line,
 }
 
 impl IdleStage {
@@ -498,13 +501,14 @@ pub(crate) fn resolve_wander_target(
     // where it lands, and standing mid-aisle for minutes reads as lost. The
     // stage's own lounges first; a floor without them (a narrow window drops
     // the rooftop) falls back to any lounge, then any free spot. The meeting
-    // rooms are kept for teams (`crate::team`), the waiting area and your
-    // office for those waiting on you, until nothing else is left.
+    // rooms are kept for teams (`crate::team`) until nothing else is left;
+    // your office for those that need you, always.
     let free = |fits: &dyn Fn(WaypointKind) -> bool, rooms: bool| {
         (0..n).map(|step| (first + step) % n).find(|i| {
             !claimed.holds(*i)
                 && fits(layout.waypoints[*i].kind)
                 && (rooms || !crate::team::is_reserved_seat(layout, *i))
+                && !crate::team::in_your_office(layout, *i)
         })
     };
     let Some(wp_idx) = free(&|k| stage.hosts(k), false)

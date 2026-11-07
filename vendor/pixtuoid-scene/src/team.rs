@@ -54,6 +54,12 @@ pub(crate) fn is_reserved_seat(layout: &SceneLayout, wp_idx: usize) -> bool {
     room_style(layout, wp_idx).is_some_and(|s| s != RoomStyle::Rooftop)
 }
 
+/// agent-office: whether waypoint `wp_idx` is in your office, where only
+/// those that need you sit, so one there always means "needs you".
+pub(crate) fn in_your_office(layout: &SceneLayout, wp_idx: usize) -> bool {
+    room_style(layout, wp_idx) == Some(RoomStyle::Boss)
+}
+
 fn room_style(layout: &SceneLayout, wp_idx: usize) -> Option<RoomStyle> {
     layout.waypoints[wp_idx]
         .room_id

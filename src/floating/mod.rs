@@ -814,7 +814,14 @@ impl Win {
             if let Some(first) = frame.first_waiting {
                 // Its halo breathes smoother than the beat steps.
                 self.quick |= tags.iter().any(|t| t.agent == first);
-                paint_first_waiting(&mut canvas, &tags, first, stage, fit.scale().get());
+                // A result to read sits there in the panel's done colour, so
+                // the halo says what it needs as the card does.
+                let ink = if frame.waiting.contains(&first) {
+                    crate::panel::WAIT
+                } else {
+                    crate::panel::DONE
+                };
+                paint_first_waiting(&mut canvas, &tags, first, ink, stage, fit.scale().get());
             }
             if let Some(selected) = self.core.ui.selected {
                 paint_selected(&mut canvas, &tags, selected, fit.scale().get(), sf);
@@ -1480,8 +1487,7 @@ impl Win {
     }
 
     /// What sets the south rooms apart: the meeting rooms' whiteboards with
-    /// their subagents' tasks, the waiting area's ticket machine counting
-    /// those waiting on you, your office's window on the harbour.
+    /// their subagents' tasks, your office's window on the harbour.
     fn paint_rooms(
         &mut self,
         canvas: &mut Canvas,
@@ -1504,22 +1510,6 @@ impl Win {
                         room,
                         (heading.as_deref(), &lines),
                     );
-                }
-                RoomStyle::Waiting => {
-                    // The sessions standing in line: subagents wait with
-                    // their parent, not in the queue.
-                    let queued = frame
-                        .waiting
-                        .iter()
-                        .filter(|id| {
-                            frame
-                                .scene
-                                .agents
-                                .get(id)
-                                .is_some_and(|s| s.parent_id.is_none())
-                        })
-                        .count();
-                    rooms::ticket_machine(canvas, room, queued, stage.ms);
                 }
                 RoomStyle::Boss => {
                     let door = signs
@@ -2305,8 +2295,8 @@ fn door_sign(text: &str) -> Option<&'static str> {
     Some(match text {
         "MTG A" => t("会议室 A", "Meeting A"),
         "MTG B" => t("会议室 B", "Meeting B"),
+        "MTG C" => t("会议室 C", "Meeting C"),
         "PANTRY" => t("茶水间", "Pantry"),
-        "WAIT" => t("等候区", "Waiting"),
         "OFFICE" => office_sign(),
         "ROOF" => t("天台", "Rooftop"),
         _ => return None,
@@ -2323,25 +2313,21 @@ pub(crate) fn office_sign() -> &'static str {
 fn zone_about(text: &str) -> Option<&'static str> {
     use crate::i18n::t;
     Some(match text {
-        "MTG A" | "MTG B" => t(
+        "MTG A" | "MTG B" | "MTG C" => t(
             "子 agent 跑满 15 秒的会话，和它的子 agent 一起在这儿开会。",
             "A session whose subagents have run for 15 seconds meets here with them.",
         ),
         "PANTRY" => t(
-            "刚做完、你还没看的会话在这儿等你看结果。双击打开看过，或者做完满 15 分钟，就上天台。",
-            "Sessions that just finished and you have not read wait here for you. Once you open one with a double-click, or 15 minutes after it finished, it goes up to the rooftop.",
-        ),
-        "WAIT" => t(
-            "等你批准超过 20 秒，或者做完了在问你问题的会话，在这儿排队：等你批准的排前面，同类按先后。排第一个的坐你办公室的访客椅。你处理完它就回工位。",
-            "Sessions waiting over 20 seconds for your approval, or finished and asking you a question, queue here: approvals first, then by arrival. The first in line sits in your office's guest chair. Once you deal with one it goes back to its desk.",
+            "歇着的会话：你看过的，或者做完 15 分钟还没看的。闲满 30 分钟上天台，窗口太窄没有天台就去窗边沙发。给它发新消息它就回工位。",
+            "Sessions resting: ones you have read, or finished over 15 minutes ago unread. After 30 minutes idle they go up to the rooftop, or to the lounge sofa by the windows when there is none. Send one a new message and it goes back to its desk.",
         ),
         "OFFICE" => t(
-            "访客椅上坐的是该先处理的会话：等你批准的优先，其次是在问你问题的，同类等得久的先。有人等你时，点这块门牌或按 n 直接打开它。",
-            "The guest chair holds the session to deal with first: approvals before questions, the longest waiting first. While someone waits, click this sign or press n to open it.",
+            "需要你处理的会话都在这儿排队：等你批准超过 20 秒的最先，其次是问你问题的，然后是做完还没看的，同类先来先排。排第一的坐访客椅，点这块门牌或按 n 打开它；其余坐沙发，坐满了在门外走廊排队。处理完或看过，它就离开。",
+            "Everything that needs you queues here: approvals waiting over 20 seconds first, then questions, then finished results you have not read, each in the order they came. The first sits in the guest chair; click this sign or press n to open it. The rest wait on the sofas, then in the corridor outside. Once dealt with or read, it leaves.",
         ),
         "ROOF" => t(
-            "闲着、不用你管的会话：做完超过 15 分钟，或者你已经打开看过。你给它发新消息它就回工位。",
-            "Idle sessions that need nothing from you: finished over 15 minutes ago, or already opened. Send one a new message and it goes back to its desk.",
+            "闲置超过 30 分钟的会话。给它发新消息它就回工位。午饭和台风时天台关闭，大家都在茶水间。",
+            "Sessions idle over 30 minutes. Send one a new message and it goes back to its desk. At lunch or in a typhoon the rooftop closes and they are all in the pantry.",
         ),
         _ => return None,
     })
@@ -2779,21 +2765,22 @@ fn tint(canvas: &mut Canvas, x: i64, y: i64, ink: u32, alpha: f64) {
 }
 
 /// Mark `first`, the session the panel heads its waiting line with, where
-/// it stands: a halo in the panel's waiting colour breathing round its figure,
-/// so the one to answer first is found in the office as fast as on the
-/// panel. Its "!" or "?" is the head mark every waiter wears: a second one
+/// it stands: a halo in `ink`, the panel's colour for what it needs,
+/// breathing round its figure, so the one to answer first is found in the
+/// office as fast as on the panel. Its "!" or "?" is the head mark every waiter wears: a second one
 /// floating over its tags sat far off its head and said the same.
 fn paint_first_waiting(
     canvas: &mut Canvas,
     tags: &[Tag],
     first: AgentId,
+    ink: Color,
     stage: lively::Stage,
     scale: u16,
 ) {
     let Some(t) = tags.iter().find(|t| t.agent == first) else {
         return;
     };
-    let ink = color_u32(crate::panel::WAIT, STUCK_RED);
+    let ink = color_u32(ink, STUCK_RED);
     let u = stage.u;
     let (cx, cy, half_w, half_h) = figure_box(t, scale);
     // A band a few art pixels wide, densest at its inner edge, that swells
@@ -3578,8 +3565,8 @@ mod tests {
         for (ascii, zh) in [
             ("MTG A", "会议室 A"),
             ("MTG B", "会议室 B"),
+            ("MTG C", "会议室 C"),
             ("PANTRY", "茶水间"),
-            ("WAIT", "等候区"),
             ("OFFICE", "你的办公室"),
             ("ROOF", "天台"),
         ] {
@@ -3587,7 +3574,7 @@ mod tests {
         }
         assert_eq!(door_sign("LOBBY"), None);
         let en = crate::i18n::with(crate::i18n::Lang::En, || {
-            ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"].map(door_sign)
+            ["MTG A", "MTG B", "MTG C", "PANTRY", "OFFICE", "ROOF"].map(door_sign)
         });
         // The office sign is found by its words: a click on it opens the
         // head of the line, so it must match in either language.
@@ -3603,7 +3590,7 @@ mod tests {
     /// with the README beside it.
     #[test]
     fn every_door_sign_says_what_its_zone_is_for() {
-        for ascii in ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"] {
+        for ascii in ["MTG A", "MTG B", "MTG C", "PANTRY", "OFFICE", "ROOF"] {
             assert!(zone_about(ascii).is_some_and(|s| !s.is_empty()), "{ascii}");
             let en = crate::i18n::with(crate::i18n::Lang::En, || zone_about(ascii));
             assert!(en.is_some_and(|s| s.is_ascii()), "{ascii}: {en:?}");
@@ -3619,7 +3606,7 @@ mod tests {
     fn an_explanation_wraps_within_its_width_and_keeps_every_character() {
         use crate::i18n::{Lang, with};
         for lang in [Lang::Zh, Lang::En] {
-            let s = with(lang, || zone_about("WAIT")).expect("signed");
+            let s = with(lang, || zone_about("OFFICE")).expect("signed");
             for max in [3, 10, 26, 36] {
                 let lines = wrap_cells(s, max);
                 assert!(

@@ -1776,7 +1776,9 @@ fn an_agent_lifted_as_it_comes_back_from_an_exit_never_resumes_the_walk_out() {
     let back = hand.now;
     let slot = hand.slot();
     slot.exiting_at = None;
-    slot.state_started_at = back;
+    // agent-office: back read, as the host draws it, so it rests rather than
+    // lines up in your office with its result.
+    slot.state_started_at = back - Duration::from_millis(crate::waiting::DONE_WAITS_MS);
     hand.lift();
     // Past the walk out's end, so a replay of it re-enters from the door.
     let grace = pixtuoid_core::state::reducer::EXIT_GRACE_WINDOW.as_millis() as u64;
@@ -1883,7 +1885,9 @@ fn an_agent_back_from_an_exit_in_hand_walks_in_from_where_it_is() {
     let back = hand.now;
     let slot = hand.slot();
     slot.exiting_at = None;
-    slot.state_started_at = back;
+    // agent-office: back read, as the host draws it, so it rests rather than
+    // lines up in your office with its result.
+    slot.state_started_at = back - Duration::from_millis(crate::waiting::DONE_WAITS_MS);
     for _ in 0..30 {
         hand.paint();
     }

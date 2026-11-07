@@ -1042,7 +1042,7 @@ fn floor_hash(x: u16, y: u16) -> u32 {
 
 /// agent-office: `floor` laid over `at` on the art grid. At 1x only its
 /// ground colour; denser, its pattern: carpet tiles laid in alternating
-/// pile, terrazzo's chips, marble's slabs and veins, herringbone's planks.
+/// pile, terrazzo's chips, herringbone's planks.
 fn paint_floor(
     at: crate::layout::Bounds,
     floor: crate::display::Floor,
@@ -1066,7 +1066,6 @@ fn paint_floor(
     let ground = match floor {
         Floor::Carpet => rgb(0x56, 0x5e, 0x6b),
         Floor::Terrazzo => rgb(0xc4, 0xbc, 0xae),
-        Floor::Marble => rgb(0xe6, 0xe1, 0xd6),
         Floor::Herringbone => rgb(0x6e, 0x3c, 0x2b),
     };
     pen.fill(buf, rect(x0, y0, w, h), ground);
@@ -1100,27 +1099,6 @@ fn paint_floor(
                         4 => rgb(0x93, 0xa3, 0x96),
                         5..=8 => rgb(0xb8, 0xb0, 0xa2),
                         _ => continue,
-                    }
-                }
-                Floor::Marble => {
-                    // Slabs sixteen cells square, each veined on its own
-                    // slant, with a fine seam between.
-                    let slab = 16 * d;
-                    let (sx, sy) = (dx / slab, dy / slab);
-                    let tilt = floor_hash(sx, sy);
-                    if dx % slab == 0 || dy % slab == 0 {
-                        rgb(0xcb, 0xc4, 0xb7)
-                    } else if (u32::from(dx) * (1 + tilt % 3)
-                        + u32::from(dy) * (2 + tilt % 2)
-                        + tilt)
-                        % (11 * u32::from(d))
-                        == 0
-                    {
-                        rgb(0xbd, 0xb6, 0xab)
-                    } else if (sx + sy) % 2 == 1 {
-                        rgb(0xec, 0xe8, 0xdf)
-                    } else {
-                        continue;
                     }
                 }
                 Floor::Herringbone => {
@@ -4776,9 +4754,9 @@ mod tests {
         // agent-office: 196x144 for the vending machine, whose aisle the
         // rooftop takes at 240; 240x144 for the rooftop's own pieces.
         let pack = test_office();
-        // agent-office: 148x120 for the compact counter of a pantry the south
+        // agent-office: 116x120 for the compact counter of a pantry the south
         // row squeezed.
-        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60), (148, 120)] {
+        for (w, h) in [(240u16, 144u16), (196, 144), (100, 60), (116, 120)] {
             let stepped = FloorSession::new(std::sync::Arc::new(pack.clone()))
                 .step(
                     crate::floor::FloorInputs {

@@ -783,7 +783,8 @@ fn corridor_appliance_art_never_lands_on_a_workstation() {
 
 /// The pantry's entry mat lies inside the pantry's columns: a mat past them
 /// lies under the room's wall. The pantry is narrowest on the narrowest
-/// floors, so one [`CENSUS_GRID_STEP`] of widths from the floor, at every
+/// floors that have one (agent-office: your office keeps the floor's first
+/// columns), so one [`CENSUS_GRID_STEP`] of widths from there, at every
 /// height.
 #[test]
 fn the_pantry_mat_keeps_to_the_pantrys_columns() {
@@ -794,7 +795,11 @@ fn the_pantry_mat_keeps_to_the_pantrys_columns() {
         .map(|&(_, h)| h)
         .max()
         .unwrap_or_default();
-    let narrowest = super::super::compute::MIN_LAYOUT_W;
+    let narrowest = (super::super::compute::MIN_LAYOUT_W..)
+        .find(|&w| {
+            SceneLayout::compute_with_seed(w, tallest, None, 0).is_some_and(|l| l.pantry.is_some())
+        })
+        .expect("a floor wide enough for a pantry");
     let narrow = (narrowest..narrowest + CENSUS_GRID_STEP as u16).flat_map(|w| {
         (super::super::compute::MIN_LAYOUT_H..=tallest).flat_map(move |h| {
             CENSUS_SEEDS.map(move |seed| {

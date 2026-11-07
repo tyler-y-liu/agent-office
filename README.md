@@ -11,7 +11,7 @@ A pixel office on Victoria Harbour for your Claude Code sessions. Every session 
 With several agent sessions running at once, it's hard to keep track of which one finished, which one is waiting for you to click "Allow", and which one has been going in circles for ten minutes. agent-office puts them all in one office:
 
 - **One-line summaries**: reads each session's latest prompt, todos and recent actions, and summarizes them in one short line through an OpenAI-compatible API you configure. When a turn ends it summarizes the result too: what got done, where it got stuck, or what it is asking you.
-- **Seats by state**: working sessions sit at their desks, finished ones go to the pantry, sessions waiting for approval ("!" over the head) or asking you a question ("?") queue in the waiting area, and stuck ones stay at their desk in a red ring with a "⚠" by their name tag. The side panel groups them as waiting → stuck → done, unread → working → idle.
+- **Seats by state**: working sessions sit at their desks; sessions waiting for approval ("!" over the head), asking you a question ("?") or finished with a result you have not read queue in your office; ones you have read rest in the pantry; stuck ones stay at their desk in a red ring with a "⚠" by their name tag. The side panel groups them as waiting → stuck → done, unread → working → idle.
 - **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command is running; a Claude Code session waiting on its own subagent isn't timed), marks a session as possibly stuck.
 - **Notifications**: when the window is in the background and a session starts waiting for you, you get a system notification. The Dock badge always shows how many are waiting.
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
@@ -65,17 +65,17 @@ Setup applies to sessions started afterwards. `agent-office disconnect [codex|cu
 
 ### The office
 
-A row of four-person desks runs under the north windows, with a corridor in the middle. Along the south side, west to east: meeting room A, meeting room B, the pantry, the waiting area, and your office. A wide window adds a rooftop terrace at the west end. Click a door sign to see what that area is for.
+A row of four-person desks runs under the north windows, with a corridor in the middle. Along the south side, west to east: meeting room A, meeting room B (and C when the window is wide enough), the pantry, and your office. A wide window adds a rooftop terrace at the west end. Click a door sign to see what that area is for.
 
 | Where | Who |
 |---|---|
 | Desks | Working sessions. Sessions from the same repo share a desk row, with matching colours on their name tags and panel avatars |
 | Meeting rooms | A session whose subagent has run for 15 seconds goes there with it |
-| Waiting area | Waiting for approval for over 20 seconds, or finished and asking you a question. Approval waits go first; the first in line takes the visitor chair in your office |
-| Pantry | Finished, waiting for you to look |
-| Rooftop | You've opened it since it finished, or it finished over 15 minutes ago |
+| Your office | Everything that needs you: approval waits over 20 seconds first, then questions to you, then finished results you have not read, each in the order they came. The first in line sits in the visitor chair and is the one `n` opens; the rest sit on the sofas, then stand in the corridor outside |
+| Pantry | Read, or finished over 15 minutes ago unread: resting here |
+| Rooftop | Idle over 30 minutes |
 
-The rooftop appears only when the office is at least 200 columns wide. When the desks fill up, a new floor opens; switch with `[` and `]`.
+The rooftop appears only when the office is at least 200 columns wide. Without a rooftop they go to the window sofa; at lunch or in a typhoon the rooftop closes and resting ones are all in the pantry. When the desks fill up, a new floor opens; switch with `[` and `]`.
 
 ### Keys
 
@@ -105,7 +105,7 @@ Click a card or worker to select it; scroll the panel with the mouse wheel. Afte
 
 Press `p` to dispatch one. A digit picks the role; the host follows the worker you started from (or the latest one when none is selected), and `h` switches it between Claude Code and DeepSeek Harness — `AGENT_OFFICE_DISPATCH_HOST` sets where it opens. In Claude, the desktop app opens a new session with the prompt filled in, for you to send:
 - On a finished or stuck card, it is a relay: the posts to hand on to come first, marked, and the task carries what the session was asked, what it came to and where its changes are.
-- Anywhere else it opens a fresh session in that worker's repository (with none selected, the latest one's) and asks you for its task; until you give one it waits in the waiting area.
+- Anywhere else it opens a fresh session in that worker's repository (with none selected, the latest one's) and asks you for its task; until you give one it queues in your office.
 
 A dispatch goes into the picked worker’s directory: a relay uses that worker’s own cwd (a worktree, where its changes are), a fresh session uses its repository root (`project_root`), and a directory that is not there is an error rather than a silent substitution. DSH groups sessions into workspaces by directory, so the new session lands in that directory’s workspace, not the one you have open — the bar names the repository before you click.
 

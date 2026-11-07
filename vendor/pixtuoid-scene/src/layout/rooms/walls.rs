@@ -434,14 +434,13 @@ pub(crate) fn derive_room_walls(
         });
     }
 
-    // Your office's door is by the waiting area at its west end, where those
-    // waiting on you sit.
+    // agent-office: your office's door is at its west end, toward the
+    // corridor where its overflow lines up.
     let mut south: Vec<(Bounds, Option<DoorAt>)> = meeting_rooms
         .iter()
         .filter_map(|r| match r.style {
             super::RoomStyle::Rooftop => None,
             super::RoomStyle::Office => Some((r.bounds, Some(DoorAt::Centered))),
-            super::RoomStyle::Waiting => Some((r.bounds, None)),
             super::RoomStyle::Boss => Some((r.bounds, Some(DoorAt::Pct(OFFICE_DOOR_PCT)))),
         })
         .chain(pantry.map(|p| (p, Some(DoorAt::Centered))))
@@ -785,17 +784,6 @@ mod tests {
         }
     }
 
-    /// The E-W runs of `walls`, as `(x0, x1)`.
-    fn h_runs(walls: &[WallSegment]) -> Vec<(u16, u16)> {
-        walls
-            .iter()
-            .filter_map(|w| match *w {
-                WallSegment::Horizontal { x0, x1, .. } => Some((x0, x1)),
-                WallSegment::Vertical { .. } => None,
-            })
-            .collect()
-    }
-
     /// The N-S runs of `walls`, as `(y0, y1)`.
     fn v_runs(walls: &[WallSegment]) -> Vec<(u16, u16)> {
         walls
@@ -846,30 +834,6 @@ mod tests {
             3,
             "no door between rooms: each is entered from the corridor"
         );
-    }
-
-    /// agent-office: the waiting area is open to the corridor, so a waiting
-    /// agent walks straight in; your office east of it still has its wall.
-    #[test]
-    fn the_waiting_area_has_no_north_wall() {
-        let rooms = [
-            MeetingRoom {
-                style: crate::layout::RoomStyle::Waiting,
-                ..room(0, 20, 30, 30)
-            },
-            MeetingRoom {
-                style: crate::layout::RoomStyle::Boss,
-                ..room(34, 20, 44, 30)
-            },
-        ];
-        let (walls, doorways) = derive_room_walls(&rooms, None, CORRIDOR);
-        assert!(
-            h_runs(&walls).iter().all(|&(x0, _)| x0 >= 34 || x0 > 0),
-            "{walls:?}"
-        );
-        assert_eq!(doorways.len(), 1, "only your office has a door");
-        assert!(doorways[0].start.x >= 34);
-        assert_eq!(v_runs(&walls), vec![(20, 50)], "the wall between them");
     }
 
     /// agent-office: the rooftop's door is at the corridor, so it opens onto

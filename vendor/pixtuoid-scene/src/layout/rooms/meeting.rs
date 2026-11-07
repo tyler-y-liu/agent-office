@@ -90,11 +90,8 @@ pub enum RoomStyle {
     Office,
     /// The open-air rooftop at the west end, out the office's west wall.
     Rooftop,
-    /// agent-office: the waiting area by your office, open to the corridor:
-    /// those waiting on you sit out the wait on its seats.
-    Waiting,
-    /// agent-office: your office: the first one waiting on you sits in the
-    /// guest chair at its desk.
+    /// agent-office: your office, where everything that needs you lines up:
+    /// the first in the guest chair, the rest on the sofas.
     Boss,
 }
 
@@ -131,12 +128,8 @@ impl MeetingRoom {
         /// Rows from the room-centre row down to the rack's base.
         const BASE_BELOW_MID: u16 = 3;
         // agent-office: the rooftop keeps to its benches and table; no laundry
-        // pole. The waiting area has no door to hang coats by, and your
-        // office's east wall has its bookshelf.
-        if matches!(
-            self.style,
-            RoomStyle::Rooftop | RoomStyle::Waiting | RoomStyle::Boss
-        ) {
+        // pole. Your office's east wall has its bookshelf.
+        if matches!(self.style, RoomStyle::Rooftop | RoomStyle::Boss) {
             return None;
         }
         let b = self.bounds;
@@ -216,9 +209,8 @@ impl MeetingRoom {
     /// clear column east of the room's east wall) — `None` on a room too narrow.
     /// The roster's mat also gives way to what stands over it.
     pub(crate) fn doormat_rect(&self) -> Option<Bounds> {
-        // agent-office: the rooftop and the waiting area have no door to lay
-        // one by.
-        if matches!(self.style, RoomStyle::Rooftop | RoomStyle::Waiting) {
+        // agent-office: the rooftop has no door to lay one by.
+        if matches!(self.style, RoomStyle::Rooftop) {
             return None;
         }
         let b = self.bounds;

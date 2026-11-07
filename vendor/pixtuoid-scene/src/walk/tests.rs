@@ -1012,7 +1012,7 @@ fn a_claimed_seat_sends_the_agent_to_the_next_seat_of_the_same_venue() {
 }
 
 /// agent-office: the desk is for work. An idle agent leaves it once for the
-/// pantry, moves to the rooftop once the stretch passes 15 minutes, and sits
+/// pantry, moves to the rooftop once the stretch passes 30 minutes, and sits
 /// that out — walking around or sitting back down would read as busy, and a
 /// long-idle agent still in the pantry would read as a fresh result to look at.
 #[test]
@@ -1036,7 +1036,7 @@ fn an_idle_agent_lounges_in_the_pantry_then_on_the_rooftop() {
         rig.advance(now);
     }
     assert_eq!(phase_kind(rig.state().wander.phase), PhaseKind::AtWaypoint);
-    assert_eq!(rig.state().wander.target, pantry, "under 15 min, same seat");
+    assert_eq!(rig.state().wander.target, pantry, "under 30 min, same seat");
 
     now += Duration::from_millis(2 * POLL_STEP_MS);
     rig.advance(now);

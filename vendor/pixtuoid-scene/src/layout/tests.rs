@@ -600,9 +600,10 @@ fn meeting_slots_track_meeting_trios() {
     let mut saw_no_room = false;
     let mut saw_dual = false;
     // agent-office: every floor has the same plan, so the sizes give the
-    // spread: no meeting room, one, and two.
+    // spread: no meeting room, one, and two. agent-office: 100 wide, as your
+    // office keeps its width and a meeting room opens from 112.
     for (seed, (w, h)) in (0..12u64).zip(
-        [(120u16, 96u16), (192, 160), (240, 160)]
+        [(100u16, 96u16), (192, 160), (240, 160)]
             .into_iter()
             .cycle(),
     ) {
@@ -807,7 +808,7 @@ fn fish_tank_sits_east_of_the_lounge_lamp_clear_of_the_elevator() {
 fn meeting_table_ends_are_chair_seats_not_stands() {
     let l = SceneLayout::compute(192, 160, Some(TEST_DEFAULT_DESKS)).expect("fits");
     let trio = l.meeting_rooms[0].trio.as_ref().expect("trio");
-    // agent-office: room 0's; the waiting area and your office have theirs.
+    // agent-office: room 0's; your office has its own.
     let chairs: Vec<_> = l
         .waypoints
         .iter()
@@ -1392,4 +1393,42 @@ fn bench_ids_are_the_drawn_rows() {
         partial > 0,
         "the sweep reaches a partial column, the case at issue"
     );
+}
+
+/// agent-office: the south row has no waiting area any more; the width it
+/// held goes to the meeting rooms, so a team finds a room of its own: at 240
+/// two roomy ones, at 280 a third. Your office stays easternmost, where the
+/// line in it is looked for.
+#[test]
+fn the_freed_width_goes_to_the_meeting_rooms() {
+    let meetings = |w: u16, h: u16| {
+        let l = SceneLayout::compute(w, h, None).expect("fits");
+        let south: Vec<_> = l
+            .meeting_rooms
+            .iter()
+            .filter(|r| r.style != RoomStyle::Rooftop)
+            .collect();
+        let office = south
+            .iter()
+            .max_by_key(|r| r.bounds.x)
+            .expect("a south room");
+        assert_eq!(
+            office.style,
+            RoomStyle::Boss,
+            "{w}x{h}: your office easternmost"
+        );
+        let pantry = l.pantry.expect("a pantry").bounds;
+        assert!(pantry.x < office.bounds.x, "{w}x{h}: the pantry west of it");
+        south
+            .iter()
+            .filter(|r| r.style == RoomStyle::Office)
+            .map(|r| r.bounds.width)
+            .collect::<Vec<_>>()
+    };
+    let at_240 = meetings(240, 144);
+    assert_eq!(at_240.len(), 2, "{at_240:?}");
+    assert!(at_240.iter().all(|&w| w >= 50), "{at_240:?}");
+    let at_280 = meetings(280, 160);
+    assert_eq!(at_280.len(), 3, "{at_280:?}");
+    assert!(at_280.iter().all(|&w| w >= 40), "{at_280:?}");
 }

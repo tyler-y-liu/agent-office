@@ -449,23 +449,34 @@ pub(crate) fn derive_with_routing(
         );
         return Some(wander_pose(slot, now, layout, desk, rctx, wf));
     }
+    let resting = matches!(slot.state, pixtuoid_core::state::ActivityState::Idle)
+        && slot.exiting_at.is_none()
+        && rctx.wanders;
     if let Some(walk) = rctx.walks.get_mut(&slot.agent_id)
         && std::mem::take(&mut walk.summoned)
     {
-        let at = rctx
-            .history
-            .recent(slot.agent_id, HISTORY_RECENT_MS, now)
-            .unwrap_or_else(|| {
-                walk.wander
-                    .target
-                    .kind
-                    .seat()
-                    .unwrap_or(walk.wander.target.dest)
-            });
-        walk.set_down(at);
-        walk.wander.target.kind = WanderKind::Aimless;
-        if let Some(pose) = lifted_pose(slot, now, layout, desk, rctx) {
-            return Some(pose);
+        // agent-office: one read in your office, seated, walks on to rest
+        // from its seat rather than home first: the phase clock is restarted
+        // so `advance_wander` does not take it for a fresh stretch and seat
+        // it at its desk, and its `Line` stage moves it on.
+        if resting && matches!(walk.wander.phase, WanderPhase::AtWaypoint(_)) {
+            walk.wander.phase_started_at = now;
+        } else {
+            let at = rctx
+                .history
+                .recent(slot.agent_id, HISTORY_RECENT_MS, now)
+                .unwrap_or_else(|| {
+                    walk.wander
+                        .target
+                        .kind
+                        .seat()
+                        .unwrap_or(walk.wander.target.dest)
+                });
+            walk.set_down(at);
+            walk.wander.target.kind = WanderKind::Aimless;
+            if let Some(pose) = lifted_pose(slot, now, layout, desk, rctx) {
+                return Some(pose);
+            }
         }
     }
 

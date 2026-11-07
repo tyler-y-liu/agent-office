@@ -478,6 +478,9 @@ pub(crate) fn advance_meeting(
             None => desk_leg_endpoint(desk, layout),
         };
         walk.summoned = true;
+        // agent-office: so once let out of the line, its stage differs from
+        // any resting one and it walks on from here.
+        walk.wander.stage = IdleStage::Line;
         walk.wander.from = origin;
         walk.wander.target = seat;
         walk.wander.phase = WanderPhase::WalkingOut(snapshot_leg_profile(

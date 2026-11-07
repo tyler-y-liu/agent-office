@@ -230,15 +230,16 @@ pub struct Frame {
 }
 
 /// `scene` as the office draws it: a session you opened since it went idle
-/// ([`panel::read_since_idle`]) has had its result read, so it idles as one
-/// past the pantry, out on the rooftop; its idle stretch is drawn as starting
-/// [`IDLE_ROOFTOP_MS`](pixtuoid_scene::pose::IDLE_ROOFTOP_MS) ago at least.
+/// ([`panel::read_since_idle`]) has had its result read, so it leaves the
+/// line in your office for the pantry; its idle stretch is drawn as starting
+/// [`DONE_WAITS_MS`](pixtuoid_scene::waiting::DONE_WAITS_MS) ago at least.
 /// While `in_pantry` (lunch, or a typhoon closing the rooftop) every idle
-/// agent is drawn in the pantry, the cha chaan teng, instead: its idle
-/// stretch is drawn a minute short of the rooftop's at most. The panel keeps
-/// the real start for its "空闲 Xm". A done session whose turn ended on a
-/// question to you waits on you as a prompt does, so it is drawn as one,
-/// lining up behind the prompts from when it asked, lunch or not.
+/// agent resting is drawn in the pantry, the cha chaan teng, rather than on
+/// the rooftop: its idle stretch is drawn a minute short of the rooftop's at
+/// most; the line in your office stays as it is. The panel keeps the real
+/// start for its "空闲 Xm". A done session whose turn ended on a question to
+/// you waits on you as a prompt does, so it is drawn as one, lining up behind
+/// the prompts from when it asked, lunch or not.
 pub fn as_seen(
     scene: &Arc<SceneState>,
     views: &tasks::TaskViews,
@@ -258,38 +259,36 @@ pub fn as_seen(
         .collect();
     let rooftop = Duration::from_millis(pixtuoid_scene::pose::IDLE_ROOFTOP_MS);
     let ago = |d: Duration| now.checked_sub(d).unwrap_or(SystemTime::UNIX_EPOCH);
-    let (moved, start): (Vec<AgentId>, SystemTime) = if in_pantry {
-        let last_pantry = ago(rooftop - PANTRY_MARGIN);
-        let ids = scene
-            .agents
-            .values()
-            .filter(|s| s.state == pixtuoid_core::ActivityState::Idle && s.exiting_at.is_none())
-            .filter(|s| s.state_started_at < last_pantry)
+    let read: Vec<AgentId> = scene
+        .agents
+        .values()
+        .filter(|s| panel::read_since_idle(s, seen))
+        .map(|s| s.agent_id)
+        .collect();
+    let last_pantry = ago(rooftop - PANTRY_MARGIN);
+    // After the read ones are moved, so one just read is down for lunch too
+    // rather than back in your office.
+    let resting_up = |s: &AgentSlot| {
+        in_pantry
+            && s.state == pixtuoid_core::ActivityState::Idle
+            && s.exiting_at.is_none()
+            && s.state_started_at < last_pantry
             // Its wait is timed from when it asked, which the line orders by.
-            .filter(|s| !asking.contains(&s.agent_id))
-            .map(|s| s.agent_id)
-            .collect();
-        (ids, last_pantry)
-    } else {
-        let ids = scene
-            .agents
-            .values()
-            .filter(|s| panel::read_since_idle(s, seen))
-            .map(|s| s.agent_id)
-            .collect();
-        (ids, ago(rooftop))
+            && !asking.contains(&s.agent_id)
     };
-    if moved.is_empty() && asking.is_empty() {
+    if read.is_empty() && asking.is_empty() && !scene.agents.values().any(resting_up) {
         return Arc::clone(scene);
     }
     let mut drawn = (**scene).clone();
-    for id in moved {
+    let out_of_line = ago(Duration::from_millis(pixtuoid_scene::waiting::DONE_WAITS_MS));
+    for id in read {
         if let Some(s) = drawn.agents.get_mut(&id) {
-            s.state_started_at = if in_pantry {
-                start
-            } else {
-                s.state_started_at.min(start)
-            };
+            s.state_started_at = s.state_started_at.min(out_of_line);
+        }
+    }
+    for s in drawn.agents.values_mut() {
+        if resting_up(s) {
+            s.state_started_at = last_pantry;
         }
     }
     for id in asking {
@@ -558,14 +557,13 @@ impl Core {
         // A hidden session is still live: what you read and its tally carry over.
         self.ui.seen.retain(|id, _| live.agents.contains_key(id));
         let waiting = panel::waiting(&scene, &views, &order, &self.ui.seen);
-        let first_waiting = panel::next_waiting(&scene, &views, now, &self.ui.seen);
         self.watch.observe(&live, &views, now);
         let clock = Clock::now(now);
         let outlook = *self.outlook_rx.borrow();
-        // A typhoon closes the rooftop; at lunch everyone is down for a meal.
-        let in_pantry = clock.lunch() || outlook.typhoon();
+        let office = as_seen(&scene, &views, &self.ui.seen, self.in_pantry(now), now);
+        let first_waiting = panel::next_waiting(&office, now);
         Frame {
-            office: as_seen(&scene, &views, &self.ui.seen, in_pantry, now),
+            office,
             scene,
             views,
             labels,
@@ -623,10 +621,18 @@ impl Core {
         }
     }
 
-    /// The session at the head of the waiting line, if any waits on you.
+    /// The session at the head of the line in your office, if any needs you.
     pub fn next_waiting(&self) -> Option<AgentId> {
         let views = self.views_rx.borrow().clone();
-        panel::next_waiting(&self.scene(), &views, SystemTime::now(), &self.ui.seen)
+        let now = SystemTime::now();
+        let office = as_seen(&self.scene(), &views, &self.ui.seen, self.in_pantry(now), now);
+        panel::next_waiting(&office, now)
+    }
+
+    /// Whether the office's resting are all in the pantry: a typhoon closes
+    /// the rooftop; at lunch everyone is down for a meal.
+    fn in_pantry(&self, now: SystemTime) -> bool {
+        Clock::now(now).lunch() || self.outlook_rx.borrow().typhoon()
     }
 
     /// Select `id` and show the floor it sits on.
@@ -726,7 +732,7 @@ impl Core {
                     return self.act(Action::Open, floors);
                 }
                 None => self.note(
-                    crate::i18n::t("现在没有会话等你", "no session is waiting for you"),
+                    crate::i18n::t("你的办公室里没人", "nobody is in your office"),
                     Tone::Failed,
                 ),
             },
@@ -1393,10 +1399,12 @@ mod tests {
     }
 
     /// The office walks a session you opened since it went idle out of the
-    /// pantry: it draws that one's idle stretch as past the pantry's, and
-    /// leaves every other session, and the scene the panel reads, alone.
+    /// line in your office to rest in the pantry, not up to the rooftop: it
+    /// draws that one's idle stretch as past the line's wait but short of the
+    /// rooftop's, and leaves every other session, and the scene the panel
+    /// reads, alone, so your office holds only what you have not seen.
     #[test]
-    fn the_office_draws_a_read_session_past_the_pantry() {
+    fn a_read_session_leaves_the_office_line() {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let now = t0 + Duration::from_secs(600);
         let mut scene = SceneState::uniform(8);
@@ -1435,10 +1443,14 @@ mod tests {
         let drawn = as_seen(&scene, &views, &seen, false, now);
         let idle_for =
             |s: &SceneState, id| now.duration_since(s.agents[id].state_started_at).unwrap();
+        let read_for = idle_for(&drawn, &ids[0]).as_millis();
         assert!(
-            idle_for(&drawn, &ids[0]).as_millis()
-                >= u128::from(pixtuoid_scene::pose::IDLE_ROOFTOP_MS),
-            "past the pantry"
+            read_for >= u128::from(pixtuoid_scene::waiting::DONE_WAITS_MS),
+            "out of the line"
+        );
+        assert!(
+            read_for < u128::from(pixtuoid_scene::pose::IDLE_ROOFTOP_MS),
+            "resting in the pantry, not on the rooftop"
         );
         assert_eq!(
             idle_for(&drawn, &ids[1]),
@@ -1483,10 +1495,11 @@ mod tests {
         );
     }
 
-    /// At lunch, or with a typhoon closing the rooftop, every idle agent is
-    /// drawn in the cha chaan teng, even one read and one idle for an hour;
-    /// one just gone idle keeps its own stretch, and a working one is left
-    /// at its desk.
+    /// At lunch, or with a typhoon closing the rooftop, every idle agent
+    /// resting is drawn in the cha chaan teng, even one read and one idle for
+    /// an hour, rather than back in your office; one just gone idle keeps its
+    /// own stretch and still lines up with its result, and a working one is
+    /// left at its desk.
     #[test]
     fn lunch_brings_every_idle_agent_down_to_the_cha_chaan_teng() {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
@@ -1512,7 +1525,7 @@ mod tests {
                 id
             })
             .collect();
-        let idle_since = [3600, 1200, 30, 3600];
+        let idle_since = [3600, 120, 30, 3600];
         for (id, secs) in ids.iter().zip(idle_since) {
             let s = scene.agents.get_mut(id).unwrap();
             s.state = pixtuoid_core::ActivityState::Idle;
@@ -1529,13 +1542,73 @@ mod tests {
                 .as_millis() as u64
         };
         let rooftop = pixtuoid_scene::pose::IDLE_ROOFTOP_MS;
+        let line = pixtuoid_scene::waiting::DONE_WAITS_MS;
         assert!(
-            idle_ms(&ids[0]) < rooftop,
+            (line..rooftop).contains(&idle_ms(&ids[0])),
             "an hour idle, still in the pantry"
         );
-        assert!(idle_ms(&ids[1]) < rooftop, "read, but down for lunch");
+        assert!(
+            (line..rooftop).contains(&idle_ms(&ids[1])),
+            "read, but down for lunch"
+        );
         assert_eq!(idle_ms(&ids[2]), 30_000, "just idle, left as it is");
+        assert!(
+            pixtuoid_scene::waiting::lines_up(&drawn.agents[&ids[2]], now),
+            "just idle, it still lines up with its result"
+        );
         assert_eq!(idle_ms(&ids[3]), 3_600_000, "working, left at its desk");
+    }
+
+    /// The guest chair and `n` agree: both go by the office's own line on
+    /// the scene as drawn. A result you have not read sits there while a
+    /// prompt is fresh; once the prompt has waited long enough to walk over,
+    /// it takes the chair, and `n` opens it.
+    #[test]
+    fn the_guest_chair_is_who_n_opens() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let [result, prompt] = ["result", "prompt"].map(|sid| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: None,
+                },
+                t0,
+                Transport::Hook,
+            );
+            id
+        });
+        let now = t0 + Duration::from_secs(600);
+        let s = scene.agents.get_mut(&result).unwrap();
+        s.state = pixtuoid_core::ActivityState::Idle;
+        s.state_started_at = now - Duration::from_secs(60);
+        let s = scene.agents.get_mut(&prompt).unwrap();
+        s.state = pixtuoid_core::ActivityState::RequiresAction { reason: None };
+        s.state_started_at = now - Duration::from_secs(5);
+        let scene = Arc::new(scene);
+        let views = tasks::TaskViews::default();
+        // Who the office seats first: its line's order, of those lined up.
+        let in_chair = |drawn: &SceneState, now| {
+            let mut line: Vec<&AgentSlot> = drawn
+                .agents
+                .values()
+                .filter(|s| pixtuoid_scene::waiting::lines_up(s, now))
+                .collect();
+            line.sort_by_key(|s| pixtuoid_scene::waiting::line_key(s, now));
+            line.first().map(|s| s.agent_id)
+        };
+        for (later, first) in [(0, result), (20, prompt)] {
+            let now = now + Duration::from_secs(later);
+            let drawn = as_seen(&scene, &views, &HashMap::new(), false, now);
+            assert_eq!(panel::next_waiting(&drawn, now), Some(first), "+{later}s");
+            assert_eq!(in_chair(&drawn, now), Some(first), "+{later}s");
+        }
     }
 
     /// A session already open when agent-office starts last worked hours

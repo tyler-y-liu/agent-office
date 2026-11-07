@@ -2733,7 +2733,10 @@ fn sim_step_keeps_the_sign_lit_through_a_gap_in_a_room_that_once_dimmed() {
 fn seat_desk_is_set_exactly_when_the_sim_seats_someone_at_a_desk() {
     use crate::pose::Pose;
     use std::time::Duration;
-    let (scene, layout, id, now0, pack) = sim_rig();
+    let (mut scene, layout, id, now0, pack) = sim_rig();
+    // agent-office: at work, so it stays at its desk once in: an idle one
+    // soon lines up in your office with its result.
+    scene.agents.get_mut(&id).expect("its slot").state = ActivityState::Running { item: None };
     let coffee = HashMap::new();
     let mut owned = OwnedSimStores::new();
     let mut stores = owned.stores();

@@ -1,8 +1,7 @@
 //! What sets the south rooms apart, painted over the upscaled frame in window
 //! pixels as the other goings-on are: the meeting rooms' whiteboard with their
-//! subagents' tasks on it, the waiting area's ticket machine showing how many
-//! wait on you, and your office's window out on the harbour. Each hangs in the
-//! strip under its room's north wall, clear of the sofas.
+//! subagents' tasks on it, and your office's window out on the harbour. Each
+//! hangs in the strip under its room's north wall, clear of the sofas.
 
 use pixtuoid_core::{AgentId, SceneState};
 use pixtuoid_scene::layout::{RoomStyle, SceneLayout};
@@ -58,7 +57,7 @@ fn in_room(t: &Tag, room: &Area) -> bool {
 }
 
 /// Whether the figure whose badge is `t` sits in one of the meeting rooms
-/// proper: the rooftop, the waiting area and your office are not meetings.
+/// proper: the rooftop and your office are not meetings.
 pub(super) fn in_meeting(t: &Tag, rooms: &[Room]) -> bool {
     rooms
         .iter()
@@ -234,99 +233,6 @@ pub(super) fn whiteboard(
         let text = truncate_cells(line, cells);
         faces.draw(canvas, x0 + pad, y + ascent, &text, MARKER_BLUE, px);
         y += line_h;
-    }
-}
-
-const MACHINE_RED: u32 = 0x00c8_3a32;
-const MACHINE_SHADE: u32 = 0x008f_1f1d;
-const MACHINE_FACE: u32 = 0x0018_1a1e;
-const LED: u32 = 0x00ff_5a3c;
-const TICKET: u32 = 0x00f4_f1e8;
-const BUTTON: u32 = 0x00f2_c14e;
-
-/// A 3×5 digit, its rows top to bottom as three bits each.
-fn digit(d: u8) -> [u8; 5] {
-    match d {
-        0 => [7, 5, 5, 5, 7],
-        1 => [2, 6, 2, 2, 7],
-        2 => [7, 1, 7, 4, 7],
-        3 => [7, 1, 7, 1, 7],
-        4 => [5, 5, 7, 1, 1],
-        5 => [7, 4, 7, 1, 7],
-        6 => [7, 4, 7, 5, 7],
-        7 => [7, 1, 1, 1, 1],
-        8 => [7, 5, 7, 5, 7],
-        _ => [7, 5, 7, 1, 7],
-    }
-}
-
-/// The two digits a ticket machine shows for `waiting` sessions in line.
-pub(super) fn ticket_digits(waiting: usize) -> [u8; 2] {
-    let n = waiting.min(99) as u8;
-    [n / 10, n % 10]
-}
-
-/// The ticket machine at the waiting area's north-east corner, east of its
-/// sofas: its display shows how many wait on you, a ticket out of its slot
-/// while anyone does.
-pub(super) fn ticket_machine(canvas: &mut Canvas, room: &Room, waiting: usize, ms: u64) {
-    let (a, l) = (room.area, room.l);
-    let east = a.x + i64::from(a.w);
-    let sofa_east = a.x + i64::from(a.w / 2) + SOFA_HALF * l;
-    let w = 6 * l;
-    let x = east - w - 2 * l;
-    if x < sofa_east + l {
-        return;
-    }
-    let y = a.y + (STRIP_TOP + 1) * l;
-    let h = STRIP_H * l;
-    let (wu, hu, lu) = (w as u32, h as u32, l as u32);
-    canvas.fill(x, y, wu, hu, MACHINE_RED);
-    canvas.fill(x + w - l / 2, y, lu / 2, hu, MACHINE_SHADE);
-    // The display, its number lit.
-    let (dx, dy, dw, dh) = (x + l / 2, y + l, w - 3 * l / 2, 3 * l);
-    canvas.fill(dx, dy, dw as u32, dh as u32, MACHINE_FACE);
-    let p = (dw * 4 / 5 / 7).min(dh * 4 / 5 / 5).max(1);
-    let (gx, gy) = (dx + (dw - 7 * p) / 2, dy + (dh - 5 * p) / 2);
-    for (i, d) in ticket_digits(waiting).into_iter().enumerate() {
-        for (r, bits) in digit(d).iter().enumerate() {
-            for c in 0..3 {
-                if bits >> (2 - c) & 1 == 1 {
-                    let cx = gx + (i64::try_from(i).unwrap_or(0) * 4 + c) * p;
-                    canvas.fill(
-                        cx,
-                        gy + i64::try_from(r).unwrap_or(0) * p,
-                        p as u32,
-                        p as u32,
-                        LED,
-                    );
-                }
-            }
-        }
-    }
-    // The button, and the slot with a ticket out of it, pulsing.
-    canvas.fill(x + l, y + 5 * l, lu, lu, BUTTON);
-    let slot_y = y + 7 * l;
-    canvas.fill(
-        x + l / 2,
-        slot_y,
-        (w - 3 * l / 2) as u32,
-        (l / 3).max(1) as u32,
-        MACHINE_FACE,
-    );
-    if waiting > 0 {
-        let out = if (ms / 600).is_multiple_of(2) {
-            2 * l
-        } else {
-            3 * l / 2
-        };
-        canvas.fill(
-            x + l,
-            slot_y,
-            (w - 5 * l / 2).max(1) as u32,
-            out as u32,
-            TICKET,
-        );
     }
 }
 
@@ -598,18 +504,8 @@ mod tests {
         assert!(board_lines_of(&[pm], &scene, &views(&view)).1.is_empty());
     }
 
-    /// The machine shows the length of the line in two digits, and a line
-    /// past 99 still reads as full rather than wrapping round to a short one.
-    #[test]
-    fn the_ticket_machine_shows_the_line_in_two_digits() {
-        assert_eq!(ticket_digits(0), [0, 0]);
-        assert_eq!(ticket_digits(7), [0, 7]);
-        assert_eq!(ticket_digits(42), [4, 2]);
-        assert_eq!(ticket_digits(130), [9, 9]);
-    }
-
     /// Only a meeting room proper is a meeting: someone up on the rooftop or
-    /// waiting by your office may still talk lunch.
+    /// waiting in your office may still talk lunch.
     #[test]
     fn a_meeting_is_a_meeting_room_only() {
         let area = |x| Area {
@@ -630,7 +526,7 @@ mod tests {
                 l: 1,
             },
             Room {
-                style: RoomStyle::Waiting,
+                style: RoomStyle::Boss,
                 area: area(400),
                 l: 1,
             },
@@ -658,7 +554,7 @@ mod tests {
         };
         assert!(in_meeting(&at(40), &rooms));
         assert!(!in_meeting(&at(240), &rooms), "rooftop");
-        assert!(!in_meeting(&at(440), &rooms), "waiting area");
+        assert!(!in_meeting(&at(440), &rooms), "your office");
         assert!(!in_meeting(&at(140), &rooms), "the corridor");
     }
 }

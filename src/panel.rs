@@ -147,11 +147,11 @@ pub enum Group {
     Waiting,
     /// Working but stuck: have a look.
     Stuck,
-    /// Done a while ago at most, in the pantry: read what it did.
+    /// Done a while ago at most, in your office: read what it did.
     Done,
     /// Working.
     Working,
-    /// Idle long enough to have gone up to the rooftop.
+    /// Read, or idle a long while: resting in the pantry or on the rooftop.
     Idle,
 }
 
@@ -176,7 +176,7 @@ impl Group {
                     .duration_since(slot.state_started_at)
                     .unwrap_or_default()
                     .as_millis()
-                    < u128::from(pixtuoid_scene::pose::IDLE_ROOFTOP_MS) =>
+                    < u128::from(pixtuoid_scene::waiting::DONE_WAITS_MS) =>
             {
                 Self::Done
             }
@@ -292,10 +292,11 @@ pub fn order(
         let view = views.get(&s.agent_id);
         let read = read_since_idle(s, seen);
         let g = Group::of(s, view, now, read);
-        let (wait, since) = if g == Group::Waiting {
-            (waits_on_you(s, view, read), s.state_started_at)
-        } else {
-            (None, s.created_at)
+        // Waiting and done in the order they line up for your office.
+        let (wait, since) = match g {
+            Group::Waiting => (waits_on_you(s, view, read), s.state_started_at),
+            Group::Done => (None, s.state_started_at),
+            _ => (None, s.created_at),
         };
         (g, wait, since)
     });
@@ -307,8 +308,8 @@ pub fn order(
 }
 
 /// The sessions in `order` waiting on you ([`waits_on_you`]): the one count
-/// the panel's title, the footer and the waiting room's ticket machine show,
-/// so no two of them disagree.
+/// the panel's title, the footer and the Dock's badge show, so no two of
+/// them disagree.
 pub fn waiting(
     scene: &SceneState,
     views: &TaskViews,
@@ -325,30 +326,27 @@ pub fn waiting(
 
 /// The session to deal with next: the one in your office's guest chair, so
 /// what opens is who you see there; with the chair empty, the one that will
-/// take it.
-pub fn next_waiting(
-    scene: &SceneState,
-    views: &TaskViews,
-    now: SystemTime,
-    seen: &HashMap<AgentId, SystemTime>,
-) -> Option<AgentId> {
-    let waiting: Vec<&AgentSlot> = order(scene, views, now, seen)
-        .into_iter()
-        .filter(|(_, depth)| *depth == 0)
-        .map(|(id, _)| &scene.agents[&id])
-        .filter(|s| waits_on_you(s, views.get(&s.agent_id), read_since_idle(s, seen)).is_some())
-        .collect();
-    let lined_up = |s: &&AgentSlot| {
-        now.duration_since(s.state_started_at)
-            .unwrap_or_default()
-            .as_millis()
-            >= u128::from(pixtuoid_scene::waiting::LINE_UP_AFTER_MS)
+/// take it. `drawn` is the scene as the office draws it ([`crate::core::as_seen`]),
+/// judged by the office's own line ([`pixtuoid_scene::waiting`]), so the two
+/// cannot disagree.
+pub fn next_waiting(drawn: &SceneState, now: SystemTime) -> Option<AgentId> {
+    let shown = |id: &AgentId| {
+        drawn
+            .agents
+            .get(id)
+            .is_some_and(|s| crate::pipeline::is_shown_source(&s.source))
     };
-    waiting
-        .iter()
-        .copied()
-        .find(lined_up)
-        .or(waiting.first().copied())
+    let mut line: Vec<&AgentSlot> = drawn
+        .agents
+        .values()
+        .filter(|s| crate::pipeline::is_shown_source(&s.source))
+        .filter(|s| !s.parent_id.as_ref().is_some_and(shown))
+        .filter(|s| pixtuoid_scene::waiting::need(s, now).is_some())
+        .collect();
+    line.sort_by_key(|s| pixtuoid_scene::waiting::line_key(s, now));
+    line.iter()
+        .find(|s| pixtuoid_scene::waiting::lines_up(s, now))
+        .or(line.first())
         .map(|s| s.agent_id)
 }
 
@@ -646,7 +644,7 @@ pub fn needs_task() -> &'static str {
 /// What an agent's head says while it waits on you, fitted to `max` cells:
 /// the question it asked, or the call it needs approved, as its card says.
 /// `None` when it waits on nothing, and its task shows instead: the task
-/// over a head in the waiting room left you to open the panel to see why.
+/// over a head in your office left you to open the panel to see why.
 pub fn head_wait(
     slot: &AgentSlot,
     view: Option<&TaskView>,
@@ -671,7 +669,7 @@ pub fn head_wait(
             match last {
                 _ if wait == reply_wait() => question().unwrap_or(wait),
                 // The head has no room for 等你批准： (standing in the
-                // waiting room already says it waits), nor for a path: a
+                // office already says it waits), nor for a path: a
                 // file's name is what it holds.
                 Some(t) if wait.ends_with(t) => {
                     let t = match t.split_once(": ") {
@@ -2000,12 +1998,12 @@ mod tests {
         assert_eq!(
             group(done),
             Group::Done,
-            "idle under 15 min sits in the pantry"
+            "done under 15 min waits in your office to be read"
         );
         assert_eq!(
             group(idle),
             Group::Idle,
-            "idle 15 min+ is up on the rooftop"
+            "idle 15 min+ rests in the pantry or on the rooftop"
         );
     }
 
@@ -2043,7 +2041,8 @@ mod tests {
     /// A done session asking you a question needs you as much as a prompt
     /// does, so it waits with them, not in the pantry; but behind them, since
     /// a prompt holds its session mid-turn. Once opened, the question was
-    /// seen, and it idles like any read session.
+    /// seen, and it rests like any read session, leaving the unread result
+    /// next in line.
     #[test]
     fn a_question_to_you_waits_behind_the_prompts() {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
@@ -2085,14 +2084,20 @@ mod tests {
         assert_eq!(
             group(done),
             Group::Done,
-            "a plain result is still read in the pantry"
+            "a plain result is still to read in your office"
         );
-        assert_eq!(next_waiting(&scene, &views, now, &none), Some(prompt));
+        // As the office draws it, which the guest chair and `n` both go by.
+        let next = |scene: &SceneState, seen: &HashMap<AgentId, SystemTime>| {
+            let drawn =
+                crate::core::as_seen(&std::sync::Arc::new(scene.clone()), &views, seen, false, now);
+            next_waiting(&drawn, now)
+        };
+        assert_eq!(next(&scene, &none), Some(prompt));
         // A prompt just raised has not walked over yet: what opens is the
         // question you see in the guest chair.
         let mut fresh = scene.clone();
         fresh.agents.get_mut(&prompt).unwrap().state_started_at = now - Duration::from_secs(5);
-        assert_eq!(next_waiting(&fresh, &views, now, &none), Some(asked));
+        assert_eq!(next(&fresh, &none), Some(asked));
         assert!(
             status(
                 &scene.agents[&asked],
@@ -2113,11 +2118,11 @@ mod tests {
         let mut answered = scene.clone();
         answered.agents.remove(&prompt);
         assert_eq!(
-            next_waiting(&answered, &views, now, &opened),
-            None,
-            "nothing left to deal with"
+            next(&answered, &opened),
+            Some(done),
+            "the question seen, the unread result is next"
         );
-        assert_eq!(next_waiting(&answered, &views, now, &none), Some(asked));
+        assert_eq!(next(&answered, &none), Some(asked));
     }
 
     /// A card leads with its repository's initial on the repository's colour
@@ -2384,7 +2389,7 @@ mod tests {
         assert_eq!(delegated(&scene, &views, p), None);
     }
 
-    /// Over a head in the waiting room the task said nothing of why it is
+    /// Over a head in your office the task said nothing of why it is
     /// there: the head says the question asked, or the call to approve, with
     /// its path made short enough to keep the file name.
     #[test]

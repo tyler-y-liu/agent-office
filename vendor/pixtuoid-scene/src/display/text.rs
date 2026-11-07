@@ -405,15 +405,6 @@ impl TextRun {
                             },
                         )
                     }
-                    RoomStyle::Waiting => (
-                        door_x(b, 50),
-                        "WAIT".to_owned(),
-                        Rgb {
-                            r: 0xb3,
-                            g: 0x78,
-                            b: 0x1e,
-                        },
-                    ),
                     RoomStyle::Boss => (
                         door_x(b, crate::layout::OFFICE_DOOR_PCT),
                         "OFFICE".to_owned(),
@@ -525,7 +516,7 @@ mod tests {
         let wide = crate::layout::SceneLayout::compute_with_seed(320, 180, None, 0).expect("fits");
         let signs = super::TextRun::door_signs(&wide);
         let names: Vec<String> = signs.iter().map(super::TextRun::text).collect();
-        for name in ["MTG A", "MTG B", "PANTRY", "WAIT", "OFFICE", "ROOF"] {
+        for name in ["MTG A", "MTG B", "MTG C", "PANTRY", "OFFICE", "ROOF"] {
             assert_eq!(
                 names.iter().filter(|n| *n == name).count(),
                 1,
@@ -534,11 +525,11 @@ mod tests {
         }
         let mut plates: Vec<_> = signs
             .iter()
-            .filter(|s| s.text() != "MTG B")
+            .filter(|s| s.text() != "MTG B" && s.text() != "MTG C")
             .map(|s| s.plate)
             .collect();
         plates.dedup();
-        assert_eq!(plates.len(), 5, "a colour per kind of zone");
+        assert_eq!(plates.len(), 4, "a colour per kind of zone");
         let narrow =
             crate::layout::SceneLayout::compute_with_seed(160, 120, None, 0).expect("fits");
         let names: Vec<String> = super::TextRun::door_signs(&narrow)
@@ -546,7 +537,7 @@ mod tests {
             .map(super::TextRun::text)
             .collect();
         assert!(
-            !names.iter().any(|n| n == "ROOF" || n == "MTG B"),
+            !names.iter().any(|n| n == "ROOF" || n == "MTG C"),
             "no sign for a zone that is not there: {names:?}"
         );
     }

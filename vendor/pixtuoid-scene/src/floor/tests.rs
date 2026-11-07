@@ -2738,7 +2738,12 @@ fn a_lifted_pet_rests_where_it_is_set_down() {
 /// while the panel still lists it under the pantry.
 #[test]
 fn a_resize_reseats_the_lounging_in_the_new_layout() {
-    let scene = make_scene(3, 8);
+    let mut scene = make_scene(3, 8);
+    // agent-office: read, as the host draws them, so they rest in the pantry
+    // rather than line up in your office.
+    for s in scene.agents.values_mut() {
+        s.state_started_at -= Duration::from_millis(crate::waiting::DONE_WAITS_MS);
+    }
     let mut session = FloorSession::new(Arc::new(crate::pack::test_office()));
     let step = |session: &mut FloorSession, size: Size, ms: u64| {
         session

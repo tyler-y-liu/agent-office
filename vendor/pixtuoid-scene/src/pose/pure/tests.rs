@@ -885,7 +885,7 @@ fn idle_pose_leaves_the_desk_once_and_stays_out() {
     assert_eq!(
         derive(&s, later, &l),
         Some(lounge),
-        "under 15 min, same seat"
+        "under 30 min, same seat"
     );
     let Pose::AtWaypoint { kind, .. } = lounge else {
         unreachable!()
@@ -896,7 +896,7 @@ fn idle_pose_leaves_the_desk_once_and_stays_out() {
     );
 }
 
-/// agent-office: past 15 minutes the stateless half also walks the agent from
+/// agent-office: past 30 minutes the stateless half also walks the agent from
 /// the pantry to the rooftop and keeps it there, so a long-idle session is not
 /// mistaken for a fresh result waiting to be read.
 #[test]
@@ -959,4 +959,33 @@ fn every_idle_stretch_returns_to_the_same_lounge() {
     };
     let now = later + Duration::from_millis(settled);
     assert_eq!(derive(&second, now, &l), lounge);
+}
+
+/// agent-office: one sitting in your office always means "needs you", so no
+/// resting agent takes a seat there, not even with every other spot on the
+/// floor taken.
+#[test]
+fn nobody_resting_sits_in_your_office() {
+    let l = SceneLayout::compute(240, 160, None).expect("fits");
+    let desk = l.home_desks[0];
+    let office = (0..l.waypoints.len()).filter(|&i| crate::team::in_your_office(&l, i));
+    assert!(office.count() > 0, "the office has seats to keep free");
+    let mut full = SpotClaims::default();
+    for i in (0..l.waypoints.len()).filter(|&i| !crate::team::in_your_office(&l, i)) {
+        full.claim(i);
+    }
+    for claims in [SpotClaims::default(), full] {
+        for stage in [IdleStage::Pantry, IdleStage::Rooftop] {
+            for i in 0..200u64 {
+                let id = AgentId::from_transcript_path(&format!("/p/rest_{i}.jsonl"));
+                let t = resolve_wander_target(id, i, &l, desk, &claims, stage);
+                if let WanderKind::Named { wp_idx, .. } = t.kind {
+                    assert!(
+                        !crate::team::in_your_office(&l, wp_idx),
+                        "{stage:?} agent {i} rests in your office"
+                    );
+                }
+            }
+        }
+    }
 }
