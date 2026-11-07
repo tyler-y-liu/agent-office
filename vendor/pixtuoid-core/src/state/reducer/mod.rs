@@ -625,21 +625,24 @@ impl Reducer {
                 .as_ref()
                 .map_or(ToolKind::Other, ToolKind::from_detail),
         };
-        // agent-office: a live hook call proves a CC turn is open even when
-        // its prompt went unseen (agent-office restarted mid-turn); without
-        // one every call's end idled the figure until the turn's `Stop`.
+        // agent-office: a live hook call proves a turn is open even when its
+        // prompt went unseen. CC misses it when the office restarts mid-turn.
+        // cursor-agent --print (2026.11.05) never fires `beforeSubmitPrompt`,
+        // so without this every call's end sat the figure idle until `stop`.
         // Hook-only: a transcript replay is history, not a live turn.
-        if from == Transport::Hook
-            && self.corr.turns.open(&agent_id).is_none()
-            && scene
-                .agents
-                .get(&agent_id)
-                .is_some_and(|s| {
-                    &*s.source == crate::source::claude_code::SOURCE_NAME
-                        && s.exiting_at.is_none()
-                })
+        let missed = from == Transport::Hook && self.corr.turns.open(&agent_id).is_none();
+        if let Some(turn) = missed
+            .then(|| scene.agents.get(&agent_id))
+            .flatten()
+            .filter(|s| s.exiting_at.is_none())
+            .and_then(|s| match &*s.source {
+                crate::source::cursor::SOURCE_NAME => Some(crate::source::cursor::fresh_turn()),
+                crate::source::claude_code::SOURCE_NAME => {
+                    Some(crate::source::claude_code::fresh_turn())
+                }
+                _ => None,
+            })
         {
-            let turn = crate::source::claude_code::fresh_turn();
             self.apply_turn_start(scene, agent_id, turn, from, now);
         }
         if let Some(call) = tool_use_id.as_deref()

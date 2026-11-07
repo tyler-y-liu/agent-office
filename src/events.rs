@@ -220,13 +220,15 @@ pub fn observe(
             tracked.started = true;
         }
         let (status, _) = crate::panel::status(slot, view, false, now);
-        if tracked.status.as_ref() != Some(&status) {
-            // The first sentence is the baseline. A progress line is a change
-            // after that, including 「等你确认」.
-            if tracked.status.is_some() {
-                push(&mut out, tracked, row, Kind::Progress, &status);
+        // The panel clock (`空闲 1s`, `空闲 2s`, `调研 2m`) is not news. A
+        // resting chip is not news either: Hermes was pinging once a second
+        // while a `--print` turn sat between calls.
+        let key = progress_key(&status);
+        if tracked.status.as_deref() != Some(key.as_str()) {
+            if tracked.status.is_some() && !key.is_empty() {
+                push(&mut out, tracked, row, Kind::Progress, &key);
             }
-            tracked.status = Some(status);
+            tracked.status = Some(key);
         }
         let stuck_now = stuck_at_work(slot, view).map(|s| s.describe());
         if let Some(text) = &stuck_now
@@ -242,6 +244,52 @@ pub fn observe(
         }
     }
     (out, sent)
+}
+
+/// What Hermes should hear. Empty means the chip is the figure resting, or
+/// only its clock moved: neither is a new step of the task.
+fn progress_key(status: &str) -> String {
+    let sentence = strip_clock(status);
+    if resting(&sentence) {
+        String::new()
+    } else {
+        sentence
+    }
+}
+
+fn strip_clock(status: &str) -> String {
+    let status = status.trim_end();
+    let Some((head, tail)) = status.rsplit_once(' ') else {
+        return status.to_owned();
+    };
+    if clock_token(tail) {
+        head.to_owned()
+    } else {
+        status.to_owned()
+    }
+}
+
+fn clock_token(s: &str) -> bool {
+    let Some(unit) = s.chars().last() else {
+        return false;
+    };
+    if !matches!(unit, 's' | 'm' | 'h') {
+        return false;
+    }
+    let n = &s[..s.len() - unit.len_utf8()];
+    !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn resting(sentence: &str) -> bool {
+    let s = sentence.trim();
+    s.starts_with("· 空闲")
+        || s.starts_with("· idle")
+        || s.starts_with("✓ 做完")
+        || s.starts_with("✓ done")
+        || s.starts_with("✓ 已看")
+        || s.starts_with("✓ read")
+        || s == "离开中"
+        || s == "leaving"
 }
 
 fn tracked_done(slot: &AgentSlot, view: Option<&TaskView>, now: SystemTime) -> bool {
@@ -464,6 +512,62 @@ mod tests {
             events.is_empty(),
             "「等你确认」 was already sent; a return to it is not a new wait"
         );
+    }
+
+    /// Telegram was getting one message a second (`空闲 1s`, `空闲 2s`) while
+    /// the figure sat between calls. The clock and a resting chip are not a
+    /// step of the task; the next phase still is, once.
+    #[test]
+    fn a_resting_chip_and_its_clock_are_not_progress() {
+        assert_eq!(progress_key("· 空闲 1s"), "");
+        assert_eq!(progress_key("· 空闲 2s"), progress_key("· 空闲 14s"));
+        assert_eq!(progress_key("· idle 3m"), "");
+        assert_eq!(progress_key("✓ 做完 0s"), "");
+        assert_eq!(progress_key("✓ read · idle 1h"), "");
+        assert_eq!(progress_key("离开中"), "");
+        assert_eq!(progress_key("? 等你回复 1s"), "? 等你回复");
+        assert_eq!(progress_key("? 等你回复 2s"), "? 等你回复");
+        assert_eq!(progress_key("▸ 调研 1m"), "▸ 调研");
+        assert_eq!(progress_key("▸ 调研 2m"), "▸ 调研");
+        assert_eq!(progress_key("… 思考中"), "… 思考中");
+
+        let now = at();
+        let mut scene = SceneState::uniform(8);
+        let mut reducer = Reducer::new();
+        let id = add(&mut scene, &mut reducer, "sid", None);
+        scene.agents.get_mut(&id).unwrap().state = ActivityState::Running { item: None };
+        let (events, sent) = observe(
+            &scene,
+            &HashMap::new(),
+            &[row("sid")],
+            &Sent::default(),
+            now,
+        );
+        assert_eq!(kinds(&events), vec![Kind::Started]);
+
+        scene.agents.get_mut(&id).unwrap().state = ActivityState::Idle;
+        let (events, sent) = observe(&scene, &HashMap::new(), &[row("sid")], &sent, now);
+        assert!(
+            events.is_empty(),
+            "sitting down is not a step: {events:?}"
+        );
+        let (events, sent) = observe(&scene, &HashMap::new(), &[row("sid")], &sent, now);
+        assert!(events.is_empty(), "the same rest is not another step");
+
+        let view = TaskView {
+            phase: Some(crate::tasks::Phase::Research),
+            ..TaskView::default()
+        };
+        scene.agents.get_mut(&id).unwrap().state = ActivityState::Running {
+            item: Some(pixtuoid_core::ToolUse {
+                tool_use_id: None,
+                detail: None,
+                kind: pixtuoid_core::ToolKind::Other,
+            }),
+        };
+        let (events, _) = observe(&scene, &HashMap::from([(id, view)]), &[row("sid")], &sent, now);
+        assert_eq!(kinds(&events), vec![Kind::Progress]);
+        assert_eq!(events[0].text, "▸ 调研");
     }
 
     /// Stuck is the verdict the card already shows. A new sentence here would

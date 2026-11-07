@@ -252,7 +252,7 @@ pub(crate) fn decode_cursor_hook_payload(obj: &HookObject) -> Result<Vec<AgentEv
 /// agent-office: Cursor's hooks name no turn we can rely on, so each prompt
 /// mints its own key; unique per run, so the ledger never takes a new turn
 /// for a closed one.
-fn fresh_turn() -> crate::state::TurnKey {
+pub(crate) fn fresh_turn() -> crate::state::TurnKey {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     crate::state::TurnKey::Id(format!("cu-{n}").into())

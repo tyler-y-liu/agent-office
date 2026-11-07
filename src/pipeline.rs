@@ -641,6 +641,56 @@ mod tests {
         assert_eq!(states[6], ActivityState::Idle);
     }
 
+    /// cursor-agent --print never fires `beforeSubmitPrompt` (2026.11.05).
+    /// The turn still has to stay open across calls, or the figure sits idle
+    /// for the whole think between them and Telegram hears `空闲 1s` a second.
+    #[test]
+    fn a_cursor_print_run_without_a_prompt_hook_stays_working_between_calls() {
+        use pixtuoid_core::source::decoder::{SOURCE_STAMP, decode_hook_payload};
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "8fd68852-print";
+        let id = AgentId::from_parts(CURSOR_SOURCE, sid);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let mut now = SystemTime::UNIX_EPOCH;
+        let mut states = Vec::new();
+        for event in ["sessionStart", "preToolUse", "postToolUse", "preToolUse", "postToolUse"] {
+            let v = json!({
+                "hook_event_name": event, "session_id": sid, "cwd": "",
+                "workspace_roots": ["/repo"],
+                "tool_name": "Grep", "tool_input": {"pattern": "ux"},
+                SOURCE_STAMP: CURSOR_SOURCE,
+            });
+            for ev in decode_hook_payload(v).expect("decodes") {
+                r.apply(&mut scene, ev, now, Transport::Hook);
+            }
+            now += Duration::from_secs(1);
+            states.push(scene.agents[&id].state.clone());
+        }
+        assert_eq!(states[0], ActivityState::Idle, "session start is not the turn");
+        assert!(
+            matches!(states[1], ActivityState::Running { item: Some(_) }),
+            "the first call is the work: {:?}",
+            states[1]
+        );
+        assert_eq!(
+            states[2],
+            ActivityState::Running { item: None },
+            "a call's end is not the turn's: {:?}",
+            states[2]
+        );
+        assert_eq!(
+            states[4],
+            ActivityState::Running { item: None },
+            "still that turn after the next call: {:?}",
+            states[4]
+        );
+    }
+
     /// A nested transcript is a sub-session. Its `stop` walks that child out;
     /// the parent, which has no such path, stays at its desk.
     #[test]
