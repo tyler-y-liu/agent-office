@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup or "nothing shows up"
+    url: https://github.com/tyler-y-liu/agent-office#readme
+    about: Requirements, install, and the per-agent connect steps are in the README. `agent-office doctor` checks them for you.

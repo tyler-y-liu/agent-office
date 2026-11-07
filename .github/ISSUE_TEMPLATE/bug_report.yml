@@ -1,0 +1,81 @@
+name: Bug report
+description: Something in the office looks wrong, or a session is not shown as it should be.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. `agent-office doctor` answers most of what is needed here, so please run it first.
+
+  - type: input
+    id: version
+    attributes:
+      label: agent-office version
+      description: Output of `agent-office --version`.
+      placeholder: agent-office 0.2.1
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      description: e.g. macOS 15.3, Apple Silicon. Mention if you run the Intel build.
+      placeholder: macOS 15.3, Apple Silicon
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which agent's session
+      description: The session that was shown wrongly, or that did not appear.
+      multiple: true
+      options:
+        - Claude Code
+        - Codex
+        - Cursor (cursor-agent)
+        - DeepSeek Harness (dsh)
+        - Not specific to one agent
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hooked
+    attributes:
+      label: Are hooks connected for it?
+      description: Whether you ran `agent-office connect` (or `connect codex|cursor|dsh`) for that agent. Without hooks it cannot tell when a session waits for approval.
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What the office showed, and what you expected instead. A screenshot helps; use demo sessions, not real ones.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `agent-office doctor`
+      description: Paste the whole thing. It is redacted of session content; check it before posting anyway.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start two sessions in the same repo
+        2. Let one wait for approval
+        3. ...
+    validations:
+      required: false

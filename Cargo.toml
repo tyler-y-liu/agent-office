@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2024"
 # The floor README.md/README.zh-CN.md promise; `ci.yml`'s msrv job pins to this.
 rust-version = "1.95"
-description = "An always-on-top pixel office where every Claude Code session is a little worker with its task over its head"
+description = "An always-on-top pixel office where every coding-agent session (Claude Code, Codex, Cursor, DSH) is a little worker with its task over its head"
 license = "MIT"
 repository = "https://github.com/tyler-y-liu/agent-office"
 

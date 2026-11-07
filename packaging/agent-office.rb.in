@@ -1,5 +1,5 @@
 class AgentOffice < Formula
-  desc "Always-on-top pixel office where every Claude Code session is a little worker"
+  desc "Always-on-top pixel office where every coding-agent session is a little worker"
   homepage "https://github.com/tyler-y-liu/agent-office"
   url "https://github.com/tyler-y-liu/agent-office/releases/download/v@VERSION@/agent-office-v@VERSION@-macos-universal.tar.gz"
   sha256 "@SHA256@"
