@@ -99,6 +99,9 @@ impl PanelState {
 pub const ON_HELPERS: &str = "agent-office:on-helpers";
 /// The item of a session whose model turn ended while its background task runs.
 pub const ON_BACKGROUND: &str = "agent-office:on-background";
+/// The item of a session whose model turn ended while its plan still has the
+/// current item in progress.
+pub const ON_TODO: &str = "agent-office:on-todo";
 
 /// Whether `slot` is idle without ever having run a turn: opened and not yet
 /// given anything to do, so it has no result to read. Its transcript holds
@@ -536,6 +539,9 @@ pub(crate) fn status(
                 (Some(i), _) if i.detail.as_deref() == Some(ON_BACKGROUND) => {
                     crate::i18n::t("… 等后台任务", "… on background").to_owned()
                 }
+                (Some(i), _) if i.detail.as_deref() == Some(ON_TODO) => {
+                    crate::i18n::t("… 待办未完", "… on its plan").to_owned()
+                }
                 (Some(_), Some(p)) => format!("▸ {}", p.label()),
                 (Some(_), None) => crate::i18n::t("▸ 工作中", "▸ working").to_owned(),
                 (None, _) => crate::i18n::t("… 思考中", "… thinking").to_owned(),
@@ -642,6 +648,13 @@ fn doing(
         } if &**d == ON_BACKGROUND => view
             .and_then(|v| v.recent_tools.last())
             .map(|tool| (one_line(tool), TEXT)),
+        ActivityState::Running {
+            item: Some(ToolUse {
+                detail: Some(d), ..
+            }),
+        } if &**d == ON_TODO => view
+            .and_then(|v| v.todo.as_deref())
+            .map(|todo| (one_line(todo), TEXT)),
         ActivityState::Running {
             item: Some(ToolUse {
                 detail: Some(d), ..
@@ -2699,6 +2712,36 @@ mod tests {
         assert_eq!(
             doing(slot, Some(&view), None),
             Some(("计划 1/4 · 前端▸ 后端▸".into(), TEXT))
+        );
+    }
+
+    /// A turn that ended on an open plan is drawn working via an internal
+    /// marker. The card must name the item: the marker on the second line
+    /// would read as a tool the session is calling.
+    #[test]
+    fn an_open_plan_card_names_the_item_not_the_marker() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let id = start(&mut scene, &mut r, "open", None, now);
+        let slot = scene.agents.get_mut(&id).unwrap();
+        slot.state = ActivityState::Running {
+            item: Some(ToolUse {
+                tool_use_id: None,
+                detail: Some(ON_TODO.into()),
+                kind: pixtuoid_core::state::ToolKind::Other,
+            }),
+        };
+        let view = TaskView {
+            todo: Some("补回归测试".into()),
+            ..TaskView::default()
+        };
+        let chip = status(slot, Some(&view), false, now).0;
+        assert!(!chip.contains("做完"), "not done: {chip}");
+        assert!(chip.contains("待办未完"), "still on the plan: {chip}");
+        assert_eq!(
+            doing(slot, Some(&view), None).map(|d| d.0),
+            Some("补回归测试".into())
         );
     }
 

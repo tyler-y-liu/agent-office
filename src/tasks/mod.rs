@@ -196,11 +196,22 @@ fn quiet_counts(scene: &SceneState, id: AgentId, now: SystemTime, long: Duration
 }
 
 /// The stuck verdict that holds for `slot`: only a working agent can be stuck,
-/// since one waiting on you or idle is not trying anything.
+/// since one waiting on you or idle is not trying anything. A turn drawn
+/// working only because its plan is still open is not trying either. The
+/// fail streak stays until the next human message, so counting that draw
+/// would mark the card stuck after the turn had already ended.
 pub fn stuck_at_work(slot: &pixtuoid_core::AgentSlot, view: Option<&TaskView>) -> Option<Stuck> {
-    view.and_then(|v| v.stuck).filter(|_| {
-        slot.exiting_at.is_none() && matches!(slot.state, ActivityState::Running { .. })
-    })
+    let trying = match &slot.state {
+        ActivityState::Running { item: Some(item) }
+            if item.detail.as_deref() == Some(crate::panel::ON_TODO) =>
+        {
+            false
+        }
+        ActivityState::Running { .. } => true,
+        _ => false,
+    };
+    view.and_then(|v| v.stuck)
+        .filter(|_| slot.exiting_at.is_none() && trying)
 }
 
 pub type TaskViews = Arc<HashMap<AgentId, TaskView>>;

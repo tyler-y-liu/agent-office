@@ -529,6 +529,67 @@ pub fn working_through_background(
     Arc::new(drawn)
 }
 
+/// Whether `view`'s plan still has the current item in progress. A list with
+/// no item in progress is a finished turn, pending items included. Codex's
+/// `update_plan` records that step only on `TaskView::todo` and leaves the
+/// list empty; a list that is present and has nothing in progress wins over
+/// a leftover active line.
+fn plan_still_open(view: &tasks::TaskView) -> bool {
+    if view
+        .todos
+        .iter()
+        .any(|(state, _)| *state == crate::tasks::extract::TodoState::Doing)
+    {
+        return true;
+    }
+    view.todos.is_empty() && view.todo.is_some()
+}
+
+/// `scene` with each session whose plan still has an item in progress drawn
+/// working. The model's turn is over, but that item is not done, the same
+/// way a background task is not. A question to you still takes priority.
+///
+/// Only inside the normal idle window: a host that dies mid-plan writes no
+/// completion, and a card that stayed Working forever would be as wrong as
+/// the done one this replaces. Past [`HIDE_IDLE_AFTER`] the session rests
+/// like any other, and the next turn brings it back.
+pub fn working_through_todos(
+    scene: &Arc<SceneState>,
+    views: &tasks::TaskViews,
+    seen: &HashMap<AgentId, SystemTime>,
+    now: SystemTime,
+) -> Arc<SceneState> {
+    let busy: Vec<AgentId> = scene
+        .agents
+        .values()
+        .filter(|s| {
+            s.exiting_at.is_none()
+                && s.state == pixtuoid_core::ActivityState::Idle
+                && !idle_long(s, now)
+                && views.get(&s.agent_id).is_some_and(plan_still_open)
+                && panel::waits_on_you(s, views.get(&s.agent_id), panel::read_since_idle(s, seen))
+                    .is_none()
+        })
+        .map(|s| s.agent_id)
+        .collect();
+    if busy.is_empty() {
+        return Arc::clone(scene);
+    }
+    let mut drawn = (**scene).clone();
+    for id in busy {
+        if let Some(s) = drawn.agents.get_mut(&id) {
+            s.state = pixtuoid_core::ActivityState::Running {
+                item: Some(pixtuoid_core::state::ToolUse {
+                    tool_use_id: None,
+                    detail: Some(panel::ON_TODO.into()),
+                    kind: pixtuoid_core::state::ToolKind::Other,
+                }),
+            };
+        }
+    }
+    Arc::new(drawn)
+}
+
 /// How long a session idles before the office stops drawing it.
 const HIDE_IDLE_AFTER: Duration = Duration::from_secs(60 * 60);
 
@@ -624,16 +685,22 @@ impl Core {
 
     /// Every live session, as the transcripts date their idle stretches.
     fn live(&self, views: &tasks::TaskViews) -> Arc<SceneState> {
+        let now = SystemTime::now();
         named_subagents(
-            &working_through_background(
-                &working_through_helpers(
-                    &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+            &working_through_todos(
+                &working_through_background(
+                    &working_through_helpers(
+                        &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+                        views,
+                        &self.ui.seen,
+                    ),
                     views,
                     &self.ui.seen,
+                    now,
                 ),
                 views,
                 &self.ui.seen,
-                SystemTime::now(),
+                now,
             ),
             views,
         )
@@ -2713,7 +2780,11 @@ mod tests {
     /// in progress. That item is unfinished work, the same way a background
     /// task is: the card must not say done, and the figure must stay at its
     /// desk instead of lining up in your office. A plan with nothing in
-    /// progress is a finished turn. A question to you still waits.
+    /// progress is a finished turn, including one that still carries a step
+    /// string from earlier. A question to you still waits. A list that keeps
+    /// finished items beside the current one — how a todo list is actually
+    /// written — is still unfinished, and the chip has to say so: any other
+    /// working line also omits 「做完」.
     #[test]
     fn an_open_todo_is_not_drawn_as_done() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
@@ -2739,6 +2810,12 @@ mod tests {
         let open = start("open");
         let finished = start("finished");
         let asked = start("asked");
+        let pending = start("pending");
+        let completed = start("completed");
+        // Codex's update_plan never fills `todos`; the in-progress step is `todo`.
+        let step = start("step");
+        // Completed and pending items stay in the list next to the current one.
+        let mixed = start("mixed");
         let doing = |what: &str| tasks::TaskView {
             todo: Some(what.into()),
             todos: vec![(crate::tasks::extract::TodoState::Doing, what.into())],
@@ -2751,15 +2828,62 @@ mod tests {
                 asked,
                 tasks::TaskView {
                     todo: Some("等你选方案".into()),
+                    todos: vec![(
+                        crate::tasks::extract::TodoState::Doing,
+                        "等你选方案".into(),
+                    )],
                     outcome: Some("问：先合哪个？".into()),
                     outcome_summarized: true,
                     ..ran()
                 },
             ),
+            (
+                pending,
+                tasks::TaskView {
+                    // The step string is not "in progress" once the list says otherwise.
+                    todo: Some("还没开始".into()),
+                    todos: vec![(crate::tasks::extract::TodoState::Pending, "还没开始".into())],
+                    ..ran()
+                },
+            ),
+            (
+                completed,
+                tasks::TaskView {
+                    todo: Some("已经写完".into()),
+                    todos: vec![(crate::tasks::extract::TodoState::Done, "已经写完".into())],
+                    ..ran()
+                },
+            ),
+            (
+                step,
+                tasks::TaskView {
+                    todo: Some("改登录页".into()),
+                    ..ran()
+                },
+            ),
+            (
+                mixed,
+                tasks::TaskView {
+                    todo: Some("补回归测试".into()),
+                    todos: vec![
+                        (crate::tasks::extract::TodoState::Done, "已经写完".into()),
+                        (crate::tasks::extract::TodoState::Doing, "补回归测试".into()),
+                        (crate::tasks::extract::TodoState::Pending, "还没开始".into()),
+                    ],
+                    ..ran()
+                },
+            ),
         ]));
         let seen = HashMap::new();
-        let live = working_through_background(
-            &working_through_helpers(&Arc::new(scene), &views, &seen),
+        // The helpers `Core::live` composes. This stays green if `live` stops
+        // calling them; `an_open_todo_is_what_the_window_draws` is that check.
+        let live = working_through_todos(
+            &working_through_background(
+                &working_through_helpers(&Arc::new(scene), &views, &seen),
+                &views,
+                &seen,
+                now,
+            ),
             &views,
             &seen,
             now,
@@ -2767,7 +2891,22 @@ mod tests {
         let office = as_seen(&live, &views, &seen, false, now);
         let group = |id: AgentId| panel::Group::of(&live.agents[&id], views.get(&id), now, false);
         let chip = |id: AgentId| panel::status(&live.agents[&id], views.get(&id), false, now).0;
+        let on_plan = |id: AgentId| match &live.agents[&id].state {
+            pixtuoid_core::ActivityState::Running { item: Some(item) } => {
+                item.detail.as_deref() == Some(panel::ON_TODO)
+            }
+            _ => false,
+        };
         assert_eq!(group(open), panel::Group::Working, "its current todo is still open");
+        assert!(
+            on_plan(open),
+            "the draw has to be the open-plan marker, not some other running state"
+        );
+        assert!(
+            chip(open).contains("待办未完"),
+            "the chip must say the plan is unfinished; a thinking or tool chip also omits 做完: {}",
+            chip(open)
+        );
         assert!(!chip(open).contains("做完"), "the card must not say the work is done: {}", chip(open));
         assert_eq!(
             pixtuoid_scene::waiting::need(&office.agents[&open], now),
@@ -2775,7 +2914,250 @@ mod tests {
             "the figure stays at its desk, not in your office as a result to read"
         );
         assert_eq!(group(finished), panel::Group::Done, "nothing left in progress");
+        assert_eq!(group(pending), panel::Group::Done, "pending is not work in progress");
+        assert!(
+            chip(pending).contains("做完"),
+            "a not-yet-started list is a finished turn to read: {}",
+            chip(pending)
+        );
+        assert_eq!(group(completed), panel::Group::Done, "a finished list is a finished turn");
+        assert!(
+            chip(completed).contains("做完"),
+            "a leftover step string does not keep a finished list working: {}",
+            chip(completed)
+        );
+        assert_eq!(
+            group(step),
+            panel::Group::Working,
+            "an in-progress step with no list still counts"
+        );
+        assert!(
+            chip(step).contains("待办未完"),
+            "an empty list with a current step is the same unfinished plan: {}",
+            chip(step)
+        );
+        assert!(!chip(step).contains("做完"), "not done: {}", chip(step));
+        assert_eq!(
+            pixtuoid_scene::waiting::need(&office.agents[&step], now),
+            None,
+            "an in-progress step stays at its desk"
+        );
+        assert_eq!(
+            group(mixed),
+            panel::Group::Working,
+            "one in-progress item keeps the turn unfinished when others are already done"
+        );
+        assert!(
+            chip(mixed).contains("待办未完") && !chip(mixed).contains("做完"),
+            "a finished neighbour must not make the card say done: {}",
+            chip(mixed)
+        );
+        assert_eq!(
+            pixtuoid_scene::waiting::need(&office.agents[&mixed], now),
+            None,
+            "a mixed plan stays at its desk"
+        );
         assert_eq!(group(asked), panel::Group::Waiting, "a question still waits");
+        assert!(
+            chip(asked).contains("等你") && !chip(asked).contains("待办未完"),
+            "an open item must not cover a question to you: {}",
+            chip(asked)
+        );
+    }
+
+    /// A fail streak is cleared only by the next human message, so it is
+    /// still on the view after the turn ends. Drawing that idle session
+    /// working for an open todo must not turn the leftover streak into
+    /// 「卡住」: the card, the face and a dispatch-on-stuck would all treat
+    /// a finished turn as a session that needs a look.
+    #[test]
+    fn an_open_todo_is_not_stuck_for_a_leftover_fail_streak() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let id = AgentId::from_parts(pipeline::CC_SOURCE, "open");
+        r.apply(
+            &mut scene,
+            AgentEvent::SessionStart {
+                agent_id: id,
+                source: pipeline::CC_SOURCE.into(),
+                session_id: "open".into(),
+                cwd: "/repo".into(),
+                parent_id: None,
+            },
+            now,
+            Transport::Hook,
+        );
+        scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
+        let views: tasks::TaskViews = Arc::new(HashMap::from([(
+            id,
+            tasks::TaskView {
+                todo: Some("补回归测试".into()),
+                todos: vec![(crate::tasks::extract::TodoState::Doing, "补回归测试".into())],
+                stuck: Some(tasks::Stuck::Failing(3)),
+                ..ran()
+            },
+        )]));
+        let seen = HashMap::new();
+        let live = working_through_todos(&Arc::new(scene), &views, &seen, now);
+        let slot = &live.agents[&id];
+        let chip = panel::status(slot, views.get(&id), false, now).0;
+        assert_eq!(
+            panel::Group::of(slot, views.get(&id), now, false),
+            panel::Group::Working,
+            "a leftover fail streak must not put an open todo in 卡住"
+        );
+        assert!(
+            chip.contains("待办未完") && !chip.contains("连续失败"),
+            "the chip stays on the open item, not the streak: {chip}"
+        );
+    }
+
+    /// A host that dies mid-plan never writes the open item completed. Past
+    /// the idle window that leftover must not keep the card in 干活: the
+    /// office would otherwise hold a session you can no longer finish, the
+    /// same way a background task killed with its host must not.
+    #[test]
+    fn an_open_todo_does_not_hold_the_card_past_the_idle_window() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let id = AgentId::from_parts(pipeline::CC_SOURCE, "open");
+        r.apply(
+            &mut scene,
+            AgentEvent::SessionStart {
+                agent_id: id,
+                source: pipeline::CC_SOURCE.into(),
+                session_id: "open".into(),
+                cwd: "/repo".into(),
+                parent_id: None,
+            },
+            now,
+            Transport::Hook,
+        );
+        scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
+        let views: tasks::TaskViews = Arc::new(HashMap::from([(
+            id,
+            tasks::TaskView {
+                todo: Some("补回归测试".into()),
+                todos: vec![(crate::tasks::extract::TodoState::Doing, "补回归测试".into())],
+                ..ran()
+            },
+        )]));
+        let seen = HashMap::new();
+        let scene = Arc::new(scene);
+        let fresh = working_through_todos(&scene, &views, &seen, now);
+        assert_eq!(
+            panel::Group::of(&fresh.agents[&id], views.get(&id), now, false),
+            panel::Group::Working,
+            "inside the window the open item is still work"
+        );
+        // A cutoff shorter than the hour — the fifteen minutes a finished
+        // result waits to be read — would already have dropped it here, and
+        // the two ends of the window would still agree.
+        let almost = now + HIDE_IDLE_AFTER - Duration::from_secs(1);
+        let holding = working_through_todos(&scene, &views, &seen, almost);
+        let holding_chip = panel::status(&holding.agents[&id], views.get(&id), false, almost).0;
+        assert_eq!(
+            panel::Group::of(&holding.agents[&id], views.get(&id), almost, false),
+            panel::Group::Working,
+            "a second short of the hour the open item is still work"
+        );
+        assert!(
+            holding_chip.contains("待办未完"),
+            "still the unfinished plan, not an idle card that merely omits 做完: {holding_chip}"
+        );
+        let later = now + HIDE_IDLE_AFTER;
+        let stale = working_through_todos(&scene, &views, &seen, later);
+        assert_eq!(
+            stale.agents[&id].state,
+            pixtuoid_core::ActivityState::Idle,
+            "an unfinished todo does not hold the card forever"
+        );
+        assert_eq!(
+            panel::Group::of(&stale.agents[&id], views.get(&id), later, false),
+            panel::Group::Idle,
+            "past the idle window it rests; it is not still working and not filed to read"
+        );
+    }
+
+    /// [`Core::scene`] is what the window draws. The helper tests above call
+    /// the same functions `live` composes, so they stay green if `live` stops
+    /// calling them, and the session shows up under 做完待看. DSH's
+    /// `todo_write` keeps finished items in the same list; the rule does not
+    /// look at which CLI the session came from.
+    #[test]
+    fn an_open_todo_is_what_the_window_draws() {
+        let now = SystemTime::now();
+        let mut scene = SceneState::uniform(4);
+        let mut r = Reducer::new();
+        let mut start = |sid: &str| {
+            let id = AgentId::from_parts(crate::dsh::SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: crate::dsh::SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: None,
+                },
+                now,
+                Transport::Hook,
+            );
+            scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
+            id
+        };
+        let open = start("open");
+        let pending = start("pending");
+        let views: tasks::TaskViews = Arc::new(HashMap::from([
+            (
+                open,
+                tasks::TaskView {
+                    todo: Some("补回归测试".into()),
+                    todos: vec![
+                        (crate::tasks::extract::TodoState::Done, "已经写完".into()),
+                        (crate::tasks::extract::TodoState::Doing, "补回归测试".into()),
+                        (crate::tasks::extract::TodoState::Pending, "还没开始".into()),
+                    ],
+                    ..ran()
+                },
+            ),
+            (
+                pending,
+                tasks::TaskView {
+                    todos: vec![(crate::tasks::extract::TodoState::Pending, "还没开始".into())],
+                    ..ran()
+                },
+            ),
+        ]));
+        let mut core = core_with_scene(scene);
+        let (_views_tx, views_rx) = tokio::sync::watch::channel(Arc::clone(&views));
+        core.views_rx = views_rx;
+        let drawn = core.scene();
+        let at = SystemTime::now();
+        let group = |id: AgentId| panel::Group::of(&drawn.agents[&id], views.get(&id), at, false);
+        let chip = |id: AgentId| panel::status(&drawn.agents[&id], views.get(&id), false, at).0;
+        assert_eq!(
+            group(open),
+            panel::Group::Working,
+            "the window must not file an open plan under 做完待看"
+        );
+        assert!(
+            chip(open).contains("待办未完") && !chip(open).contains("做完"),
+            "the window's chip must say the plan is unfinished: {}",
+            chip(open)
+        );
+        assert_eq!(
+            pixtuoid_scene::waiting::need(&drawn.agents[&open], at),
+            None,
+            "the figure stays at its desk, not in line as a result to read"
+        );
+        assert_eq!(
+            group(pending),
+            panel::Group::Done,
+            "a list with nothing in progress is still there to read"
+        );
     }
 
     /// The desktop app keeps every session alive until it is archived, so
