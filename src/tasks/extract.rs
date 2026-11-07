@@ -49,6 +49,8 @@ pub struct Transcript {
     pub fail_streak: u32,
     /// Each call whose result is not in yet, as `(tool_use id, tool)`.
     pub outstanding: Vec<(String, String)>,
+    /// Live CC background tasks, as `(background task id, original tool-use id)`.
+    pub(super) background: Vec<(String, String)>,
     /// When the human last spoke, which is when the current turn began;
     /// `None` when that line carried no timestamp.
     pub turn_started: Option<SystemTime>,
@@ -131,6 +133,42 @@ impl Transcript {
             .iter()
             .any(|(_, t)| tools.contains(&t.as_str()))
     }
+
+    /// Whether CC still has background work whose completion has not arrived.
+    pub fn has_background_work(&self) -> bool {
+        !self.background.is_empty()
+    }
+}
+
+/// A successful background launch, keyed both by its new task and original call.
+fn background_launch(v: &Value, result: &Value) -> Option<(String, String)> {
+    let task = v.pointer("/toolUseResult/backgroundTaskId")?.as_str()?;
+    let call = result.get("tool_use_id")?.as_str()?;
+    if task.is_empty() || call.is_empty() {
+        return None;
+    }
+    Some((task.to_owned(), call.to_owned()))
+}
+
+/// One XML tag's text in CC's structured task notification.
+fn notification_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let body = text.split_once(&format!("<{tag}>"))?.1;
+    let text = body.split_once(&format!("</{tag}>"))?.0.trim();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The completed task and original call. The origin is authoritative: a human
+/// quoting the same markup must not make live background work look finished.
+fn background_completion(v: &Value, text: &str) -> Option<(String, String)> {
+    if v.pointer("/origin/kind").and_then(Value::as_str) != Some("task-notification")
+        || !text.trim_start().starts_with("<task-notification>")
+    {
+        return None;
+    }
+    Some((
+        notification_tag(text, "task-id")?.to_owned(),
+        notification_tag(text, "tool-use-id")?.to_owned(),
+    ))
 }
 
 /// A tool result's text, however its content is shaped.
@@ -347,7 +385,13 @@ impl Transcript {
                 if !results.is_empty() {
                     let streak_before = self.fail_streak;
                     for b in &results {
-                        if let Some(id) = b.get("tool_use_id").and_then(Value::as_str) {
+                        if let Some((task, call)) = background_launch(v, b) {
+                            // A launch acknowledges the tool call, not its work:
+                            // the original Bash stays outstanding until its notice.
+                            if !self.background.contains(&(task.clone(), call.clone())) {
+                                self.background.push((task, call));
+                            }
+                        } else if let Some(id) = b.get("tool_use_id").and_then(Value::as_str) {
                             self.outstanding.retain(|(o, _)| o != id);
                         }
                     }
@@ -380,6 +424,12 @@ impl Transcript {
             }
             _ => return,
         };
+        if let Some((task, call)) = background_completion(v, &text) {
+            self.background
+                .retain(|(t, c)| !(t == &task && c == &call));
+            self.outstanding.retain(|(o, _)| o != &call);
+            return;
+        }
         if human_prompt(&text).is_some() {
             self.human_spoke(v);
         }
@@ -1362,6 +1412,52 @@ mod tests {
         t.feed(&tool("Edit", json!({"file_path":"/a.rs"})));
         t.feed(&tool("TodoWrite", json!({"todos":[]})));
         assert_eq!(t.phase, Some(Phase::Code));
+    }
+
+    /// A background tool result only launches the work: the session must not
+    /// look done until the matching task notification arrives. Quoted markup
+    /// without CC's structured origin is not a completion event.
+    #[test]
+    fn background_tasks_stay_outstanding_until_their_own_completion() {
+        let mut t = Transcript::default();
+        for (id, task) in [("call-1", "bg-1"), ("call-2", "bg-2")] {
+            t.feed(&call(
+                id,
+                "Bash",
+                json!({"command":"gh run watch","run_in_background":true}),
+            ));
+            t.feed(
+                &json!({"type":"user","toolUseResult":{"backgroundTaskId":task},
+                    "message":{"content":[{"type":"tool_result","tool_use_id":id,
+                    "content":"Command running in background","is_error":false}]}})
+                .to_string(),
+            );
+        }
+        assert!(t.has_background_work());
+        assert_eq!(t.outstanding.len(), 2, "both background calls stay open");
+
+        let quoted = user(json!(
+            "<task-notification><task-id>bg-1</task-id><tool-use-id>call-1</tool-use-id></task-notification>"
+        ));
+        t.feed(&quoted);
+        assert!(t.has_background_work(), "quoted markup ends nothing");
+
+        t.feed(
+            &json!({"type":"user","origin":{"kind":"task-notification"},
+                "message":{"content":"<task-notification><task-id>bg-1</task-id><tool-use-id>call-1</tool-use-id><status>completed</status></task-notification>"}})
+            .to_string(),
+        );
+        assert!(t.has_background_work(), "the second task still runs");
+        assert_eq!(t.outstanding.len(), 1);
+        assert_eq!(t.outstanding[0].0, "call-2");
+
+        t.feed(
+            &json!({"type":"user","origin":{"kind":"task-notification"},
+                "message":{"content":"<task-notification><task-id>bg-2</task-id><tool-use-id>call-2</tool-use-id><status>failed</status></task-notification>"}})
+            .to_string(),
+        );
+        assert!(!t.has_background_work());
+        assert!(t.outstanding.is_empty(), "a failed background task is over too");
     }
 
     /// Errors in a row are what an agent going round in circles looks like;

@@ -45,6 +45,8 @@ pub struct TaskView {
     pub todos: Vec<(extract::TodoState, String)>,
     pub phase: Option<Phase>,
     pub stuck: Option<Stuck>,
+    /// CC has background work whose completion has not arrived.
+    pub background: bool,
     /// When the current turn began: the human's last prompt.
     pub turn_started: Option<SystemTime>,
     /// What the turn came to, from the agent's last reply: the model's line,
@@ -839,6 +841,7 @@ fn view(e: &Entry, working: bool, now: Instant) -> TaskView {
         todos: t.todos.clone(),
         phase: t.phase,
         stuck: stuck(t, working, now.duration_since(e.grew_at), stuck_limits()),
+        background: t.has_background_work(),
         turn_started: t.turn_started,
         outcome: outcome.as_ref().map(|(o, _)| o.clone()),
         outcome_summarized: outcome.is_some_and(|(_, s)| s),

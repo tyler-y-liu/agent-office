@@ -97,6 +97,8 @@ impl PanelState {
 /// ([`crate::core::working_through_helpers`]): its own turn is over, so it
 /// is waiting on them, not thinking.
 pub const ON_HELPERS: &str = "agent-office:on-helpers";
+/// The item of a session whose model turn ended while its background task runs.
+pub const ON_BACKGROUND: &str = "agent-office:on-background";
 
 /// Whether `slot` is idle without ever having run a turn: opened and not yet
 /// given anything to do, so it has no result to read. Its transcript holds
@@ -517,6 +519,9 @@ pub(crate) fn status(
                 (Some(i), _) if i.detail.as_deref() == Some(ON_HELPERS) => {
                     crate::i18n::t("… 等子代理", "… on helpers").to_owned()
                 }
+                (Some(i), _) if i.detail.as_deref() == Some(ON_BACKGROUND) => {
+                    crate::i18n::t("… 等后台任务", "… on background").to_owned()
+                }
                 (Some(_), Some(p)) => format!("▸ {}", p.label()),
                 (Some(_), None) => crate::i18n::t("▸ 工作中", "▸ working").to_owned(),
                 (None, _) => crate::i18n::t("… 思考中", "… thinking").to_owned(),
@@ -614,6 +619,11 @@ fn doing(
                 ..
             }),
         } => delegated.map(|d| (one_line(d), TEXT)),
+        ActivityState::Running {
+            item: Some(ToolUse { detail: Some(d), .. }),
+        } if &**d == ON_BACKGROUND => view
+            .and_then(|v| v.recent_tools.last())
+            .map(|tool| (one_line(tool), TEXT)),
         ActivityState::Running {
             item: Some(ToolUse {
                 detail: Some(d), ..

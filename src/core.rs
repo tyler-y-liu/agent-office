@@ -478,6 +478,51 @@ pub fn working_through_helpers(
     Arc::new(drawn)
 }
 
+/// `scene` with each session whose background task still runs drawn working.
+/// The model's turn is over, but the task it promised to follow is not done.
+/// A question to you still takes priority, as it does over helpers.
+///
+/// Only inside the normal idle window: a background task killed with its host
+/// writes no completion, and a card that stayed Working forever would be as
+/// wrong as the done one this replaces. Past [`HIDE_IDLE_AFTER`] the session
+/// rests like any other, and the completion's own turn brings it back.
+pub fn working_through_background(
+    scene: &Arc<SceneState>,
+    views: &tasks::TaskViews,
+    seen: &HashMap<AgentId, SystemTime>,
+    now: SystemTime,
+) -> Arc<SceneState> {
+    let busy: Vec<AgentId> = scene
+        .agents
+        .values()
+        .filter(|s| {
+            s.exiting_at.is_none()
+                && s.state == pixtuoid_core::ActivityState::Idle
+                && !idle_long(s, now)
+                && views.get(&s.agent_id).is_some_and(|v| v.background)
+                && panel::waits_on_you(s, views.get(&s.agent_id), panel::read_since_idle(s, seen))
+                    .is_none()
+        })
+        .map(|s| s.agent_id)
+        .collect();
+    if busy.is_empty() {
+        return Arc::clone(scene);
+    }
+    let mut drawn = (**scene).clone();
+    for id in busy {
+        if let Some(s) = drawn.agents.get_mut(&id) {
+            s.state = pixtuoid_core::ActivityState::Running {
+                item: Some(pixtuoid_core::state::ToolUse {
+                    tool_use_id: None,
+                    detail: Some(panel::ON_BACKGROUND.into()),
+                    kind: pixtuoid_core::state::ToolKind::Other,
+                }),
+            };
+        }
+    }
+    Arc::new(drawn)
+}
+
 /// How long a session idles before the office stops drawing it.
 const HIDE_IDLE_AFTER: Duration = Duration::from_secs(60 * 60);
 
@@ -573,10 +618,15 @@ impl Core {
     /// Every live session, as the transcripts date their idle stretches.
     fn live(&self, views: &tasks::TaskViews) -> Arc<SceneState> {
         named_subagents(
-            &working_through_helpers(
-                &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+            &working_through_background(
+                &working_through_helpers(
+                    &idle_since_written(&self.pipe.scene_rx.borrow().clone(), views),
+                    views,
+                    &self.ui.seen,
+                ),
                 views,
                 &self.ui.seen,
+                SystemTime::now(),
             ),
             views,
         )
@@ -2349,12 +2399,11 @@ mod tests {
         ));
     }
 
-    /// A session that backgrounds its subagents ends its turn while they
-    /// run: drawn by its own state it read 「闲着」 and walked off to the
-    /// rooftop while its helpers still worked. It works until they are done;
-    /// one that asked you something still waits on you.
+    /// A session whose model turn ended while its helpers or background task
+    /// runs must not read 「闲着」 or go to the 「做完」 group. A question to
+    /// you still takes priority over both kinds of outstanding work.
     #[test]
-    fn a_session_with_a_helper_at_work_is_working() {
+    fn sessions_with_helpers_or_background_work_stay_working() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let mut scene = SceneState::uniform(16);
         let mut r = Reducer::new();
@@ -2383,11 +2432,12 @@ mod tests {
         let asked_helper = start("agent-asked", Some(asked));
         let done = start("done", None);
         let done_helper = start("agent-done", Some(done));
+        let background = start("background", None);
         let running = pixtuoid_core::ActivityState::Running { item: None };
         for id in [helper, leaf, asked_helper] {
             scene.agents.get_mut(&id).unwrap().state = running.clone();
         }
-        for id in [lead, deep, mid, asked, done, done_helper] {
+        for id in [lead, deep, mid, asked, done, done_helper, background] {
             scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
         }
         let views: tasks::TaskViews = Arc::new(HashMap::from([
@@ -2396,13 +2446,27 @@ mod tests {
                 tasks::TaskView {
                     outcome: Some("问：先合哪个？".into()),
                     outcome_summarized: true,
+                    background: true,
                     ..Default::default()
                 },
             ),
             (done, ran()),
+            (
+                background,
+                tasks::TaskView {
+                    background: true,
+                    ..Default::default()
+                },
+            ),
         ]));
         let seen = HashMap::from([(lead, now)]);
-        let drawn = working_through_helpers(&Arc::new(scene), &views, &seen);
+        let kept = Arc::new(scene.clone());
+        let drawn = working_through_background(
+            &working_through_helpers(&Arc::new(scene), &views, &seen),
+            &views,
+            &seen,
+            now,
+        );
         let group = |id: AgentId| {
             let s = &drawn.agents[&id];
             panel::Group::of(s, views.get(&id), now, panel::read_since_idle(s, &seen))
@@ -2412,10 +2476,20 @@ mod tests {
         assert_eq!(group(mid), panel::Group::Working);
         assert_eq!(group(asked), panel::Group::Waiting, "a question to you still waits");
         assert_eq!(group(done), panel::Group::Done, "helpers done: done");
+        assert_eq!(group(background), panel::Group::Working, "background still runs");
         let chip = |id: AgentId| {
             panel::status(&drawn.agents[&id], views.get(&id), false, now).0
         };
         assert!(chip(lead).contains("等子代理"), "not thinking: {}", chip(lead));
+        assert!(chip(background).contains("等后台任务"), "not done: {}", chip(background));
+        // A background task killed with its host writes no completion. Past the
+        // idle window the card must rest again rather than read Working all day.
+        let stale = working_through_background(&kept, &views, &seen, now + HIDE_IDLE_AFTER);
+        assert_eq!(
+            stale.agents[&background].state,
+            pixtuoid_core::ActivityState::Idle,
+            "an unfinished background task does not hold the card forever"
+        );
     }
 
     /// The desktop app keeps every session alive until it is archived, so
