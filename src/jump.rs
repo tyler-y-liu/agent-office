@@ -45,6 +45,9 @@ pub(crate) fn root_agent(scene: &SceneState, id: AgentId) -> Result<&AgentSlot, 
 /// footer's note on where it went, the error what to tell the user.
 pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, String> {
     let slot = root_agent(scene, id)?;
+    // The Session a dsh click left for its page, when there is one: the page
+    // that takes it is the one showing the Session.
+    let mut asked = None;
     let pid = match &*slot.source {
         crate::pipeline::CC_SOURCE => {
             let dir = crate::tasks::projects_root()
@@ -62,7 +65,15 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
         // Codex is read from its rollouts, so no hook carries its pid: the
         // process holding the rollout open is found at click time.
         crate::pipeline::CODEX_SOURCE => codex_pid(&slot.session_id).ok_or_else(gone)?,
-        // dsh's plugin and Cursor's hook stamp the CLI's pid on its events.
+        // dsh has no deep link to a Session: the window is raised below, and
+        // the page is left the id to show. Without the route, the click is
+        // the plain raise it used to be.
+        crate::dsh::SOURCE => {
+            let pid = stamped_pid(slot, pixtuoid_core::source::pid_start_marker)?;
+            asked = crate::dsh::request_jump(&slot.session_id, pid).ok();
+            pid
+        }
+        // Cursor's hook stamps the CLI's pid on its events.
         _ => stamped_pid(slot, pixtuoid_core::source::pid_start_marker)?,
     };
     if !cfg!(target_os = "macos") {
@@ -72,8 +83,30 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
         )
         .to_owned());
     }
-    focus_terminal(&OsProcessTable, &OsTmux, pid, activate_os, select_tab_os)
+    let raised = focus_terminal(&OsProcessTable, &OsTmux, pid, activate_os, select_tab_os);
+    let Some(jump) = asked else {
+        return raised;
+    };
+    // A headless `dsh web` has no terminal above it, yet a page that took the
+    // click has the Session in view: that is the jump. One that nobody took
+    // leaves the window raised, and the note does not claim more.
+    let taken = jump.taken(TAKEN_FOR);
+    match (raised, taken) {
+        (_, true) => Ok(crate::i18n::t(
+            "已切到 DSH 的这个会话",
+            "switched to this session in DSH",
+        )),
+        (Ok(_), false) => Ok(crate::i18n::t(
+            "已切到 DSH 窗口，但没能定位会话",
+            "raised DSH, but could not locate the session",
+        )),
+        (Err(why), false) => Err(why),
+    }
 }
+
+/// How long a click waits for the page that polls for it; the page asks once
+/// a second, and the window is already being raised meanwhile.
+const TAKEN_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn gone() -> &'static str {
     crate::i18n::t("这个会话的进程已经不在了", "this session's process is gone")

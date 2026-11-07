@@ -18,10 +18,15 @@
 //   Per host, since the app and a CLI can share one DSH_HOME.
 // - A local file bridge under DISPATCH: agent-office asks this Host to create
 //   a Session under an office-* preset, optionally submitting its first task.
+// - A local HTTP route the page polls for the Session a click in agent-office
+//   picked (JUMP): DSH has no deep link to one, and only the page can switch
+//   its main view. The request names this Host's pid and start marker, since
+//   a desktop app and a `dsh web` can share one DSH_HOME.
 const HOOK_EXE = __HOOK_EXE__
 const TRANSCRIPTS = __TRANSCRIPTS__
 const VIEWING = __VIEWING__
 const DISPATCH = __DISPATCH__
+const JUMP = __JUMP__
 
 import { execFileSync, spawn } from "node:child_process"
 import {
@@ -348,6 +353,64 @@ export function apply(ctx) {
     }
     controller.follow = wrapped
     write()
+  })
+
+  // A click in agent-office names a Session it wants in view. DSH has no
+  // deep link to one, so the office leaves the id here and the page asks this
+  // Host for it. Only the Host the request names may take it, and taking it
+  // removes it: one click opens one page, once. A request for another Host is
+  // left alone; an expired one is dropped by whichever Host reads it.
+  ctx.inject(["connection"], (ctx) => {
+    const take = () => {
+      let text
+      try {
+        text = readFileSync(JUMP, "utf8")
+      } catch {
+        return undefined
+      }
+      const remove = () => {
+        try {
+          rmSync(JUMP, { force: true })
+        } catch {}
+      }
+      let request
+      try {
+        request = JSON.parse(text)
+      } catch {
+        remove()
+        return undefined
+      }
+      const mine =
+        START_MARKER !== undefined
+        && request?.pid === process.pid
+        && request?.startMarker === START_MARKER
+      const fresh = typeof request?.expiresAt === "number" && Date.now() < request.expiresAt
+      const sessionId = typeof request?.sessionId === "string" ? request.sessionId : ""
+      if (mine || !fresh) remove()
+      return mine && fresh && sessionId ? { sessionId } : undefined
+    }
+    ctx.effect(
+      () =>
+        ctx.connection.fetch.register({
+          path: "/api/agent-office/jump",
+          methods: ["GET"],
+          requestBody: "buffered",
+          fetch: () => {
+            let jump
+            try {
+              jump = take()
+            } catch {}
+            return new Response(JSON.stringify(jump ?? {}), {
+              status: 200,
+              headers: {
+                "content-type": "application/json; charset=utf-8",
+                "cache-control": "no-store",
+              },
+            })
+          },
+        }),
+      "agent-office: jump route",
+    )
   })
 
   // The dispatch bridge polls as well as watches: watchers can miss a rename,

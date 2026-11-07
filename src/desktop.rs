@@ -429,13 +429,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let viewing_dir = dir.join("viewing");
         let literal = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
-        // The same four substitutions as connect performs; importing this
+        // The same five substitutions as connect performs; importing this
         // generated file exercises the plugin, not a copied ps expression.
         let source = include_str!("dsh_plugin.mjs")
             .replace("__HOOK_EXE__", &literal(&dir.join("agent-office")))
             .replace("__TRANSCRIPTS__", &literal(&dir.join("transcripts")))
             .replace("__VIEWING__", &literal(&viewing_dir))
-            .replace("__DISPATCH__", &literal(&dir.join("dispatch")));
+            .replace("__DISPATCH__", &literal(&dir.join("dispatch")))
+            .replace("__JUMP__", &literal(&dir.join("jump.json")));
         let plugin = dir.join("plugin.mjs");
         std::fs::write(&plugin, source).unwrap();
         let harness = r#"

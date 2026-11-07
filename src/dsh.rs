@@ -52,6 +52,16 @@ pub fn dispatch_dir() -> Option<PathBuf> {
     our_dir().map(|d| d.join("dispatch"))
 }
 
+/// The Session a click asked to see, left for this Host's page: DSH has no
+/// deep link to one, so the page asks its own Host for the id.
+fn jump_file(dir: &Path) -> PathBuf {
+    dir.join("jump.json")
+}
+
+/// How long a click's Session waits for the page: long enough for a window
+/// being raised, short enough that a page opened much later does not jump.
+const JUMP_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn plugin_path(dir: &Path) -> PathBuf {
     dir.join("agent-office-dsh.mjs")
 }
@@ -68,14 +78,112 @@ fn patch_path(home: &Path) -> PathBuf {
     home.join("cordis.patch.yml")
 }
 
-fn plugin_source(exe: &Path, transcripts: &Path, viewing: &Path, dispatch: &Path) -> Result<String> {
+fn plugin_source(
+    exe: &Path,
+    transcripts: &Path,
+    viewing: &Path,
+    dispatch: &Path,
+    jump: &Path,
+) -> Result<String> {
     // JSON string literals are valid JS string literals.
     let js = |p: &Path| serde_json::to_string(&p.display().to_string());
     Ok(TEMPLATE
         .replace("__HOOK_EXE__", &js(exe)?)
         .replace("__TRANSCRIPTS__", &js(transcripts)?)
         .replace("__VIEWING__", &js(viewing)?)
-        .replace("__DISPATCH__", &js(dispatch)?))
+        .replace("__DISPATCH__", &js(dispatch)?)
+        .replace("__JUMP__", &js(jump)?))
+}
+
+/// What a click leaves for the Host whose process start is `marker`: both a
+/// desktop app and a `dsh web` can share one DSH_HOME, so the pid and marker
+/// name the one whose page may consume it. It expires: a click on a page that
+/// only opens later must not switch to a Session long after.
+fn jump_json(
+    session_id: &str,
+    pid: i32,
+    marker: u64,
+    now: std::time::SystemTime,
+) -> serde_json::Value {
+    let expires_at = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .saturating_add(JUMP_FOR)
+        .as_millis();
+    serde_json::json!({
+        "sessionId": session_id,
+        "pid": pid,
+        "startMarker": marker,
+        "expiresAt": u64::try_from(expires_at).unwrap_or(u64::MAX),
+    })
+}
+
+/// A click's Session left for a Host's page, and the bytes written, so the
+/// click can tell whether a page took it. The Host removes the file as it
+/// serves it, so a file still ours after the wait means no page was polling.
+#[derive(Debug)]
+pub struct Jump {
+    path: PathBuf,
+    written: Vec<u8>,
+}
+
+impl Jump {
+    /// Whether a page took the click within `wait`. One nobody took is
+    /// dropped: a page opened much later must not jump on an old click.
+    pub fn taken(&self, wait: std::time::Duration) -> bool {
+        wait_taken(&self.path, &self.written, wait)
+    }
+}
+
+/// Poll for `path` to stop holding `ours`; a file another click replaced is
+/// not ours to judge or remove.
+fn wait_taken(path: &Path, ours: &[u8], wait: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        match std::fs::read(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Ok(text) if text != ours => return false,
+            _ => {}
+        }
+        if start.elapsed() >= wait {
+            if std::fs::read(path).is_ok_and(|text| text == ours) {
+                let _ = std::fs::remove_file(path);
+            }
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// Leave `session_id` for the Host process `pid` to show in its page. Only
+/// that Host's page opens it; a later click replaces this one.
+pub fn request_jump(session_id: &str, pid: i32) -> Result<Jump> {
+    anyhow::ensure!(
+        !session_id.is_empty() && session_id.len() <= 200,
+        crate::i18n::t("这个会话没有 id", "this session has no id")
+    );
+    let dir = our_dir().context(crate::i18n::t(
+        "找不到 dsh 目录",
+        "cannot find the dsh directory",
+    ))?;
+    // The page compares this with its own process start: without it no page
+    // can tell this Host's incarnation from one that reused its pid.
+    let marker = pixtuoid_core::source::pid_start_marker(pid).context(crate::i18n::t(
+        "认不出运行这个会话的 dsh 进程",
+        "cannot identify the dsh process running this session",
+    ))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| crate::tr!("建 {} 失败", "could not create {}", dir.display()))?;
+    let written = serde_json::to_vec(&jump_json(
+        session_id,
+        pid,
+        marker,
+        std::time::SystemTime::now(),
+    ))?;
+    let path = jump_file(&dir);
+    crate::atomic::write_private(&path, &dir.join("jump.json.tmp"), &written)
+        .with_context(|| crate::tr!("写 {} 失败", "could not write {}", path.display()))?;
+    Ok(Jump { path, written })
 }
 
 /// The patch file's top-level sequence items, each with the comment lines
@@ -300,8 +408,11 @@ pub fn connect() -> Result<()> {
         .with_context(|| crate::tr!("建 {} 失败", "could not create {}", transcripts.display()))?;
     let exe = crate::hook::exe_for_hooks()?;
     let plugin = plugin_path(&dir);
-    std::fs::write(&plugin, plugin_source(&exe, &transcripts, &viewing, &dispatch)?)
-        .with_context(|| crate::tr!("写 {} 失败", "could not write {}", plugin.display()))?;
+    std::fs::write(
+        &plugin,
+        plugin_source(&exe, &transcripts, &viewing, &dispatch, &jump_file(&dir))?,
+    )
+    .with_context(|| crate::tr!("写 {} 失败", "could not write {}", plugin.display()))?;
     let web = web_dir(&dir);
     std::fs::create_dir_all(&web)
         .with_context(|| crate::tr!("建 {} 失败", "could not create {}", web.display()))?;
@@ -386,8 +497,13 @@ pub fn installed() -> bool {
     let (Some(home), Some(dir)) = (home(), our_dir()) else {
         return false;
     };
-    std::fs::read_to_string(plugin_path(&dir))
-        .is_ok_and(|t| forwards_turn_start(&t) && says_what_you_view(&t) && supports_dispatch(&t))
+    let forwards = std::fs::read_to_string(plugin_path(&dir)).is_ok_and(|t| {
+        forwards_turn_start(&t)
+            && says_what_you_view(&t)
+            && supports_dispatch(&t)
+            && supports_jump(&t)
+    });
+    forwards
         && web_current(&web_dir(&dir))
         && read_patch(&home).is_ok_and(|t| {
             let items = items(&t);
@@ -455,6 +571,12 @@ fn supports_dispatch(plugin: &str) -> bool {
         && plugin.contains("workspaceId: workspace.id")
 }
 
+/// One from before the jump route leaves a click's Session unopened: the
+/// page would keep the window it had, which reads as a jump to nothing.
+fn supports_jump(plugin: &str) -> bool {
+    plugin.contains("const JUMP = ") && plugin.contains("connection.fetch.register")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +593,56 @@ mod tests {
         assert!(!supports_dispatch(&TEMPLATE.replace("sessionController.create", "sessionController.nope")));
         // Nor one that creates by cwd alone: its Sessions join no Workspace.
         assert!(!supports_dispatch(&TEMPLATE.replace("workspaceId: workspace.id", "cwd: request.cwd")));
+        // Nor one without the jump route: a click would raise the window and
+        // leave the Session it named unopened.
+        assert!(supports_jump(TEMPLATE));
+        assert!(!supports_jump(&TEMPLATE.replace("const JUMP = ", "const JUMP_PATH = ")));
+        assert!(!supports_jump(&TEMPLATE.replace("connection.fetch.register", "connection.rpc.handle")));
+    }
+
+    /// A click's Session is left for one Host only: a desktop app and a
+    /// `dsh web` can share DSH_HOME, so the pid and its process start say
+    /// which page may open it, and an old click expires instead of opening
+    /// a Session whenever that page next loads.
+    #[test]
+    fn a_jump_names_its_host_and_expires() {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let v = jump_json("session-a", 42, 7, now);
+        assert_eq!(v["sessionId"], "session-a");
+        assert_eq!(v["pid"], 42);
+        assert_eq!(v["startMarker"], 7);
+        assert_eq!(v["expiresAt"], 160_000, "60s later, in ms");
+    }
+
+    /// A click is taken by the page that polls for it, and dropped once no
+    /// page took it: a Session left on disk must not open long after the
+    /// click, and a newer click is never ours to drop.
+    #[test]
+    fn a_click_is_taken_or_dropped() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("ao-jump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jump.json");
+
+        // The Host's route removes the file as it serves the click.
+        std::fs::write(&path, b"ours").unwrap();
+        let served = path.clone();
+        let page = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            std::fs::remove_file(served).unwrap();
+        });
+        assert!(wait_taken(&path, b"ours", Duration::from_secs(2)));
+        page.join().unwrap();
+
+        std::fs::write(&path, b"ours").unwrap();
+        assert!(!wait_taken(&path, b"ours", Duration::from_millis(60)), "no page");
+        assert!(!path.exists(), "an untaken click is dropped");
+
+        std::fs::write(&path, b"newer").unwrap();
+        assert!(!wait_taken(&path, b"ours", Duration::from_millis(60)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer", "a newer click stays");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A pre-marker or partially backported plugin writes files desktop must
@@ -737,19 +909,24 @@ mod tests {
         assert!(client.contains("window.__ModuleLoader__.load({"));
         assert!(client.contains(&format!("id: \"{id}\"")));
         assert!(client.contains(&format!("module.exports.name = \"{WEB_ID}\"")));
-        assert!(client.contains("const inject = [\"sessions\", \"uiWorkspace\"]"));
+        assert!(client.contains("const inject = [\"uiWorkspace\"]"));
         assert!(client.contains("module.exports.inject = inject"));
         assert!(client.contains("module.exports.apply = apply"));
         // The mounted row resolves to the host half, whose nearest manifest
         // must be this package's.
         assert!(web_entry(Path::new("/d")).ends_with("web/host.mjs"));
+        // A click names the Session the page opens: the route the page asks
+        // and the one the Host serves must be the same string.
+        assert!(client.contains("const JUMP_URL = \"/api/agent-office/jump\""));
+        assert!(TEMPLATE.contains("path: \"/api/agent-office/jump\""));
+        assert!(client.contains("ctx.uiWorkspace.openSession(sessionId)"));
         // The host still creates role-selected Sessions, but no association
         // between this page and an external dispatch identifies a list row.
         assert!(TEMPLATE.contains("const agentPreset = `office-${request.role}`"));
         // The Node suite proves that existing, fresh, late and subagent rows
-        // have no viewport effects. Keep the old eager heuristics out of the
-        // installed source as well: neither can establish dispatch ownership.
-        assert!(!client.contains("openSession"));
+        // have no viewport effects, and that a click alone opens one. Keep the
+        // old eager heuristic out of the installed source: it cannot establish
+        // dispatch ownership.
         assert!(!client.contains("FRESH_MS"));
     }
 
@@ -778,13 +955,16 @@ mod tests {
             Path::new("/t"),
             Path::new("/v"),
             Path::new("/d"),
+            Path::new("/j/jump.json"),
         )
         .unwrap();
         assert!(src.contains(r#"const HOOK_EXE = "/a \"b\"/agent-office""#));
         assert!(src.contains(r#"const TRANSCRIPTS = "/t""#));
         assert!(src.contains(r#"const VIEWING = "/v""#));
         assert!(src.contains(r#"const DISPATCH = "/d""#));
+        assert!(src.contains(r#"const JUMP = "/j/jump.json""#));
         assert!(!src.contains("__HOOK_EXE__") && !src.contains("__TRANSCRIPTS__"));
         assert!(!src.contains("__VIEWING__") && !src.contains("__DISPATCH__"));
+        assert!(!src.contains("__JUMP__"));
     }
 }

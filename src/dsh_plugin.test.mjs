@@ -19,6 +19,7 @@ const darwin = { skip: process.platform === "darwin" ? false : "requires the Dar
 async function loadPlugin(t, follow, shared = {}) {
   const dir = shared.dir ?? mkdtempSync(join(tmpdir(), "agent-office-dsh-plugin-"))
   const viewing = join(dir, "viewing")
+  const jump = join(dir, "jump.json")
   const source = readFileSync(new URL("./dsh_plugin.mjs", import.meta.url), "utf8")
   const literal = (value) => JSON.stringify(value)
   const pluginPath = join(dir, "plugin.mjs")
@@ -28,7 +29,8 @@ async function loadPlugin(t, follow, shared = {}) {
       .replace("__HOOK_EXE__", literal(join(dir, "agent-office")))
       .replace("__TRANSCRIPTS__", literal(join(dir, "transcripts")))
       .replace("__VIEWING__", literal(viewing))
-      .replace("__DISPATCH__", literal(join(dir, "dispatch"))),
+      .replace("__DISPATCH__", literal(join(dir, "dispatch")))
+      .replace("__JUMP__", literal(jump)),
   )
   const plugin = await import(pathToFileURL(pluginPath).href)
   const controller = shared.controller ?? { follow }
@@ -37,19 +39,29 @@ async function loadPlugin(t, follow, shared = {}) {
     const dispose = register()
     if (typeof dispose === "function") disposers.push(dispose)
   }
+  const routes = new Map()
   const injected = {
     sessionController: controller,
+    connection: {
+      fetch: {
+        register(route) {
+          routes.set(route.path, route)
+          return () => routes.delete(route.path)
+        },
+      },
+    },
     effect,
     get() {
       return undefined
     },
   }
+  const services = []
   plugin.apply({
     agents: { list: () => [] },
     on() {},
     effect,
-    inject(services, callback) {
-      assert.deepEqual(services, ["sessionController"])
+    inject(requested, callback) {
+      services.push(requested)
       callback(injected)
     },
   })
@@ -67,6 +79,9 @@ async function loadPlugin(t, follow, shared = {}) {
   return {
     controller,
     dir,
+    jump,
+    routes,
+    services,
     originalFollow: follow,
     file,
     dispose,
@@ -100,6 +115,7 @@ test("apply wraps direct follow and immediately writes a valid marker", darwin, 
   const original = async function* () {}
   const env = await loadPlugin(t, original)
   assert.notEqual(env.controller.follow, original)
+  assert.deepEqual(env.services, [["sessionController"], ["connection"], ["sessionController"]], "viewing, jump, dispatch")
   const marker = env.marker()
   assert.equal(marker.pid, process.pid)
   assert.deepEqual(marker.sessions, [])
@@ -185,4 +201,60 @@ test("an after-dispose stream cannot overwrite the replacement engine", darwin, 
   assert.deepEqual(shared.sessions(), ["new"])
   await newStream.return()
   assert.deepEqual(shared.sessions(), [])
+})
+
+// A click in agent-office names one Session for this Host's page. The page
+// takes it once: a click must open exactly one window, and reading it must
+// not leave a request that opens the same Session again on the next poll.
+test("a click's Session is served once to the Host it names", darwin, async (t) => {
+  const env = await loadPlugin(t, async function* () {})
+  const marker = env.marker().startMarker
+  const route = env.routes.get("/api/agent-office/jump")
+  assert.deepEqual(route.methods, ["GET"])
+  const ask = async () => (await route.fetch({})).json()
+
+  assert.deepEqual(await ask(), {}, "no click yet")
+  writeFileSync(
+    env.jump,
+    JSON.stringify({
+      sessionId: "session-a",
+      pid: process.pid,
+      startMarker: marker,
+      expiresAt: Date.now() + 60_000,
+    }),
+  )
+  assert.deepEqual(await ask(), { sessionId: "session-a" })
+  assert.equal(existsSync(env.jump), false, "a served click is consumed")
+  assert.deepEqual(await ask(), {}, "a click opens one page, once")
+})
+
+// A desktop app and a `dsh web` share DSH_HOME, and a crash can hand a pid to
+// another process: only the Host the click names may open it.
+test("a click for another Host or an expired one is never opened here", darwin, async (t) => {
+  const env = await loadPlugin(t, async function* () {})
+  const marker = env.marker().startMarker
+  const route = env.routes.get("/api/agent-office/jump")
+  const ask = async () => (await route.fetch({})).json()
+  const leave = (sessionId, pid, startMarker, expiresAt) =>
+    writeFileSync(env.jump, JSON.stringify({ sessionId, pid, startMarker, expiresAt }))
+
+  leave("their-page", process.pid + 1, marker, Date.now() + 60_000)
+  assert.deepEqual(await ask(), {})
+  assert.equal(existsSync(env.jump), true, "left for the Host it names")
+
+  leave("reused-pid", process.pid, marker + 1, Date.now() + 60_000)
+  assert.deepEqual(await ask(), {}, "another incarnation of this pid")
+
+  // A Host that cannot name its own start (no kernel-equivalent marker)
+  // must not take a click on its pid alone.
+  writeFileSync(env.jump, JSON.stringify({ sessionId: "no-marker", pid: process.pid, expiresAt: Date.now() + 60_000 }))
+  assert.deepEqual(await ask(), {}, "a pid alone is not an incarnation")
+
+  leave("too-late", process.pid, marker, Date.now() - 1)
+  assert.deepEqual(await ask(), {}, "a page opened later must not jump")
+  assert.equal(existsSync(env.jump), false, "an expired click is dropped")
+
+  writeFileSync(env.jump, "{")
+  assert.deepEqual(await ask(), {}, "a half-written click says nothing")
+  assert.equal(existsSync(env.jump), false)
 })
