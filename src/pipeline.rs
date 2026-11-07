@@ -447,6 +447,154 @@ mod tests {
         ));
     }
 
+    /// Claude Code's `Notification` fires for a lot that is not a prompt:
+    /// a login finishing, a background session finishing, an elicitation
+    /// already answered, a quota wait that resumes on its own. Read as a
+    /// prompt, the figure stands in your office under 「等你确认」while you
+    /// have nothing to approve. A prompt, an elicitation still open, a
+    /// background session that needs input, and a quota wait that wants
+    /// Enter still ask for you.
+    #[test]
+    fn a_notice_that_needs_nothing_does_not_make_the_session_wait() {
+        use pixtuoid_core::source::decoder::decode_hook_payload;
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "5717f13f-3c42-4a73-bfa5-3cd14932f155";
+        let id = AgentId::from_parts(CC_SOURCE, sid);
+        let notify = |scene: &mut SceneState, r: &mut Reducer, kind: &str, at| {
+            let v = json!({
+                "hook_event_name": "Notification",
+                "notification_type": kind,
+                "message": kind,
+                "session_id": sid,
+                "cwd": "/repo",
+                "transcript_path": format!("/h/.claude/projects/-repo/{sid}.jsonl"),
+            });
+            for ev in decode_hook_payload(v).expect("decodes") {
+                r.apply(scene, ev, at, Transport::Hook);
+            }
+        };
+        let idle = || {
+            let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+            let mut scene = SceneState::uniform(4);
+            let mut r = Reducer::new();
+            for (i, event) in ["SessionStart", "UserPromptSubmit", "Stop"].iter().enumerate() {
+                let v = json!({
+                    "hook_event_name": event,
+                    "session_id": sid,
+                    "cwd": "/repo",
+                    "prompt": "fix it",
+                    "transcript_path": format!("/h/.claude/projects/-repo/{sid}.jsonl"),
+                });
+                for ev in decode_hook_payload(v).expect("decodes") {
+                    r.apply(&mut scene, ev, t0 + Duration::from_secs(i as u64), Transport::Hook);
+                }
+            }
+            assert_eq!(scene.agents[&id].state, ActivityState::Idle);
+            (scene, r, t0)
+        };
+        for kind in [
+            "auth_success",
+            "elicitation_complete",
+            "elicitation_response",
+            "agent_completed",
+            "quota_auto_resume_fired",
+        ] {
+            let (mut scene, mut r, t0) = idle();
+            notify(&mut scene, &mut r, kind, t0 + Duration::from_secs(10));
+            assert_eq!(
+                scene.agents[&id].state,
+                ActivityState::Idle,
+                "{kind} needs nothing from you"
+            );
+        }
+        for kind in [
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+            "agent_needs_input",
+            "quota_auto_resume_stale",
+        ] {
+            let (mut scene, mut r, t0) = idle();
+            notify(&mut scene, &mut r, kind, t0 + Duration::from_secs(10));
+            assert!(
+                matches!(scene.agents[&id].state, ActivityState::RequiresAction { .. }),
+                "{kind} still asks for you, got {:?}",
+                scene.agents[&id].state
+            );
+        }
+    }
+
+    /// Cursor's `stop` says how the turn ended. `aborted` and `error` are
+    /// work that did not finish: the card must not say done, and the figure
+    /// must not line up in your office to be read. A `completed` stop still
+    /// does, once you have not opened it.
+    #[test]
+    fn an_aborted_or_failed_cursor_stop_is_not_a_finished_result() {
+        use pixtuoid_core::source::decoder::{SOURCE_STAMP, decode_hook_payload};
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::time::{Duration, SystemTime};
+
+        let sid = "0b7d6a1e-cu-session";
+        let id = AgentId::from_parts(CURSOR_SOURCE, sid);
+        let run = |status: &str| {
+            let mut scene = SceneState::uniform(4);
+            let mut r = Reducer::new();
+            let mut now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+            for event in ["sessionStart", "beforeSubmitPrompt", "preToolUse", "postToolUse", "stop"]
+            {
+                let v = json!({
+                    "hook_event_name": event,
+                    "session_id": sid,
+                    "cwd": "",
+                    "workspace_roots": ["/repo"],
+                    "prompt": "fix it",
+                    "tool_name": "Shell",
+                    "tool_input": {"command": "cargo test"},
+                    "status": status,
+                    SOURCE_STAMP: CURSOR_SOURCE,
+                });
+                for ev in decode_hook_payload(v).expect("decodes") {
+                    r.apply(&mut scene, ev, now, Transport::Hook);
+                }
+                now += Duration::from_secs(1);
+            }
+            (scene, now)
+        };
+        let view = crate::tasks::TaskView {
+            prompt: Some("fix it".into()),
+            reply: Some("tests still fail".into()),
+            ..crate::tasks::TaskView::default()
+        };
+        let judge = |status: &str| {
+            let (scene, now) = run(status);
+            let slot = &scene.agents[&id];
+            let later = now + Duration::from_secs(5);
+            (
+                crate::panel::Group::of(slot, Some(&view), later, false),
+                crate::panel::status(slot, Some(&view), false, later).0,
+                pixtuoid_scene::waiting::lines_up(slot, later),
+            )
+        };
+        let (group, chip, lined) = judge("completed");
+        assert_eq!(group, crate::panel::Group::Done, "a finished turn is there to read");
+        assert!(chip.starts_with("✓ 做完 "), "{chip}");
+        assert!(lined, "a finished turn lines up");
+        for status in ["aborted", "error"] {
+            let (group, chip, lined) = judge(status);
+            assert_eq!(
+                group,
+                crate::panel::Group::Idle,
+                "{status} stopped without finishing, and it is not waiting on you"
+            );
+            assert!(chip.starts_with("· 空闲 "), "{status} must not read as done: {chip}");
+            assert!(!lined, "{status} must not line up as a result to read");
+        }
+    }
+
     /// A cursor-agent figure sits at its desk for its whole turn too: the
     /// model thinks between calls, so only `stop` lets it go idle. Without
     /// the prompt opening a turn it left its desk after every call and

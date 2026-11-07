@@ -406,6 +406,45 @@ mod tests {
         assert_eq!(unasked("问：CI 结果".into(), &waits), "CI 结果");
     }
 
+    /// A finished report must not line the session up as waiting on your
+    /// reply. The model prefixes 「问：」onto a turn that only recounts a
+    /// decision already made, or quotes a question it already answered; a
+    /// short reply holds that recount in its ending, and a full-width mark
+    /// inside an earlier sentence is not the developer being asked. A real
+    /// question, or a decision still handed over, keeps the mark: dropping
+    /// every 「问：」would hide the turns that do wait.
+    #[test]
+    fn a_finished_report_is_not_a_question_to_you() {
+        for (line, reply) in [
+            ("问：要不要改", "按你决定的方案做完了，已推送。"),
+            ("问：发不发", "方案已拍板，代码已推送。"),
+            ("问：选哪个", "按你选的 A 方案改完了。"),
+            (
+                "问：为什么挂了",
+                "我顺着日志里的「为什么挂了？」查完了。断言写反，已经改完并推送。",
+            ),
+            ("Q: release it", "As you decided, it's pushed."),
+        ] {
+            assert_eq!(
+                unasked(line.into(), reply),
+                crate::i18n::strip_ask(line).unwrap(),
+                "{reply}"
+            );
+        }
+        assert_eq!(
+            unasked("问：可以合并吗".into(), "测试过了。可以合并吗？"),
+            "问：可以合并吗"
+        );
+        assert_eq!(
+            unasked("问：发不发版".into(), "改完了，请确认是否发版。"),
+            "问：发不发版"
+        );
+        assert_eq!(
+            unasked("问：发不发".into(), "两套方案都写在上面，拍板吧。"),
+            "问：发不发"
+        );
+    }
+
     /// An English office must get English lines, and not the Chinese a
     /// memo kept for the same session: the language is part of the request.
     #[test]

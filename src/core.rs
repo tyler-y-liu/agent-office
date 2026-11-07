@@ -2748,6 +2748,75 @@ mod tests {
         );
     }
 
+    /// The model's turn can end while its own plan still has the current item
+    /// in progress. That item is unfinished work, the same way a background
+    /// task is: the card must not say done, and the figure must stay at its
+    /// desk instead of lining up in your office. A plan with nothing in
+    /// progress is a finished turn. A question to you still waits.
+    #[test]
+    fn an_open_todo_is_not_drawn_as_done() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut scene = SceneState::uniform(8);
+        let mut r = Reducer::new();
+        let mut start = |sid: &str| {
+            let id = AgentId::from_parts(pipeline::CC_SOURCE, sid);
+            r.apply(
+                &mut scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: pipeline::CC_SOURCE.into(),
+                    session_id: sid.into(),
+                    cwd: "/repo".into(),
+                    parent_id: None,
+                },
+                now,
+                Transport::Hook,
+            );
+            scene.agents.get_mut(&id).unwrap().state = pixtuoid_core::ActivityState::Idle;
+            id
+        };
+        let open = start("open");
+        let finished = start("finished");
+        let asked = start("asked");
+        let doing = |what: &str| tasks::TaskView {
+            todo: Some(what.into()),
+            todos: vec![(crate::tasks::extract::TodoState::Doing, what.into())],
+            ..ran()
+        };
+        let views: tasks::TaskViews = Arc::new(HashMap::from([
+            (open, doing("补回归测试")),
+            (finished, ran()),
+            (
+                asked,
+                tasks::TaskView {
+                    todo: Some("等你选方案".into()),
+                    outcome: Some("问：先合哪个？".into()),
+                    outcome_summarized: true,
+                    ..ran()
+                },
+            ),
+        ]));
+        let seen = HashMap::new();
+        let live = working_through_background(
+            &working_through_helpers(&Arc::new(scene), &views, &seen),
+            &views,
+            &seen,
+            now,
+        );
+        let office = as_seen(&live, &views, &seen, false, now);
+        let group = |id: AgentId| panel::Group::of(&live.agents[&id], views.get(&id), now, false);
+        let chip = |id: AgentId| panel::status(&live.agents[&id], views.get(&id), false, now).0;
+        assert_eq!(group(open), panel::Group::Working, "its current todo is still open");
+        assert!(!chip(open).contains("做完"), "the card must not say the work is done: {}", chip(open));
+        assert_eq!(
+            pixtuoid_scene::waiting::need(&office.agents[&open], now),
+            None,
+            "the figure stays at its desk, not in your office as a result to read"
+        );
+        assert_eq!(group(finished), panel::Group::Done, "nothing left in progress");
+        assert_eq!(group(asked), panel::Group::Waiting, "a question still waits");
+    }
+
     /// The desktop app keeps every session alive until it is archived, so
     /// one you finished an hour ago must leave the office, and come back the
     /// moment it gets new work. A long-idle session still waiting on your
