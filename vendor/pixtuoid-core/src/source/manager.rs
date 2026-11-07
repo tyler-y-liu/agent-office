@@ -97,6 +97,12 @@ mod tests {
     use super::*;
     use crate::source::{AgentEvent, Source, Transport};
 
+    // agent-office: all three tests below hit the one "source died" callsite. Run
+    // concurrently, the subscriber-less one can register that callsite while the
+    // capturing test's dispatcher is mid-registration, caching Interest::never,
+    // so the capture saw nothing (~1 run in 12). Serializing them closes the race.
+    static SOURCE_DIED_CALLSITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     struct DyingSource;
 
     impl Source for DyingSource {
@@ -121,6 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_source_exit_is_published_on_the_health_channel() {
+        let _serial = SOURCE_DIED_CALLSITE.lock().await;
         let (tx, _rx) = tokio::sync::mpsc::channel::<(Transport, AgentEvent)>(8);
         let (deaths_tx, deaths_rx) = watch::channel(Vec::new());
         let handles = SourceManager::new()
@@ -154,6 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_died_line_escapes_the_error_chain() {
+        let _serial = SOURCE_DIED_CALLSITE.lock().await;
         let (logs, _guard) = crate::test_capture::capture_warns();
         let (tx, _rx) = tokio::sync::mpsc::channel::<(Transport, AgentEvent)>(8);
         let (deaths_tx, _deaths_rx) = watch::channel(Vec::new());
@@ -175,6 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_without_health_listener_does_not_panic_on_death() {
+        let _serial = SOURCE_DIED_CALLSITE.lock().await;
         let (tx, _rx) = tokio::sync::mpsc::channel::<(Transport, AgentEvent)>(8);
         for h in SourceManager::new()
             .with_source(Box::new(DyingSource))
