@@ -120,9 +120,10 @@ pub struct Relay {
 impl DispatchPlan {
     /// The repository's folder name, which the picker heads with.
     pub fn repo(&self) -> String {
-        self.dir
-            .file_name()
-            .map_or_else(|| self.dir.display().to_string(), |n| n.to_string_lossy().into_owned())
+        self.dir.file_name().map_or_else(
+            || self.dir.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
     }
 }
 
@@ -213,6 +214,10 @@ pub struct Core {
     picked_host: Option<crate::roles::Backend>,
     /// When the empty office last looked again at what is set up.
     setup_checked: Option<Instant>,
+    /// Events already written for `--submit` sessions. In memory: the file
+    /// is cleared on the first watch of this process.
+    submit_sent: crate::events::Sent,
+    submit_log_cleared: bool,
 }
 
 type Jumped = (AgentId, Arc<SceneState>, Result<&'static str, String>);
@@ -349,7 +354,9 @@ pub fn as_seen(
         return Arc::clone(scene);
     }
     let mut drawn = (**scene).clone();
-    let out_of_line = ago(Duration::from_millis(pixtuoid_scene::waiting::DONE_WAITS_MS));
+    let out_of_line = ago(Duration::from_millis(
+        pixtuoid_scene::waiting::DONE_WAITS_MS,
+    ));
     for id in read {
         if let Some(s) = drawn.agents.get_mut(&id) {
             s.state_started_at = s.state_started_at.min(out_of_line);
@@ -373,7 +380,10 @@ pub fn as_seen(
 /// Who sits in the guest chair of your office on `floor` of `office`, the
 /// scene as the office draws it: the line of that floor alone.
 pub fn guest_of(office: &SceneState, floor: usize, now: SystemTime) -> Option<AgentId> {
-    panel::guest_chair(&pixtuoid_scene::floor::project_floor_scene(office, floor), now)
+    panel::guest_chair(
+        &pixtuoid_scene::floor::project_floor_scene(office, floor),
+        now,
+    )
 }
 
 /// `scene` with each subagent named after its parent and its post: Claude
@@ -446,15 +456,17 @@ pub fn working_through_helpers(
 ) -> Arc<SceneState> {
     let mut busy: Vec<AgentId> = Vec::new();
     for s in scene.agents.values() {
-        let at_work = s.exiting_at.is_none()
-            && !matches!(s.state, pixtuoid_core::ActivityState::Idle);
+        let at_work =
+            s.exiting_at.is_none() && !matches!(s.state, pixtuoid_core::ActivityState::Idle);
         if !at_work {
             continue;
         }
         let mut at = s.parent_id;
         // Bounded: a corrupt parent cycle must not hang the frame.
         for _ in 0..scene.agents.len() {
-            let Some(p) = at.and_then(|p| scene.agents.get(&p)) else { break };
+            let Some(p) = at.and_then(|p| scene.agents.get(&p)) else {
+                break;
+            };
             if p.state == pixtuoid_core::ActivityState::Idle
                 && p.exiting_at.is_none()
                 && panel::waits_on_you(p, views.get(&p.agent_id), panel::read_since_idle(p, seen))
@@ -680,6 +692,8 @@ impl Core {
             dispatches: Dispatches::default(),
             host_at: None,
             picked_host: None,
+            submit_sent: crate::events::Sent::default(),
+            submit_log_cleared: false,
         }
     }
 
@@ -788,8 +802,11 @@ impl Core {
         let views = self.views_rx.borrow().clone();
         // Also counted here: a covered window draws no frames, and a turn
         // that starts and ends while it is covered still counts.
-        self.watch
-            .observe(&self.live(&views), &views, SystemTime::now());
+        // Submit sessions are noted here, not from `frame`: a covered window
+        // draws nothing, and `--shot` never reaches this clock.
+        let office = self.live(&views);
+        self.watch.observe(&office, &views, SystemTime::now());
+        self.record_submit_events(&office, &views);
         let tick = self.notifier.tick(
             &self.scene(),
             &views,
@@ -803,6 +820,30 @@ impl Core {
         if let Some(n) = tick.badge {
             notify::set_badge(n);
         }
+    }
+
+    /// Read the `--submit` ledger and append events for sessions in it.
+    /// The event file is truncated once per process so a restart does not
+    /// append onto the previous run.
+    fn record_submit_events(&mut self, scene: &SceneState, views: &tasks::TaskViews) {
+        if !self.submit_log_cleared {
+            self.submit_log_cleared = true;
+            if let Err(e) = crate::events::reset_log(&crate::events::events_path()) {
+                eprintln!("agent-office: 清空进度事件失败：{e}");
+            }
+        }
+        let ledger = crate::events::read_ledger(&crate::events::ledger_path());
+        let (fresh, next) =
+            crate::events::observe(scene, views, &ledger, &self.submit_sent, SystemTime::now());
+        if fresh.is_empty() {
+            self.submit_sent = next;
+            return;
+        }
+        if let Err(e) = crate::events::append_events(&crate::events::events_path(), &fresh) {
+            eprintln!("agent-office: 写进度事件失败：{e}");
+            return;
+        }
+        self.submit_sent = next;
     }
 
     /// The window came back in front: after a banner, select who waits
@@ -830,7 +871,13 @@ impl Core {
     pub fn guest_on(&self, floor: usize) -> Option<AgentId> {
         let views = self.views_rx.borrow().clone();
         let now = SystemTime::now();
-        let office = as_seen(&self.scene(), &views, &self.ui.seen, self.in_pantry(now), now);
+        let office = as_seen(
+            &self.scene(),
+            &views,
+            &self.ui.seen,
+            self.in_pantry(now),
+            now,
+        );
         guest_of(&office, floor, now)
     }
 
@@ -1255,6 +1302,7 @@ impl Core {
             &std::path::Path,
             &str,
             bool,
+            bool,
         ) -> anyhow::Result<String>
         + Send
         + 'static,
@@ -1282,10 +1330,9 @@ impl Core {
                     "正在让 Claude 打开会话…",
                     "asking Claude to open the session…",
                 ),
-                crate::roles::Backend::Cursor => crate::i18n::t(
-                    "正在打开 Cursor…",
-                    "opening Cursor…",
-                ),
+                crate::roles::Backend::Cursor => {
+                    crate::i18n::t("正在打开 Cursor…", "opening Cursor…")
+                }
             },
             Tone::Ok,
         );
@@ -1298,7 +1345,9 @@ impl Core {
             .to_owned();
         let relay = plan.relay.is_some();
         std::thread::spawn(move || {
-            let done = dispatch(backend, role, &dir, &task, false);
+            // A click is someone at the machine: prefill, no socket check,
+            // and no `--submit` ledger.
+            let done = dispatch(backend, role, &dir, &task, false, false);
             let _ = tx.send((backend, role, relay, done));
         });
     }
@@ -1443,15 +1492,13 @@ fn key_hints<'a>(
         ("r", crate::i18n::t("重新总结", "resummarize"), 7),
         ("b", labels, 6),
     ];
-    let floors_hint =
-        (n_floors > 1).then_some(("[ ]", crate::i18n::t("换楼层", "floor"), 5));
+    let floors_hint = (n_floors > 1).then_some(("[ ]", crate::i18n::t("换楼层", "floor"), 5));
     // Named in the language it switches to, so a reader who cannot read
     // the current one still finds it.
     let lang = ("l", crate::i18n::t("English", "中文"), 4);
     // With no one in the office, the keys act on no one: only switching
     // the language the setup steps are in, and quitting.
-    base
-        .into_iter()
+    base.into_iter()
         .filter(|_| !empty)
         .chain(floors_hint.filter(|_| !empty))
         .chain(extra.iter().filter(|_| !empty).map(|&(k, w)| (k, w, 8)))
@@ -1620,12 +1667,10 @@ mod tests {
             floor_caps,
             deaths_rx,
         };
-        let (_views_tx, views_rx) =
-            tokio::sync::watch::channel(tasks::TaskViews::default());
+        let (_views_tx, views_rx) = tokio::sync::watch::channel(tasks::TaskViews::default());
         let (force_tx, _force_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_outlook_tx, outlook_rx) = tokio::sync::watch::channel(Outlook::default());
-        let (_desktop_tx, desktop_rx) =
-            tokio::sync::watch::channel(desktop::Looks::default());
+        let (_desktop_tx, desktop_rx) = tokio::sync::watch::channel(desktop::Looks::default());
         Core {
             ui: PanelState::default(),
             head_labels: true,
@@ -1648,6 +1693,8 @@ mod tests {
             host_at: None,
             picked_host: None,
             setup_checked: None,
+            submit_sent: crate::events::Sent::default(),
+            submit_log_cleared: false,
         }
     }
 
@@ -1826,7 +1873,8 @@ mod tests {
                 crate::roles::Backend::Cursor,
                 crate::roles::Role::Qa,
                 false,
-                "opened a Cursor QA session in Terminal; it asks you what to do first (shop)".into(),
+                "opened a Cursor QA session in Terminal; it asks you what to do first (shop)"
+                    .into(),
             ),
             "opened a Cursor QA session in Terminal; it asks you what to do first (shop)"
         );
@@ -1854,12 +1902,21 @@ mod tests {
             let _ = release_tx.send(());
         });
         let started = Instant::now();
-        core.dispatch_with(&plan, crate::roles::Role::Backend, move |backend, _, _, _, _| {
-            assert_eq!(backend, crate::roles::Backend::Claude);
-            entered_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            Ok("the CLI keeps its own success text".into())
-        });
+        core.dispatch_with(
+            &plan,
+            crate::roles::Role::Backend,
+            move |backend, _, _, _, terminal, submit| {
+                assert_eq!(backend, crate::roles::Backend::Claude);
+                assert!(
+                    !terminal,
+                    "a click does not take over the caller's terminal"
+                );
+                assert!(!submit, "a click does not write the --submit ledger");
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok("the CLI keeps its own success text".into())
+            },
+        );
         assert!(
             started.elapsed() < Duration::from_millis(300),
             "dispatch blocked the UI thread for {:?}",
@@ -1867,13 +1924,16 @@ mod tests {
         );
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         core.act(Action::ToggleLabels, &mut floors);
-        assert!(!core.head_labels, "an action is handled while dispatch is out");
+        assert!(
+            !core.head_labels,
+            "an action is handled while dispatch is out"
+        );
         assert_eq!(core.dispatches.out, Some(crate::roles::Backend::Claude));
 
         use std::sync::atomic::{AtomicUsize, Ordering};
         let duplicates = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&duplicates);
-        core.dispatch_with(&plan, crate::roles::Role::Qa, move |_, _, _, _, _| {
+        core.dispatch_with(&plan, crate::roles::Role::Qa, move |_, _, _, _, _, _| {
             counted.fetch_add(1, Ordering::Relaxed);
             Ok("must not run".into())
         });
@@ -1892,7 +1952,7 @@ mod tests {
         assert_eq!(note, "已在 Claude 开好「后端」的新会话，写上任务发送");
         assert_eq!(*tone, Tone::Ok);
 
-        core.dispatch_with(&plan, crate::roles::Role::Qa, |_, _, _, _, _| {
+        core.dispatch_with(&plan, crate::roles::Role::Qa, |_, _, _, _, _, _| {
             Err(anyhow::anyhow!("injected failure"))
         });
         land_until_done(&mut core);
@@ -1922,7 +1982,7 @@ mod tests {
         core.dispatch_with(
             &plan(in_flight),
             crate::roles::Role::Backend,
-            move |backend, _, _, _, _| {
+            move |backend, _, _, _, _, _| {
                 assert_eq!(backend, in_flight);
                 entered_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -1931,9 +1991,11 @@ mod tests {
         );
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-        core.dispatch_with(&plan(rejected), crate::roles::Role::Qa, |_, _, _, _, _| {
-            panic!("a competing dispatch must not run")
-        });
+        core.dispatch_with(
+            &plan(rejected),
+            crate::roles::Role::Qa,
+            |_, _, _, _, _, _| panic!("a competing dispatch must not run"),
+        );
         let (note, tone, _) = core.note.as_ref().unwrap();
         let lost = match in_flight {
             Backend::Dsh => "上一次 DSH 派活还没完成，等它出结果再派",
@@ -1944,9 +2006,11 @@ mod tests {
         assert_eq!(*tone, Tone::Failed);
 
         with(Lang::En, || {
-            core.dispatch_with(&plan(rejected), crate::roles::Role::Qa, |_, _, _, _, _| {
-                panic!("a competing dispatch must not run")
-            });
+            core.dispatch_with(
+                &plan(rejected),
+                crate::roles::Role::Qa,
+                |_, _, _, _, _, _| panic!("a competing dispatch must not run"),
+            );
             let (note, tone, _) = core.note.as_ref().unwrap();
             assert_eq!(
                 note,
@@ -1969,7 +2033,7 @@ mod tests {
             core.dispatch_with(
                 &plan(rejected),
                 crate::roles::Role::Qa,
-                move |backend, _, _, _, _| {
+                move |backend, _, _, _, _, _| {
                     assert_eq!(backend, rejected);
                     Err(anyhow::anyhow!("next dispatch failed"))
                 },
@@ -2056,10 +2120,20 @@ mod tests {
         };
         assert_eq!(plan.switch_to, Some(Backend::Cursor), "DSH is skipped");
         core.toggle_dispatch_host(&mut plan);
-        assert_eq!((plan.backend, plan.switch_to), (Backend::Cursor, Some(Backend::Claude)));
+        assert_eq!(
+            (plan.backend, plan.switch_to),
+            (Backend::Cursor, Some(Backend::Claude))
+        );
         core.toggle_dispatch_host(&mut plan);
-        assert_eq!((plan.backend, plan.switch_to), (Backend::Claude, Some(Backend::Cursor)));
-        assert!(core.note.as_ref().is_none_or(|(_, tone, _)| *tone != Tone::Failed));
+        assert_eq!(
+            (plan.backend, plan.switch_to),
+            (Backend::Claude, Some(Backend::Cursor))
+        );
+        assert!(
+            core.note
+                .as_ref()
+                .is_none_or(|(_, tone, _)| *tone != Tone::Failed)
+        );
     }
 
     /// Cursor's hooks also report the IDE's sessions, so a Cursor worker
@@ -2117,7 +2191,11 @@ mod tests {
             crate::roles::dispatch_host(Backend::Cursor, |h| app_only(h).is_none())
         );
         let bar = core.dispatch_bar().expect("the bar stays");
-        assert!(bar.hosts.contains(&(Backend::Cursor, true)), "{:?}", bar.hosts);
+        assert!(
+            bar.hosts.contains(&(Backend::Cursor, true)),
+            "{:?}",
+            bar.hosts
+        );
     }
 
     /// With no other host ready, `h` must leave the pick where it was and say
@@ -2152,10 +2230,8 @@ mod tests {
     /// real git layout: pixtuoid's seat helper only knows `.claude/worktrees`.
     #[test]
     fn fresh_dispatch_uses_main_checkout_while_relay_keeps_ordinary_worktree() {
-        let root = std::env::temp_dir().join(format!(
-            "agent-office-core-worktree-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("agent-office-core-worktree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let main = root.join("main");
         std::fs::create_dir_all(&main).unwrap();
@@ -2549,7 +2625,10 @@ mod tests {
             );
             id
         });
-        assert_eq!((scene.agents[&down].floor_idx, scene.agents[&up].floor_idx), (0, 1));
+        assert_eq!(
+            (scene.agents[&down].floor_idx, scene.agents[&up].floor_idx),
+            (0, 1)
+        );
         let now = t0 + Duration::from_secs(600);
         let s = scene.agents.get_mut(&down).unwrap();
         s.state = pixtuoid_core::ActivityState::Idle;
@@ -2607,7 +2686,10 @@ mod tests {
             None,
             "nothing to read"
         );
-        assert_eq!(panel::next_waiting(&scene, &none, now, &HashMap::new()), None);
+        assert_eq!(
+            panel::next_waiting(&scene, &none, now, &HashMap::new()),
+            None
+        );
         let group = |id: AgentId, views: &tasks::TaskViews| {
             panel::Group::of(&scene.agents[&id], views.get(&id), now, false)
         };
@@ -2617,8 +2699,7 @@ mod tests {
             needs_task: true,
             ..tasks::TaskView::default()
         };
-        let views: tasks::TaskViews =
-            Arc::new(HashMap::from([(dispatched, waiting_for_task)]));
+        let views: tasks::TaskViews = Arc::new(HashMap::from([(dispatched, waiting_for_task)]));
         assert_eq!(
             panel::next_waiting(&scene, &views, now, &HashMap::new()),
             Some(dispatched)
@@ -2755,17 +2836,39 @@ mod tests {
             let s = &drawn.agents[&id];
             panel::Group::of(s, views.get(&id), now, panel::read_since_idle(s, &seen))
         };
-        assert_eq!(group(lead), panel::Group::Working, "its helper still runs, though you read it");
-        assert_eq!(group(deep), panel::Group::Working, "a grandchild at work counts");
+        assert_eq!(
+            group(lead),
+            panel::Group::Working,
+            "its helper still runs, though you read it"
+        );
+        assert_eq!(
+            group(deep),
+            panel::Group::Working,
+            "a grandchild at work counts"
+        );
         assert_eq!(group(mid), panel::Group::Working);
-        assert_eq!(group(asked), panel::Group::Waiting, "a question to you still waits");
+        assert_eq!(
+            group(asked),
+            panel::Group::Waiting,
+            "a question to you still waits"
+        );
         assert_eq!(group(done), panel::Group::Done, "helpers done: done");
-        assert_eq!(group(background), panel::Group::Working, "background still runs");
-        let chip = |id: AgentId| {
-            panel::status(&drawn.agents[&id], views.get(&id), false, now).0
-        };
-        assert!(chip(lead).contains("等子代理"), "not thinking: {}", chip(lead));
-        assert!(chip(background).contains("等后台任务"), "not done: {}", chip(background));
+        assert_eq!(
+            group(background),
+            panel::Group::Working,
+            "background still runs"
+        );
+        let chip = |id: AgentId| panel::status(&drawn.agents[&id], views.get(&id), false, now).0;
+        assert!(
+            chip(lead).contains("等子代理"),
+            "not thinking: {}",
+            chip(lead)
+        );
+        assert!(
+            chip(background).contains("等后台任务"),
+            "not done: {}",
+            chip(background)
+        );
         // A background task killed with its host writes no completion. Past the
         // idle window the card must rest again rather than read Working all day.
         let stale = working_through_background(&kept, &views, &seen, now + HIDE_IDLE_AFTER);
@@ -2828,10 +2931,7 @@ mod tests {
                 asked,
                 tasks::TaskView {
                     todo: Some("等你选方案".into()),
-                    todos: vec![(
-                        crate::tasks::extract::TodoState::Doing,
-                        "等你选方案".into(),
-                    )],
+                    todos: vec![(crate::tasks::extract::TodoState::Doing, "等你选方案".into())],
                     outcome: Some("问：先合哪个？".into()),
                     outcome_summarized: true,
                     ..ran()
@@ -2897,7 +2997,11 @@ mod tests {
             }
             _ => false,
         };
-        assert_eq!(group(open), panel::Group::Working, "its current todo is still open");
+        assert_eq!(
+            group(open),
+            panel::Group::Working,
+            "its current todo is still open"
+        );
         assert!(
             on_plan(open),
             "the draw has to be the open-plan marker, not some other running state"
@@ -2907,20 +3011,36 @@ mod tests {
             "the chip must say the plan is unfinished; a thinking or tool chip also omits 做完: {}",
             chip(open)
         );
-        assert!(!chip(open).contains("做完"), "the card must not say the work is done: {}", chip(open));
+        assert!(
+            !chip(open).contains("做完"),
+            "the card must not say the work is done: {}",
+            chip(open)
+        );
         assert_eq!(
             pixtuoid_scene::waiting::need(&office.agents[&open], now),
             None,
             "the figure stays at its desk, not in your office as a result to read"
         );
-        assert_eq!(group(finished), panel::Group::Done, "nothing left in progress");
-        assert_eq!(group(pending), panel::Group::Done, "pending is not work in progress");
+        assert_eq!(
+            group(finished),
+            panel::Group::Done,
+            "nothing left in progress"
+        );
+        assert_eq!(
+            group(pending),
+            panel::Group::Done,
+            "pending is not work in progress"
+        );
         assert!(
             chip(pending).contains("做完"),
             "a not-yet-started list is a finished turn to read: {}",
             chip(pending)
         );
-        assert_eq!(group(completed), panel::Group::Done, "a finished list is a finished turn");
+        assert_eq!(
+            group(completed),
+            panel::Group::Done,
+            "a finished list is a finished turn"
+        );
         assert!(
             chip(completed).contains("做完"),
             "a leftover step string does not keep a finished list working: {}",
@@ -2957,7 +3077,11 @@ mod tests {
             None,
             "a mixed plan stays at its desk"
         );
-        assert_eq!(group(asked), panel::Group::Waiting, "a question still waits");
+        assert_eq!(
+            group(asked),
+            panel::Group::Waiting,
+            "a question still waits"
+        );
         assert!(
             chip(asked).contains("等你") && !chip(asked).contains("待办未完"),
             "an open item must not cover a question to you: {}",
@@ -3279,15 +3403,26 @@ mod tests {
             scene.agents.get_mut(id).unwrap().state =
                 pixtuoid_core::ActivityState::Running { item: None };
         }
-        assert_eq!(scene.agents[&ids[2]].floor_idx, 1, "the reducer seats it upstairs");
+        assert_eq!(
+            scene.agents[&ids[2]].floor_idx, 1,
+            "the reducer seats it upstairs"
+        );
 
-        let shown = without_long_idle(&Arc::new(scene), &tasks::TaskViews::default(), &HashMap::new(), now);
+        let shown = without_long_idle(
+            &Arc::new(scene),
+            &tasks::TaskViews::default(),
+            &HashMap::new(),
+            now,
+        );
         for id in &ids[2..] {
             let s = &shown.agents[id];
             assert_eq!(s.floor_idx, 0, "{id:?} is drawn on the ground floor");
             assert_eq!(shown.floor_of(s.desk_index), 0);
         }
-        assert_ne!(shown.agents[&ids[2]].desk_index, shown.agents[&ids[3]].desk_index);
+        assert_ne!(
+            shown.agents[&ids[2]].desk_index,
+            shown.agents[&ids[3]].desk_index
+        );
         assert_eq!(shown.floors_in_use(), 1, "one floor is all it needs");
     }
 }

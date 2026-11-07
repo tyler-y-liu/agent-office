@@ -93,6 +93,22 @@ pub fn bin() -> Option<PathBuf> {
     on_path.chain(known).find(|p| p.is_file())
 }
 
+/// Arguments that start `cursor-agent` on a dispatched task in the directory
+/// it was spawned in. Cursor has no office `--agent`, so the role card is in
+/// `prompt`. This does not open the app.
+pub fn submit_args(session_id: &str, prompt: &str) -> Vec<String> {
+    vec![
+        "--print".into(),
+        "--trust".into(),
+        "--force".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--new-session-id".into(),
+        session_id.into(),
+        prompt.into(),
+    ]
+}
+
 /// `s` as one POSIX shell word: inside single quotes nothing is special but
 /// the quote itself, which closes, is escaped and reopens.
 fn sh_quote(s: &str) -> String {

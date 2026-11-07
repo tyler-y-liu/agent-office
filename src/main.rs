@@ -10,6 +10,7 @@ mod doctor;
 mod dsh;
 mod dsh_bridge;
 mod dsh_roles;
+mod events;
 mod floating;
 mod fun;
 mod hook;
@@ -21,6 +22,9 @@ mod pipeline;
 mod roles;
 mod tasks;
 mod text;
+
+#[cfg(test)]
+mod submit_cli_test;
 
 use anyhow::Result;
 

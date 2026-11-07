@@ -844,13 +844,15 @@ pub struct Dispatch {
     pub dir: Option<PathBuf>,
     pub task: String,
     pub terminal: bool,
+    /// Start the host and return JSON. The window's dispatch leaves this false.
+    pub submit: bool,
 }
 
 fn roster_ids() -> String {
     ROSTER.iter().map(|p| p.id).collect::<Vec<_>>().join("、")
 }
 
-const DISPATCH_USAGE: &str = "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh|cursor] [--dir <目录>] [--terminal] [任务…]";
+const DISPATCH_USAGE: &str = "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh|cursor] [--dir <目录>] [--terminal | --submit] [任务…]";
 
 /// `dispatch`'s arguments: a role or `--auto` (the PM), and the words left
 /// over are the task.
@@ -859,7 +861,8 @@ pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
     let options_end = args.iter().position(|a| *a == "--").unwrap_or(args.len());
     let task_tail: Vec<&str> = args[options_end..].iter().skip(1).copied().collect();
     let (backend, args) = take_backend(&args[..options_end])?;
-    let (mut role, mut dir, mut terminal, mut words) = (None, None, false, task_tail);
+    let (mut role, mut dir, mut terminal, mut submit, mut words) =
+        (None, None, false, false, task_tail);
     let mut it = args.iter();
     while let Some(&a) = it.next() {
         match a {
@@ -875,17 +878,31 @@ pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
                 role = Some(Role::Pm);
             }
             "--dir" => dir = Some(PathBuf::from(it.next().context(DISPATCH_USAGE)?)),
-            "--terminal" => terminal = true,
+            "--terminal" => {
+                anyhow::ensure!(!submit, "--submit 和 --terminal 不能一起用");
+                terminal = true;
+            }
+            "--submit" => {
+                anyhow::ensure!(!terminal, "--submit 和 --terminal 不能一起用");
+                submit = true;
+            }
             w => words.push(w),
         }
     }
     let role = role.with_context(|| format!("{DISPATCH_USAGE}\n角色：{}", roster_ids()))?;
+    let task = words.join(" ");
+    // An empty `--submit` would start a host with nothing to do, and the
+    // receipt could not say what was started. The prefill path still may.
+    if submit && task.trim().is_empty() {
+        anyhow::bail!("--submit 要带任务");
+    }
     Ok(Dispatch {
         role,
         backend,
         dir,
-        task: words.join(" "),
+        task,
         terminal,
+        submit,
     })
 }
 
@@ -1067,73 +1084,508 @@ fn short_id(id: &str) -> &str {
 /// The arguments that start `claude` as `role` on `task`; the agent file
 /// brings the brief, so the prompt carries only the marker and the task.
 pub fn terminal_args(role: Role, task: &str) -> Vec<String> {
-    let post = role.post();
-    let name = format!(
-        "{}·{}",
-        post.glyph,
-        crate::text::truncate_cells(task.trim(), 24)
-    );
     vec![
         "--agent".into(),
         role.agent_name(),
         "-n".into(),
-        name,
+        session_name(role, task),
         prompt(role, task, false),
     ]
 }
 
-/// Where `claude` is: on PATH, else where its installers put it. A shell
-/// alias or function of the same name is not seen from here.
+/// The `-n` name `terminal_args` already uses, shared with `--submit`.
+fn session_name(role: Role, task: &str) -> String {
+    let post = role.post();
+    format!(
+        "{}·{}",
+        post.glyph,
+        crate::text::truncate_cells(task.trim(), 24)
+    )
+}
+
+/// Where `claude` is: on PATH, else where its installers put it, else the
+/// newest Claude Code extension binary. A shell alias or function of the
+/// same name is not seen from here.
 fn claude_bin() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let on_path = std::env::var_os("PATH")
+    let known = [".claude/local/claude", ".local/bin/claude"]
         .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .filter_map(|rel| home.as_ref().map(|h| h.join(rel)))
+        .chain(["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].map(PathBuf::from))
+        .collect::<Vec<_>>();
+    let extensions = home
+        .as_ref()
+        .map(|h| vec![h.join(".vscode/extensions"), h.join(".cursor/extensions")])
+        .unwrap_or_default();
+    claude_bin_in(std::env::var_os("PATH").as_deref(), &known, &extensions)
+}
+
+fn claude_bin_in(
+    path: Option<&std::ffi::OsStr>,
+    known: &[PathBuf],
+    extensions: &[PathBuf],
+) -> Option<PathBuf> {
+    let on_path = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
         // A relative entry (`.`) would run a `claude` from whatever
         // directory the dispatch cd's into: the repository's, not ours.
         .filter(|d| d.is_absolute())
         .map(|d| d.join("claude"));
-    let known = [".claude/local/claude", ".local/bin/claude"]
-        .into_iter()
-        .filter_map(|rel| home.as_ref().map(|h| h.join(rel)))
-        .chain(["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].map(PathBuf::from));
-    on_path.chain(known).find(|p| p.is_file())
+    on_path
+        .chain(known.iter().cloned())
+        .find(|p| p.is_file())
+        .or_else(|| newest_extension_claude(extensions))
+}
+
+/// `anthropic.claude-code-*` directories, newest version first. `1.10` is
+/// newer than `1.9`; a lexical sort would pick the older one.
+fn newest_extension_claude(extensions: &[PathBuf]) -> Option<PathBuf> {
+    let mut best: Option<(String, PathBuf)> = None;
+    for root in extensions {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !name.starts_with("anthropic.claude-code-") {
+                continue;
+            }
+            let bin = entry
+                .path()
+                .join("resources")
+                .join("native-binary")
+                .join("claude");
+            if !bin.is_file() {
+                continue;
+            }
+            let newer = best
+                .as_ref()
+                .is_none_or(|(prev, _)| cmp_ext_version(&name, prev).is_gt());
+            if newer {
+                best = Some((name, bin));
+            }
+        }
+    }
+    best.map(|(_, bin)| bin)
+}
+
+fn version_suffix(s: &str) -> &str {
+    s.strip_prefix("anthropic.claude-code-").unwrap_or(s)
+}
+
+fn cmp_ext_version(a: &str, b: &str) -> std::cmp::Ordering {
+    cmp_version(version_suffix(a), version_suffix(b))
+}
+
+fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |s: &str| {
+        s.split(|c: char| c == '.' || c == '-' || c == '_')
+            .filter(|p| !p.is_empty())
+            .map(|p| match p.parse::<u64>() {
+                Ok(n) => (0u8, n, String::new()),
+                Err(_) => (1u8, 0u64, p.to_owned()),
+            })
+            .collect::<Vec<_>>()
+    };
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..pa.len().max(pb.len()) {
+        match (pa.get(i), pb.get(i)) {
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x != y => return x.cmp(y),
+            _ => {}
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The office is not listening, so a `--submit` could not be reported.
+const OFFICE_DOWN: &str = "agent-office 没在运行，派不了：先开着它，进度才能送出来";
+
+/// Connect to the office socket, and only then run `start`. A refused
+/// connection returns [`OFFICE_DOWN`] and does not call `start`.
+fn prepare_submit<T>(
+    socket: &Path,
+    start: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    #[cfg(unix)]
+    {
+        if std::os::unix::net::UnixStream::connect(socket).is_err() {
+            return Err(OFFICE_DOWN.to_owned());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        return Err(OFFICE_DOWN.to_owned());
+    }
+    start()
+}
+
+/// `--bg` session id: 16 bytes from `/dev/urandom`, version 4, RFC 4122 variant.
+pub(crate) fn uuid_v4() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    std::io::Read::read_exact(&mut file, &mut bytes)?;
+    Ok(format_uuid_v4(bytes))
+}
+
+pub(crate) fn format_uuid_v4(mut bytes: [u8; 16]) -> String {
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+#[cfg(test)]
+fn is_uuid_v4(id: &str) -> bool {
+    let b = id.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    let hyphens = [8usize, 13, 18, 23];
+    b.iter().enumerate().all(|(i, c)| {
+        hyphens.contains(&i) && *c == b'-' || !hyphens.contains(&i) && c.is_ascii_hexdigit()
+    }) && b[14] == b'4'
+        && matches!(b[19], b'8' | b'9' | b'a' | b'b')
+}
+
+fn host_wire(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Claude => "claude",
+        Backend::Dsh => "dsh",
+        Backend::Cursor => "cursor",
+    }
+}
+
+fn receipt_json(
+    ok: bool,
+    host: &str,
+    role: &str,
+    dir: &str,
+    session_id: Option<String>,
+    error: Option<String>,
+) -> String {
+    if ok {
+        serde_json::json!({
+            "ok": true,
+            "host": host,
+            "role": role,
+            "dir": dir,
+            "session_id": session_id.unwrap_or_default(),
+            "text": "已开工",
+        })
+        .to_string()
+    } else {
+        serde_json::json!({
+            "ok": false,
+            "host": host,
+            "role": role,
+            "dir": dir,
+            "error": error.unwrap_or_default(),
+        })
+        .to_string()
+    }
+}
+
+/// Arguments for `claude --bg`. The agent file brings the card, so the prompt
+/// is the marker and the task. No desktop link, no `--bare`, no `--print`.
+pub(crate) fn claude_submit_args(role: Role, task: &str, session_id: &str) -> Vec<String> {
+    vec![
+        "--bg".into(),
+        "--session-id".into(),
+        session_id.into(),
+        "--agent".into(),
+        role.agent_name(),
+        "-n".into(),
+        session_name(role, task),
+        "--permission-mode".into(),
+        "bypassPermissions".into(),
+        prompt(role, task, false),
+    ]
+}
+
+fn claude_submit_plan(role: Role, task: &str) -> Result<(String, Vec<String>), String> {
+    let id = uuid_v4().map_err(|e| format!("生成会话 id 失败：{e}"))?;
+    Ok((id.clone(), claude_submit_args(role, task, &id)))
+}
+
+fn cursor_submit_plan(role: Role, task: &str) -> Result<(String, Vec<String>), String> {
+    let id = uuid_v4().map_err(|e| format!("生成会话 id 失败：{e}"))?;
+    let prompt = cursor_prompt(role, task);
+    Ok((id.clone(), crate::cursor::submit_args(&id, &prompt)))
+}
+
+fn dsh_request_id(role: Role) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{}-{stamp}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+        role.post().id,
+    )
+}
+
+fn last_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    crate::text::truncate_cells(line, 200)
+}
+
+fn submit_claude(role: Role, dir: &Path, task: &str) -> Result<String, String> {
+    let bin = claude_bin().ok_or_else(|| "找不到 claude 命令：装好 Claude Code".to_owned())?;
+    if !crate::hook::installed() {
+        return Err(
+            "Claude hooks 还没接上，办公室看不到这次会话：先运行 agent-office connect".into(),
+        );
+    }
+    let (id, args) = claude_submit_plan(role, task)?;
+    let child = std::process::Command::new(&bin)
+        .args(&args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动 {} 失败：{e}", bin.display()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("等待 claude 失败：{e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && stdout.contains(&id) {
+        return Ok(id);
+    }
+    let err = last_line(&String::from_utf8_lossy(&output.stderr));
+    if err.is_empty() {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "未知".to_owned(), |c| c.to_string());
+        Err(format!("claude 以退出码 {code} 结束"))
+    } else {
+        Err(err)
+    }
+}
+
+fn open_private_log(path: &Path) -> Result<std::fs::File, String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.is_dir()
+    {
+        return Err(format!("没有 {} 这个目录", parent.display()));
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let file = opts
+        .open(path)
+        .map_err(|e| format!("写 {} 失败：{e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("改 {} 权限失败：{e}", path.display()))?;
+    }
+    Ok(file)
+}
+
+fn wait_up_to(
+    child: &mut std::process::Child,
+    limit: std::time::Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if start.elapsed() >= limit {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn submit_cursor(role: Role, dir: &Path, task: &str) -> Result<String, String> {
+    let bin = crate::cursor::bin().ok_or_else(|| {
+        crate::i18n::t(
+            "找不到 cursor-agent 命令：先装好 Cursor CLI",
+            "cursor-agent not found: install the Cursor CLI first",
+        )
+        .to_owned()
+    })?;
+    // `cursor::installed` is what `connect cursor` leaves behind. Without it
+    // the office never sees the session, so a receipt would say the work
+    // started while nothing can report progress.
+    if !crate::cursor::installed() {
+        return Err(
+            "Cursor 事件没接上，进度送不出来：先运行 agent-office connect cursor".into(),
+        );
+    }
+    let (id, args) = cursor_submit_plan(role, task)?;
+    let log_path = crate::events::cursor_log_path(&id);
+    let log = open_private_log(&log_path)?;
+    let err_log = log.try_clone().map_err(|e| format!("打开日志失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new(&bin)
+            .args(&args)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(err_log))
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("启动 {} 失败：{e}", bin.display()))?;
+        // Still running after the startup window is success: the process got
+        // past launch. A clean exit is too, because it did not fail. A
+        // non-zero exit is the log's last line. The child is left running;
+        // dropping it does not kill the new process group.
+        match wait_up_to(&mut child, std::time::Duration::from_secs(10))
+            .map_err(|e| format!("等待 cursor-agent 失败：{e}"))?
+        {
+            None => Ok(id),
+            Some(status) if status.success() => Ok(id),
+            Some(_) => {
+                let err = last_line(&std::fs::read_to_string(&log_path).unwrap_or_default());
+                if err.is_empty() {
+                    Err("cursor-agent 启动失败".into())
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (bin, args, log, err_log, dir);
+        Err("cursor --submit 只支持 macOS / Linux".into())
+    }
+}
+
+fn submit_dsh(role: Role, dir: &Path, task: &str) -> Result<String, String> {
+    // `dsh::installed` is the plugin `connect dsh` mounts. A missing Host
+    // still goes through the bridge below; this only stops a session the
+    // office could not see.
+    if !crate::dsh::installed() {
+        return Err(
+            "DSH 事件插件没接好，进度送不出来：先运行 agent-office connect dsh".into(),
+        );
+    }
+    crate::dsh_bridge::dispatch(
+        crate::dsh_bridge::DispatchRequest {
+            id: dsh_request_id(role),
+            role: role.post().id.into(),
+            cwd: dir.to_path_buf(),
+            prompt: prompt(role, task, false),
+            submit: true,
+        },
+        std::time::Duration::from_secs(10),
+    )
+    .map(|r| r.session_id)
+    .map_err(|e| e.to_string())
+}
+
+fn dispatch_submit(backend: Backend, role: Role, dir: &Path, task: &str) -> Result<String> {
+    let host = host_wire(backend);
+    let role_id = role.post().id;
+    let dir_text = dir.display().to_string();
+    let failed = |error: String| -> Result<String> {
+        Err(anyhow::Error::msg(receipt_json(
+            false,
+            host,
+            role_id,
+            &dir_text,
+            None,
+            Some(error),
+        )))
+    };
+    let session_id = match prepare_submit(&crate::hook::socket_path(), || {
+        folder_ready(dir).map_err(|e| e.to_string())?;
+        match backend {
+            Backend::Claude => submit_claude(role, dir, task),
+            Backend::Cursor => submit_cursor(role, dir, task),
+            Backend::Dsh => submit_dsh(role, dir, task),
+        }
+    }) {
+        Ok(id) => id,
+        Err(error) => return failed(error),
+    };
+    let row = crate::events::LedgerRow::new(&session_id, host, role_id, &dir_text, task);
+    if let Err(e) = crate::events::append_ledger(&crate::events::ledger_path(), &row) {
+        return failed(format!("写派活台账失败：{e}"));
+    }
+    Ok(receipt_json(
+        true,
+        host,
+        role_id,
+        &dir_text,
+        Some(session_id),
+        None,
+    ))
 }
 
 /// Start a session as `role` on `task` in `dir`: in the selected host. DSH
 /// creates through its running Host; Claude opens its desktop app or terminal.
+/// `submit` starts the host in place and returns one JSON line; the window
+/// passes false and keeps the prefill.
 pub fn dispatch(
     backend: Backend,
     role: Role,
     dir: &Path,
     task: &str,
     terminal: bool,
+    submit: bool,
 ) -> Result<String> {
+    if submit {
+        return dispatch_submit(backend, role, dir, task);
+    }
     folder_ready(dir)?;
     if let Some(why) = not_ready(backend, role, terminal) {
         anyhow::bail!(why);
     }
     if backend == Backend::Dsh {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let id = format!(
-            "{}-{stamp}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-            role.post().id,
-        );
-        let submit = !task.trim().is_empty();
+        let id = dsh_request_id(role);
+        // A task is submitted; an empty one stays a blank session to fill in.
+        // The window's `submit` parameter is already false here.
+        let send = !task.trim().is_empty();
         let result = crate::dsh_bridge::dispatch(
             crate::dsh_bridge::DispatchRequest {
                 id,
                 role: role.post().id.into(),
                 cwd: dir.to_path_buf(),
                 prompt: prompt(role, task, false),
-                submit,
+                submit: send,
             },
             std::time::Duration::from_secs(10),
         )?;
@@ -1144,7 +1596,7 @@ pub fn dispatch(
         // name picks the workspace in DSH, and the id's first block is what a
         // list of blank sessions can be told apart by.
         let (repo, id) = (repo_name(dir), short_id(&result.session_id));
-        return Ok(if submit {
+        return Ok(if send {
             crate::tr!(
                 "已在 DeepSeek Harness 创建并提交「{}」（{repo} · {id}）",
                 "created and submitted a {} relay in DeepSeek Harness ({repo} · {id})",
@@ -1303,8 +1755,55 @@ fn folder_ready(dir: &Path) -> Result<()> {
 }
 
 /// `agent-office dispatch`.
+fn resolve_dir(dir: Option<&Path>) -> Result<PathBuf, String> {
+    match dir {
+        Some(p) => p
+            .canonicalize()
+            .map_err(|_| format!("没有 {} 这个目录", p.display())),
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| format!("读不到当前目录：{e}"))?;
+            Ok(repo_root(&cwd))
+        }
+    }
+}
+
+/// Print one JSON receipt and stop. `exit` skips destructors, so stdout is
+/// flushed first: a pipe is what Hermes reads, and a lost line is a lost receipt.
+fn exit_submit(line: String) -> ! {
+    println!("{line}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(1);
+}
+
 pub fn dispatch_cli(args: &[&str]) -> Result<()> {
     let d = parse_dispatch(args)?;
+    if d.submit {
+        let label = d
+            .dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let dir = match resolve_dir(d.dir.as_deref()) {
+            Ok(dir) => dir,
+            Err(error) => exit_submit(receipt_json(
+                false,
+                host_wire(d.backend),
+                d.role.post().id,
+                &label,
+                None,
+                Some(error),
+            )),
+        };
+        return match dispatch(d.backend, d.role, &dir, &d.task, false, true) {
+            Ok(line) => {
+                println!("{line}");
+                Ok(())
+            }
+            // The error is already the JSON receipt. Returning it would also
+            // print it on stderr, and Hermes would not have a clean stdout.
+            Err(e) => exit_submit(e.to_string()),
+        };
+    }
     // A directory named is taken as it is, a worktree included; run from
     // inside a worktree, the session goes to its repository instead.
     let dir = match d.dir {
@@ -1315,7 +1814,7 @@ pub fn dispatch_cli(args: &[&str]) -> Result<()> {
     };
     println!(
         "{}",
-        dispatch(d.backend, d.role, &dir, &d.task, d.terminal)?
+        dispatch(d.backend, d.role, &dir, &d.task, d.terminal, false)?
     );
     Ok(())
 }
@@ -1415,6 +1914,138 @@ mod tests {
                     assert!(!c.contains("## "), "{} {lang:?}", post.id);
                     assert!(c.starts_with(opening), "{} {lang:?}", post.id);
                     assert!(c.lines().count() <= 10, "{} {lang:?}", post.id);
+                }
+            });
+        }
+    }
+
+    /// Cursor and the Claude desktop link send only [`card`]: the numbered
+    /// steps before the first `##`. A limit that lives in the checklist
+    /// never reaches those sessions, so a role would edit code, hand work
+    /// on, or skip its hand-back fields and the prompt would still look done.
+    /// A noun from the opening is not that limit, so the test asserts the
+    /// numbered prohibition itself: deleting it, or flipping the PM's QA
+    /// gate, fails.
+    #[test]
+    fn a_desktop_card_states_limits_the_checklist_never_reaches() {
+        let no_code = [Role::Product, Role::Ux, Role::Architect, Role::Reviewer];
+        let no_handoff = [
+            Role::Product,
+            Role::Ux,
+            Role::Architect,
+            Role::Frontend,
+            Role::Backend,
+            Role::Qa,
+            Role::Devops,
+            Role::Reviewer,
+        ];
+        for lang in LANGS {
+            with(lang, || {
+                for post in ROSTER {
+                    let c = card(post.role);
+                    if post.role == Role::Pm {
+                        match lang {
+                            Lang::Zh => {
+                                assert!(
+                                    c.contains("「结论、分工、改动、证据、没做或没验证的、风险和待确认」"),
+                                    "{} {lang:?} card is missing its hand-back fields:\n{c}",
+                                    post.id
+                                );
+                                // Step 3 still says 交付物. That is the brief's
+                                // deliverable, not the PM's own hand-back column.
+                                assert!(
+                                    !c.contains("「结论、交付、"),
+                                    "{} {lang:?} card uses 交付 as its hand-back column:\n{c}",
+                                    post.id
+                                );
+                            }
+                            Lang::En => {
+                                assert!(
+                                    c.contains("Conclusion, Who did what, Changes, Evidence, Not done or not verified, Risks and open questions."),
+                                    "{} {lang:?} card is missing its hand-back fields:\n{c}",
+                                    post.id
+                                );
+                                assert!(
+                                    !c.contains("Delivered"),
+                                    "{} {lang:?} card uses Delivered as its hand-back column:\n{c}",
+                                    post.id
+                                );
+                            }
+                        }
+                    } else {
+                        let fields = match lang {
+                            Lang::Zh => "「结论、交付、改动、证据、没做或没验证的、风险和待确认」",
+                            Lang::En => "Conclusion, Delivered, Changes, Evidence, Not done or not verified, Risks and open questions.",
+                        };
+                        assert!(
+                            c.contains(fields),
+                            "{} {lang:?} card is missing its hand-back fields:\n{c}",
+                            post.id
+                        );
+                    }
+                }
+                for role in no_code {
+                    let c = card(role);
+                    let ok = match lang {
+                        Lang::Zh => c.contains("不改产品代码") || c.contains("不改代码"),
+                        Lang::En => {
+                            c.contains("Change no product code") || c.contains("Change no code")
+                        }
+                    };
+                    assert!(ok, "{role:?} {lang:?} card may still edit code:\n{c}");
+                }
+                let design = card(Role::Ux);
+                assert!(
+                    !design.contains("只改界面层") && !design.contains("change only the UI layer"),
+                    "{lang:?} design card still says to change only the UI layer:\n{design}"
+                );
+                let pm = card(Role::Pm);
+                let (qa_before, own_run) = match lang {
+                    Lang::Zh => ("审查前要有测试的交回", "实现者自己跑过测试不算"),
+                    Lang::En => ("comes before review", "does not count"),
+                };
+                assert!(
+                    pm.contains(qa_before),
+                    "{lang:?} PM card can send a behaviour change to review with no QA hand-back:\n{pm}"
+                );
+                assert!(
+                    pm.contains(own_run),
+                    "{lang:?} PM card treats the implementer's own test run as the QA hand-back:\n{pm}"
+                );
+                let front = card(Role::Frontend);
+                let (front_limit, front_picture) = match lang {
+                    Lang::Zh => ("不改状态和数据管线", "画面"),
+                    Lang::En => ("Leave state and pipelines alone", "pictures"),
+                };
+                assert!(
+                    front.contains(front_limit),
+                    "{lang:?} frontend card may edit state and pipelines:\n{front}"
+                );
+                assert!(
+                    front.contains(front_picture),
+                    "{lang:?} frontend card drops the picture it owns:\n{front}"
+                );
+                let back = card(Role::Backend);
+                let back_limit = match lang {
+                    Lang::Zh => "不改画面",
+                    Lang::En => "Leave the picture alone",
+                };
+                assert!(
+                    back.contains(back_limit),
+                    "{lang:?} backend card may edit the picture:\n{back}"
+                );
+                for role in no_handoff {
+                    let c = card(role);
+                    let ok = match lang {
+                        Lang::Zh => c.contains("不派其他角色"),
+                        // QA and DevOps open the step with "Do not"; the words
+                        // are the rule, so that capital still counts.
+                        Lang::En => {
+                            c.contains("do not hand work to other roles")
+                                || c.contains("Do not hand work to other roles")
+                        }
+                    };
+                    assert!(ok, "{role:?} {lang:?} card can still hand work on:\n{c}");
                 }
             });
         }
@@ -1873,7 +2504,8 @@ mod tests {
                 backend: Backend::Claude,
                 dir: Some("/x".into()),
                 task: "跑 测试".into(),
-                terminal: false
+                terminal: false,
+                submit: false
             }
         );
         let auto = parse_dispatch(&["--auto", "--terminal", "做个功能"]).unwrap();
@@ -2276,5 +2908,291 @@ mod tests {
                 "{err}"
             );
         });
+    }
+
+    /// `--submit` is how Hermes starts work without being replaced by the
+    /// host. `--terminal` would exec over the caller, and an empty task would
+    /// start a host with nothing to do. The old parse stays a prefill.
+    #[test]
+    fn submit_parses_apart_from_terminal_and_an_empty_task_fails() {
+        let d = parse_dispatch(&[
+            "--submit",
+            "--role",
+            "backend",
+            "--agent",
+            "claude",
+            "--dir",
+            "/tmp/x",
+            "--",
+            "写接口",
+        ])
+        .unwrap();
+        assert!(d.submit);
+        assert!(!d.terminal);
+        assert_eq!(
+            (d.role, d.backend, d.task.as_str(), d.dir.as_deref()),
+            (
+                Role::Backend,
+                Backend::Claude,
+                "写接口",
+                Some(Path::new("/tmp/x"))
+            )
+        );
+        let old = parse_dispatch(&[
+            "--role",
+            "backend",
+            "--agent",
+            "claude",
+            "--dir",
+            "/tmp/x",
+            "--",
+            "写接口",
+        ])
+        .unwrap();
+        assert!(!old.submit && !old.terminal);
+        assert_eq!(
+            (old.role, old.backend, old.task.as_str()),
+            (d.role, d.backend, d.task.as_str())
+        );
+        assert!(
+            parse_dispatch(&[
+                "--submit",
+                "--terminal",
+                "--role",
+                "backend",
+                "--",
+                "写接口"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_dispatch(&[
+                "--terminal",
+                "--submit",
+                "--role",
+                "backend",
+                "--",
+                "写接口"
+            ])
+            .is_err()
+        );
+        assert!(parse_dispatch(&["--submit", "--role", "backend"]).is_err());
+        assert!(parse_dispatch(&["--submit", "--role", "backend", "--", "  "]).is_err());
+        let prefill = parse_dispatch(&["--role", "backend"]).unwrap();
+        assert!(!prefill.submit && prefill.task.is_empty());
+        let literal = parse_dispatch(&["--role", "qa", "--", "--submit"]).unwrap();
+        assert!(!literal.submit && literal.task == "--submit");
+    }
+
+    /// Claude `--submit` must background a real session the office can see.
+    /// `--bare` or `--print` would not be that session, and a desktop link
+    /// would only prefill.
+    #[test]
+    fn claude_submit_backgrounds_a_session_and_does_not_open_a_link() {
+        let (id, args) = claude_submit_plan(Role::Backend, "写接口").unwrap();
+        assert!(is_uuid_v4(&id), "{id}");
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--bg", "--session-id"] || w[0] == "--bg")
+        );
+        assert!(args.windows(2).any(|w| w == ["--session-id", id.as_str()]));
+        assert!(args.windows(2).any(|w| w == ["--agent", "office-backend"]));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--permission-mode", "bypassPermissions"])
+        );
+        assert!(args.iter().any(|a| a == "-n"));
+        assert!(!args.iter().any(|a| a == "--bare" || a == "--print"));
+        assert!(args.iter().all(|a| !a.contains("claude://")));
+        let prompt = args.last().unwrap();
+        assert_eq!(
+            parse_marker(prompt).map(|(r, rest)| (r, task_of(rest))),
+            Some((Role::Backend, Some("写接口")))
+        );
+        assert!(!prompt.contains(card(Role::Backend)));
+    }
+
+    /// The version and variant bits are what makes the id a UUIDv4. Raw
+    /// random bytes would be rejected as a session id.
+    #[test]
+    fn a_submit_session_id_is_a_uuid_v4() {
+        assert_eq!(
+            format_uuid_v4([0xff; 16]),
+            "ffffffff-ffff-4fff-bfff-ffffffffffff"
+        );
+        assert_eq!(
+            format_uuid_v4([0; 16]),
+            "00000000-0000-4000-8000-000000000000"
+        );
+        assert!(is_uuid_v4(&format_uuid_v4([0x11; 16])));
+        assert!(is_uuid_v4(&uuid_v4().unwrap()));
+    }
+
+    /// Cursor `--submit` runs `cursor-agent` in place. The app link would
+    /// only prefill, and the session id has to be one Cursor will keep.
+    #[test]
+    fn cursor_submit_prints_in_place_with_a_new_session_id() {
+        let (id, args) = cursor_submit_plan(Role::Backend, "写接口").unwrap();
+        assert!(is_uuid_v4(&id), "{id}");
+        for flag in ["--print", "--trust", "--force", "--new-session-id"] {
+            assert!(args.iter().any(|a| a == flag), "missing {flag}: {args:?}");
+        }
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--output-format", "stream-json"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--new-session-id", id.as_str()])
+        );
+        assert!(args.iter().all(|a| !a.contains("cursor://")));
+        let prompt = args.last().unwrap();
+        assert!(
+            prompt.contains(card(Role::Backend)),
+            "cursor has no --agent, so the card is in the prompt"
+        );
+        assert_eq!(
+            parse_marker(prompt).map(|(role, _)| role),
+            Some(Role::Backend)
+        );
+    }
+
+    /// PATH and the known install paths win. When both are empty, the newest
+    /// IDE extension binary is the one `Command::new` can run: a shell
+    /// function named `claude` is invisible, and `1.10` must beat `1.9`.
+    #[test]
+    fn claude_bin_finds_the_extension_binary_when_path_is_empty() {
+        let root = temp_dir("claude-ext");
+        let older =
+            root.join(".vscode/extensions/anthropic.claude-code-1.9.0/resources/native-binary");
+        let newer =
+            root.join(".cursor/extensions/anthropic.claude-code-1.10.0/resources/native-binary");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::create_dir_all(&newer).unwrap();
+        let old_bin = older.join("claude");
+        let new_bin = newer.join("claude");
+        std::fs::write(&old_bin, b"old").unwrap();
+        std::fs::write(&new_bin, b"new").unwrap();
+        let extensions = [
+            root.join(".vscode/extensions"),
+            root.join(".cursor/extensions"),
+        ];
+        let found = claude_bin_in(Some(std::ffi::OsStr::new("")), &[], &extensions).unwrap();
+        assert_eq!(found, new_bin, "1.10 is newer than 1.9");
+        let path_dir = root.join("path");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let path_bin = path_dir.join("claude");
+        std::fs::write(&path_bin, b"path").unwrap();
+        let found = claude_bin_in(Some(path_dir.as_os_str()), &[], &extensions).unwrap();
+        assert_eq!(found, path_bin, "PATH is searched before the extensions");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The office has to be listening before any host starts. Starting Claude
+    /// first would do the work with nobody to report it.
+    #[test]
+    fn submit_does_not_start_a_host_when_the_office_socket_is_down() {
+        let missing = temp_dir("no-sock").join("missing.sock");
+        let mut started = false;
+        let err = prepare_submit(&missing, || {
+            started = true;
+            Ok("sid")
+        })
+        .unwrap_err();
+        assert!(!started, "the host closure ran");
+        assert_eq!(
+            err,
+            "agent-office 没在运行，派不了：先开着它，进度才能送出来"
+        );
+    }
+
+    /// A live socket is the only thing that may start the host. A check that
+    /// always failed would pass the down test and Hermes could never dispatch.
+    #[cfg(unix)]
+    #[test]
+    fn submit_starts_the_host_once_the_office_socket_accepts() {
+        let dir = temp_dir("sock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("office.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let mut started = false;
+        let got = prepare_submit(&path, || {
+            started = true;
+            Ok("sid".to_owned())
+        })
+        .unwrap();
+        assert!(started);
+        assert_eq!(got, "sid");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hermes reads one JSON object from stdout. A sentence, or a success
+    /// object missing `session_id`, is not a receipt it can branch on.
+    #[test]
+    fn a_submit_receipt_is_json_for_both_outcomes() {
+        let ok = receipt_json(
+            true,
+            host_wire(Backend::Claude),
+            Role::Backend.post().id,
+            "/abs",
+            Some("sid".into()),
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 6);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["host"], "claude");
+        assert_eq!(v["role"], "backend");
+        assert_eq!(v["dir"], "/abs");
+        assert_eq!(v["session_id"], "sid");
+        assert_eq!(v["text"], "已开工");
+        assert!(v.get("error").is_none());
+
+        let bad = receipt_json(
+            false,
+            host_wire(Backend::Cursor),
+            Role::Backend.post().id,
+            "/abs",
+            None,
+            Some("找不到 cursor-agent".into()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&bad).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 5);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["host"], "cursor");
+        assert_eq!(v["role"], "backend");
+        assert_eq!(v["dir"], "/abs");
+        assert_eq!(v["error"], "找不到 cursor-agent");
+        assert!(v.get("session_id").is_none());
+        assert!(v.get("text").is_none());
+
+        let dsh = receipt_json(
+            true,
+            host_wire(Backend::Dsh),
+            Role::Qa.post().id,
+            "/abs",
+            Some("s".into()),
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&dsh).unwrap();
+        assert_eq!(v["host"], "dsh");
+        assert_eq!(v["role"], "qa");
+    }
+
+    /// The cursor log holds the prompt. A default umask would leave it
+    /// readable by everyone else on the machine.
+    #[cfg(unix)]
+    #[test]
+    fn a_cursor_submit_log_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("log");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cursor-test.log");
+        let file = open_private_log(&path).unwrap();
+        drop(file);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode is {mode:o}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
