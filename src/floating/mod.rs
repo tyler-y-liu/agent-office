@@ -2585,8 +2585,8 @@ fn picker_heading(plan: &crate::core::DispatchPlan) -> (String, String) {
                     "a new DSH session; open it from the session list and write its task",
                 ),
                 crate::roles::Backend::Cursor => crate::i18n::t(
-                    "在 Cursor 开一个新会话，确认后写任务发送",
-                    "a new chat in Cursor; confirm it, write the task and send",
+                    "在 Cursor Agents 窗口开一个新会话，选好仓库、写任务后发送",
+                    "a new chat in Cursor's Agents window; pick the repository, write the task and send",
                 ),
                 crate::roles::Backend::Claude => crate::i18n::t(
                     "开一个新会话，任务在 Claude 里写",
@@ -4172,7 +4172,7 @@ mod tests {
             let (head, sub) = picker_heading(&cursor);
             assert!(head.contains("（Cursor）"), "{head}");
             assert!(
-                sub.starts_with("在 Cursor 开一个新会话，确认后写任务发送"),
+                sub.starts_with("在 Cursor Agents 窗口开一个新会话，选好仓库、写任务后发送"),
                 "{sub}"
             );
             assert!(sub.contains("h 换成 Claude Code"), "{sub}");
@@ -4180,7 +4180,7 @@ mod tests {
         with(Lang::En, || {
             let (_, sub) = picker_heading(&cursor);
             assert!(
-                sub.starts_with("a new chat in Cursor; confirm it, write the task and send"),
+                sub.starts_with("a new chat in Cursor's Agents window; pick the repository, write the task and send"),
                 "{sub}"
             );
             assert!(sub.contains("h switches to Claude Code"), "{sub}");

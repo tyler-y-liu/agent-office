@@ -200,9 +200,8 @@ pub struct Core {
     open_agent: fn(&SceneState, AgentId) -> Result<&'static str, String>,
     /// What a host lacks to take a dispatch, `None` when it could: the real
     /// check by default; tests substitute one, since the real one reads the
-    /// machine's CLIs and role files. The flag is a dispatch with a task
-    /// (a relay), which a host may take less readily than a fresh one.
-    host_missing: fn(crate::roles::Backend, bool) -> Option<String>,
+    /// machine's CLIs and role files.
+    host_missing: fn(crate::roles::Backend) -> Option<String>,
     /// Dispatch waits for a desktop app or Host without freezing the event loop.
     dispatches: Dispatches,
     /// When the role bar's host was last worked out, and what it was: the
@@ -1026,9 +1025,8 @@ impl Core {
         });
         // The worker's own host unless AGENT_OFFICE_DISPATCH_HOST names one,
         // and `h` in the picker can still switch it before a role is picked.
-        let with_task = relay.is_some();
-        let backend = self.dispatch_backend(host_of(slot), with_task);
-        let switch_to = backend.next_ready(|h| self.host_ready(h, with_task));
+        let backend = self.dispatch_backend(host_of(slot));
+        let switch_to = backend.next_ready(|h| self.host_ready(h));
         Some(DispatchPlan {
             dir,
             backend,
@@ -1053,23 +1051,6 @@ impl Core {
         }
     }
 
-    /// Whether a dispatch now would carry a task: the selected worker's
-    /// finished or stuck work, as [`Self::plan_dispatch`] reads it. The bar
-    /// and a host chip go by it, so neither offers a host the relay could
-    /// not go to.
-    fn would_relay(&self) -> bool {
-        let scene = self.scene();
-        let Some(selected) = self.ui.selected.filter(|id| scene.agents.contains_key(id)) else {
-            return false;
-        };
-        let Some(slot) = dispatch_worker(&scene, Some(selected)) else {
-            return false;
-        };
-        let views = self.views_rx.borrow();
-        self.relay_after(slot, views.get(&slot.agent_id), SystemTime::now())
-            .is_some()
-    }
-
     /// What the role bar shows: the host a click dispatches into, and whether
     /// the other one could take a dispatch too. `None` hides the bar: one
     /// that only ever answers "not set up" would be furniture. The cache above
@@ -1080,12 +1061,11 @@ impl Core {
         {
             return bar.clone();
         }
-        let with_task = self.would_relay();
         let bar = self
             .worker_host()
             .and_then(|(following, dir)| {
-                let host = self.dispatch_backend(following, with_task);
-                self.host_ready(host, with_task).then(|| {
+                let host = self.dispatch_backend(following);
+                self.host_ready(host).then(|| {
                     let repo = dir.file_name().map_or_else(
                         || dir.display().to_string(),
                         |n| n.to_string_lossy().into_owned(),
@@ -1098,7 +1078,7 @@ impl Core {
                         // clicking it can say what it is missing.
                         hosts: crate::roles::Backend::ALL
                             .iter()
-                            .map(|host| (*host, self.host_ready(*host, with_task)))
+                            .map(|host| (*host, self.host_ready(*host)))
                             .collect(),
                     }
                 })
@@ -1111,19 +1091,14 @@ impl Core {
     /// The host a dispatch goes to: the one picked this run, else the
     /// configured default, else the worker's own — and one that could not
     /// take a dispatch never wins, so a stale pick cannot break `p`.
-    fn dispatch_backend(
-        &self,
-        following: crate::roles::Backend,
-        with_task: bool,
-    ) -> crate::roles::Backend {
-        let ready = |h| self.host_ready(h, with_task);
+    fn dispatch_backend(&self, following: crate::roles::Backend) -> crate::roles::Backend {
+        let ready = |h| self.host_ready(h);
         match self.picked_host {
             Some(host) if ready(host) => host,
             _ => {
-                // A worker whose host cannot take this dispatch (no Cursor
-                // at all, or a relay to a Cursor with only its app, which
-                // cannot run a task) still gets one: from the first host
-                // that can, not none at all.
+                // A worker whose host cannot take a dispatch (Cursor hooks
+                // with neither the app nor cursor-agent) still gets one:
+                // from the first host that can, not none at all.
                 let following = if ready(following) {
                     following
                 } else {
@@ -1138,29 +1113,24 @@ impl Core {
         }
     }
 
-    fn host_ready(&self, host: crate::roles::Backend, with_task: bool) -> bool {
-        (self.host_missing)(host, with_task).is_none()
+    fn host_ready(&self, host: crate::roles::Backend) -> bool {
+        (self.host_missing)(host).is_none()
     }
 
     /// Dispatch into `host` from now on, if it could take it; otherwise say
     /// what it is missing, since that is how a host that was never set up
     /// gets found out.
     pub fn choose_dispatch_host(&mut self, host: crate::roles::Backend) {
-        let with_task = self.would_relay();
-        self.choose_dispatch_host_for(host, with_task);
-    }
-
-    fn choose_dispatch_host_for(&mut self, host: crate::roles::Backend, with_task: bool) {
         // Worked out as a dispatch would be, not read off the bar: with no
         // bar, a guessed Claude would make a switch to Claude a no-op.
         let following = self
             .worker_host()
             .map_or(crate::roles::Backend::Claude, |(host, _)| host);
-        let current = self.dispatch_backend(following, with_task);
+        let current = self.dispatch_backend(following);
         if host == current {
             return;
         }
-        match (self.host_missing)(host, with_task) {
+        match (self.host_missing)(host) {
             None => {
                 self.picked_host = Some(host);
                 // The bar and the next plan both read this cache.
@@ -1187,16 +1157,15 @@ impl Core {
     /// is missing, since `h` is the only way to learn a host is not set up
     /// without losing the pick.
     pub fn toggle_dispatch_host(&mut self, plan: &mut DispatchPlan) {
-        let with_task = plan.relay.is_some();
-        self.choose_dispatch_host_for(plan.switch_to.unwrap_or(plan.backend.next()), with_task);
+        self.choose_dispatch_host(plan.switch_to.unwrap_or(plan.backend.next()));
         // A refused switch leaves the plan as it was. Worked out for this
         // plan, not read off the bar: the bar goes by the selection now,
         // which may no longer be what the open picker is relaying.
         if let Some((following, _)) = self.worker_host() {
-            let host = self.dispatch_backend(following, with_task);
-            if self.host_ready(host, with_task) {
+            let host = self.dispatch_backend(following);
+            if self.host_ready(host) {
                 plan.backend = host;
-                plan.switch_to = host.next_ready(|h| self.host_ready(h, with_task));
+                plan.switch_to = host.next_ready(|h| self.host_ready(h));
             }
         }
     }
@@ -2004,7 +1973,7 @@ mod tests {
     #[test]
     fn h_walks_round_the_ready_hosts_and_skips_the_rest() {
         use crate::roles::Backend;
-        fn dsh_missing(h: Backend, _: bool) -> Option<String> {
+        fn dsh_missing(h: Backend) -> Option<String> {
             (h == Backend::Dsh).then(|| "DSH 没装".to_owned())
         }
         let (scene, _) = one_worker(pipeline::CC_SOURCE);
@@ -2016,7 +1985,7 @@ mod tests {
             dir: std::env::temp_dir(),
             backend: Backend::Claude,
             relay: None,
-            switch_to: Backend::Claude.next_ready(|h| core.host_ready(h, false)),
+            switch_to: Backend::Claude.next_ready(|h| core.host_ready(h)),
         };
         assert_eq!(plan.switch_to, Some(Backend::Cursor), "DSH is skipped");
         core.toggle_dispatch_host(&mut plan);
@@ -2033,7 +2002,7 @@ mod tests {
     #[test]
     fn a_worker_whose_host_is_not_ready_dispatches_through_one_that_is() {
         use crate::roles::Backend;
-        fn cursor_missing(h: Backend, _: bool) -> Option<String> {
+        fn cursor_missing(h: Backend) -> Option<String> {
             (h == Backend::Cursor).then(|| "找不到 cursor-agent".to_owned())
         }
         let (scene, _) = one_worker(pipeline::CURSOR_SOURCE);
@@ -2055,17 +2024,15 @@ mod tests {
         assert_eq!(core.picked_host, Some(target));
     }
 
-    /// A Cursor with its app but no cursor-agent takes a fresh session (the
-    /// app prefills it) but cannot run a relay's task. With the real Cursor
-    /// rule, a relay off a Cursor worker must go to a host that can run it,
-    /// as before the app path, not land on Cursor and fail once a role is
-    /// picked; a fresh `p` on the same worker stays in Cursor.
+    /// The Agents window takes a relay's task as well as a fresh session,
+    /// so a Cursor with its app but no cursor-agent must keep a relay off a
+    /// Cursor worker in Cursor, not send it to another host.
     #[test]
-    fn a_relay_leaves_a_cursor_with_only_its_app_and_a_fresh_one_stays() {
+    fn a_relay_stays_in_a_cursor_with_only_its_app() {
         use crate::roles::Backend;
-        fn app_only(h: Backend, with_task: bool) -> Option<String> {
+        fn app_only(h: Backend) -> Option<String> {
             match h {
-                Backend::Cursor => crate::roles::cursor_missing(true, false, true, with_task),
+                Backend::Cursor => crate::roles::cursor_missing(true, false, true),
                 _ => None,
             }
         }
@@ -2078,18 +2045,12 @@ mod tests {
         core.ui.selected = Some(id);
         let plan = core.plan_dispatch().expect("a worker is in the office");
         assert!(plan.relay.is_some(), "its finished turn is handed on");
-        assert_ne!(plan.backend, Backend::Cursor, "a relay needs cursor-agent");
-        assert_ne!(plan.switch_to, Some(Backend::Cursor), "h does not offer it either");
+        assert_eq!(
+            plan.backend,
+            crate::roles::dispatch_host(Backend::Cursor, |h| app_only(h).is_none())
+        );
         let bar = core.dispatch_bar().expect("the bar stays");
-        assert_ne!(bar.active, Backend::Cursor);
-        assert!(bar.hosts.contains(&(Backend::Cursor, false)), "{:?}", bar.hosts);
-
-        core.ui.selected = None;
-        core.host_at = None;
-        let plan = core.plan_dispatch().expect("a worker is in the office");
-        assert!(plan.relay.is_none());
-        let fresh_ready = |h: Backend| app_only(h, false).is_none();
-        assert_eq!(plan.backend, crate::roles::dispatch_host(Backend::Cursor, fresh_ready));
+        assert!(bar.hosts.contains(&(Backend::Cursor, true)), "{:?}", bar.hosts);
     }
 
     /// With no other host ready, `h` must leave the pick where it was and say
@@ -2098,7 +2059,7 @@ mod tests {
     #[test]
     fn h_with_no_other_host_ready_keeps_the_plan_and_says_why() {
         use crate::roles::Backend;
-        fn only_claude(h: Backend, _: bool) -> Option<String> {
+        fn only_claude(h: Backend) -> Option<String> {
             (h != Backend::Claude).then(|| format!("{} 没装", h.short()))
         }
         let (scene, _) = one_worker(pipeline::CC_SOURCE);
@@ -2109,7 +2070,7 @@ mod tests {
             dir: std::env::temp_dir(),
             backend: Backend::Claude,
             relay: None,
-            switch_to: Backend::Claude.next_ready(|h| core.host_ready(h, false)),
+            switch_to: Backend::Claude.next_ready(|h| core.host_ready(h)),
         };
         assert_eq!(plan.switch_to, None);
         let before = plan.clone();

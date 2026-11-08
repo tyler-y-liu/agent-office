@@ -146,7 +146,7 @@ Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它�
 
 DSH 派活通过正在运行的 Host 创建会话：接力会直接创建并提交；新会话则创建空白的角色会话。派完会把 Harness 窗口提到前面（`dsh://open`），新会话在会话列表最上面，打开后给任务。不支持 `--terminal`。只有还没被 Host 认领的请求才会在超时后撤回；已经认领的请求会继续等最终结果和会话 ID，不会把晚到的结果丢掉。Host 中途退出时结果未知，先检查 DSH 会话列表再决定是否重试。如果错误带会话 ID，先打开原会话继续。还没开始处理就已过期的请求会被拒绝，不会在下次启动时补跑。
 
-Cursor 派活把角色说明放在 prompt 里（Cursor 没有以 agent 身份开会话的参数）。不带任务的新会话会在 Cursor app 里打开目标目录并预填 prompt，点 Create Chat，写好任务再发送；带任务的派活（所有接力）新开一个 Terminal.app 窗口，在目标目录里启动 `cursor-agent` 并直接提交，所以要装 Cursor CLI。prompt 只在该目录的 Cursor 窗口到了最前时才发出，agent-office 靠窗口标题确认，所以需要屏幕录制权限；app 没装、prompt 没法原样放进 Cursor 链接、或者确认不了那个窗口在最前时，新会话退回 Terminal，回执里写明原因。PM 要先把 Cursor 角色装齐。命令行里加 `--terminal` 则不开新窗口，在当前终端里直接启动 `cursor-agent`。
+Cursor 派活把角色说明放在 prompt 里（Cursor 没有以 agent 身份开会话的参数）。派活（包括接力）会打开 Cursor 的 Agents 窗口并预填 prompt：点 Create Chat，选好仓库（回执里写了选哪个），写好任务或直接发送。Agents 窗口不接受指定目录，所以 prompt 末尾写明了工作目录，让 agent 在那里干活，接力到 worktree 时也一样。prompt 只在 Agents 窗口到了最前时才发出，agent-office 靠窗口标题确认，所以需要屏幕录制权限。app 没装、prompt 没法原样放进 Cursor 链接、或者确认不了 Agents 窗口在最前时，退回 Terminal.app，在目标目录里启动 `cursor-agent` 并直接提交（要装 Cursor CLI），回执里写明原因。双击 app 里的 Cursor 会话会在 Agents 窗口打开它，`cursor-agent` 的会话则切到它的终端。PM 要先把 Cursor 角色装齐。命令行里加 `--terminal` 则不开新窗口，在当前终端里直接启动 `cursor-agent`。
 
 终端里用 `agent-office dispatch --role qa "跑全量测试"`（`--dir`、`--terminal`，PM 用 `--auto`）；派给 DeepSeek Harness 时加 `--agent dsh`，派给 Cursor 时加 `--agent cursor`。`agent-office roles remove [--agent dsh|cursor]` 只移除对应宿主的角色，不影响其他宿主。
 
