@@ -407,7 +407,10 @@ mod tests {
         assert!(!found.is_empty());
         for expression in found {
             assert!(
-                TEMPLATE.contains(&format!("if (expression === {}) return", serde_json::to_string(&expression).unwrap())),
+                TEMPLATE.contains(&format!(
+                    "if (expression === {}) return",
+                    serde_json::to_string(&expression).unwrap()
+                )),
                 "unhandled !!js expression: {expression}"
             );
         }

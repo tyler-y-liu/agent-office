@@ -6,12 +6,12 @@
 
 use std::time::{Duration, SystemTime};
 
-use pixtuoid_core::AgentId;
 use super::vector::Faces;
 use super::{Area, Canvas, DoorSign, Tag, figure_size, pt_px, tag_pad};
 use crate::fun::{Festival, Mood};
 use crate::i18n::t;
 use crate::tasks::Cheer;
+use pixtuoid_core::AgentId;
 
 /// Where the office stands in the window and how big its pixels are.
 #[derive(Clone, Copy)]
@@ -139,7 +139,13 @@ pub(super) fn handoff(canvas: &mut Canvas, s: Stage, from: &Tag, to: &Tag, t: f3
     let x = lerp(fx, tx) as i64 - w / 2;
     let y = (lerp(fy, ty) - lift) as i64 - 2 * u;
     sprite(canvas, x, y, u, TICKET);
-    canvas.fill(x, y, u32::try_from(w).unwrap_or(0), u32::try_from(u).unwrap_or(1), stripe);
+    canvas.fill(
+        x,
+        y,
+        u32::try_from(w).unwrap_or(0),
+        u32::try_from(u).unwrap_or(1),
+        stripe,
+    );
 }
 
 /// A figure's centre column and top row, in window pixels.
@@ -927,10 +933,7 @@ mod tests {
         let mut slow = Canvas::new(220, 140, 0);
         slow.px.clone_from(&fast.px);
         night_lights(&mut fast, s, &tags, &lit);
-        let pools: Vec<_> = tags[..2]
-            .iter()
-            .map(|t| pool(s, t))
-            .collect();
+        let pools: Vec<_> = tags[..2].iter().map(|t| pool(s, t)).collect();
         by_pixel(&mut slow, s, &pools);
         assert!(fast.px == slow.px);
     }
@@ -968,13 +971,21 @@ mod tests {
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let at = |s: f32| t0 + Duration::from_secs_f32(s);
         let opened = t0 - Duration::from_secs(60);
-        assert_eq!(handoff_progress(t0, opened, at(10.0)), None, "not shown yet");
+        assert_eq!(
+            handoff_progress(t0, opened, at(10.0)),
+            None,
+            "not shown yet"
+        );
         assert_eq!(handoff_progress(t0, opened, at(15.0)), Some(0.0));
         let mid = handoff_progress(t0, opened, at(16.5)).unwrap();
         assert!((mid - 0.5).abs() < 0.01, "{mid}");
         assert_eq!(handoff_progress(t0, opened, at(18.0)), None, "landed");
         assert_eq!(handoff_progress(t0, opened, t0), None);
         // Found at work when the office opened: handed its work before.
-        assert_eq!(handoff_progress(t0, t0, at(16.5)), None, "no ticket on a restart");
+        assert_eq!(
+            handoff_progress(t0, t0, at(16.5)),
+            None,
+            "no ticket on a restart"
+        );
     }
 }

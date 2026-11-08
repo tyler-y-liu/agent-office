@@ -83,7 +83,13 @@ pub fn bin() -> Option<PathBuf> {
     let known = home
         .map(|h| h.join(".local/bin/cursor-agent"))
         .into_iter()
-        .chain(["/opt/homebrew/bin/cursor-agent", "/usr/local/bin/cursor-agent"].map(PathBuf::from));
+        .chain(
+            [
+                "/opt/homebrew/bin/cursor-agent",
+                "/usr/local/bin/cursor-agent",
+            ]
+            .map(PathBuf::from),
+        );
     on_path.chain(known).find(|p| p.is_file())
 }
 
@@ -163,8 +169,9 @@ pub fn open_in_terminal(dir: &Path, tag: &str, prompt: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         // An existing directory keeps its own mode through create; the
         // scripts hold prompts, so it is narrowed either way.
-        std::fs::set_permissions(&launch, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| crate::tr!("改 {} 权限失败", "could not chmod {}", launch.display()))?;
+        std::fs::set_permissions(&launch, std::fs::Permissions::from_mode(0o700)).with_context(
+            || crate::tr!("改 {} 权限失败", "could not chmod {}", launch.display()),
+        )?;
     }
     sweep_leftovers(&launch);
     let nanos = std::time::SystemTime::now()
@@ -257,16 +264,18 @@ fn format_char(c: char) -> bool {
 /// Whether `parts` occur in this order within one line of `lower`, as
 /// Cursor's `a.*b` does (its `.` stops at line breaks).
 fn in_one_line(lower: &str, parts: &[&str]) -> bool {
-    lower.split(['\n', '\r', '\u{2028}', '\u{2029}']).any(|line| {
-        let mut rest = line;
-        parts.iter().all(|p| match rest.find(p) {
-            Some(i) => {
-                rest = &rest[i + p.len()..];
-                true
-            }
-            None => false,
+    lower
+        .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+        .any(|line| {
+            let mut rest = line;
+            parts.iter().all(|p| match rest.find(p) {
+                Some(i) => {
+                    rest = &rest[i + p.len()..];
+                    true
+                }
+                None => false,
+            })
         })
-    })
 }
 
 /// What in `prompt` Cursor would change before reading it: its query is
@@ -278,7 +287,9 @@ fn app_mangled(prompt: &str) -> Option<&'static str> {
     if prompt.contains('+') {
         return Some("+");
     }
-    let pct = b.windows(3).any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit());
+    let pct = b
+        .windows(3)
+        .any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit());
     if pct {
         return Some("%hh");
     }
@@ -298,14 +309,20 @@ fn app_refused(prompt: &str) -> Option<String> {
     if prompt.trim().is_empty() {
         return Some(crate::i18n::t("空的", "empty").into());
     }
-    if prompt.chars().any(|c| (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || format_char(c)) {
+    if prompt
+        .chars()
+        .any(|c| (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || format_char(c))
+    {
         return Some(crate::i18n::t("格式字符或控制字符", "format or control characters").into());
     }
     let lower = prompt.to_lowercase();
     // `/\.env(\b|\W)/` without the `u` flag: `.env` not followed by an
     // ASCII word character.
     let env = lower.match_indices(".env").any(|(i, _)| {
-        !lower.as_bytes().get(i + 4).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        !lower
+            .as_bytes()
+            .get(i + 4)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
     });
     if env {
         return Some(".env".into());
@@ -371,7 +388,9 @@ const AGENTS_WINDOW_TITLE: &str = "Cursor Agents";
 /// is blog's window, not notes'), so only the last part counts. Any part
 /// that is or starts as the Agents window's title rules it out.
 fn is_folder_window(title: &str, name: &str) -> bool {
-    !title.split(" — ").any(|part| part.starts_with(AGENTS_WINDOW_TITLE))
+    !title
+        .split(" — ")
+        .any(|part| part.starts_with(AGENTS_WINDOW_TITLE))
         && title.rsplit(" — ").next() == Some(name)
 }
 
@@ -428,7 +447,11 @@ enum Step {
 /// [`APP_SETTLE`] with the clock restarting whenever anything else is in
 /// front, and two windows of the same name are never sent to.
 fn step(w: &mut Waiting, titles: &[Option<String>], name: &str, now: std::time::Instant) -> Step {
-    let same = titles.iter().flatten().filter(|t| is_folder_window(t, name)).count();
+    let same = titles
+        .iter()
+        .flatten()
+        .filter(|t| is_folder_window(t, name))
+        .count();
     if same > 1 {
         return Step::SameName;
     }
@@ -455,7 +478,10 @@ fn step(w: &mut Waiting, titles: &[Option<String>], name: &str, now: std::time::
 pub fn open_in_app(dir: &Path, link: &str) -> Result<()> {
     anyhow::ensure!(
         cfg!(target_os = "macos"),
-        crate::i18n::t("只有 macOS 能替你打开 Cursor", "only macOS can open Cursor for you")
+        crate::i18n::t(
+            "只有 macOS 能替你打开 Cursor",
+            "only macOS can open Cursor for you"
+        )
     );
     let name = dir
         .file_name()
@@ -470,8 +496,17 @@ pub fn open_in_app(dir: &Path, link: &str) -> Result<()> {
             "agent-office has no Screen Recording permission, so it cannot see Cursor's window titles to make sure the prompt lands in the right window (System Settings → Privacy & Security → Screen Recording: add agent-office)",
         )
     );
-    let limit = if app_running() { APP_WARM_LIMIT } else { APP_COLD_LIMIT };
-    run_open(std::process::Command::new("open").args(["-a", "Cursor"]).arg(dir)).map_err(|why| {
+    let limit = if app_running() {
+        APP_WARM_LIMIT
+    } else {
+        APP_COLD_LIMIT
+    };
+    run_open(
+        std::process::Command::new("open")
+            .args(["-a", "Cursor"])
+            .arg(dir),
+    )
+    .map_err(|why| {
         anyhow::anyhow!(crate::tr!(
             "没能用 Cursor 打开 {}（{why}）",
             "could not open {} in Cursor ({why})",
@@ -579,8 +614,13 @@ mod front {
             return None;
         }
         let mut buf = vec![0 as c_char; 4096];
-        (unsafe { CFStringGetCString(r, buf.as_mut_ptr(), buf.len() as isize, UTF8) } != 0)
-            .then(|| unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+        (unsafe { CFStringGetCString(r, buf.as_mut_ptr(), buf.len() as isize, UTF8) } != 0).then(
+            || {
+                unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            },
+        )
     }
 
     unsafe fn number(r: Ref) -> Option<i64> {
@@ -623,7 +663,8 @@ mod front {
                 {
                     continue;
                 }
-                let title = string(CFDictionaryGetValue(w, kCGWindowName)).filter(|t| !t.is_empty());
+                let title =
+                    string(CFDictionaryGetValue(w, kCGWindowName)).filter(|t| !t.is_empty());
                 out.push(title);
             }
             CFRelease(list);
@@ -1079,7 +1120,11 @@ mod tests {
             dir.canonicalize().unwrap()
         );
         for p in [&root, &dir] {
-            assert!(!p.join("pwned").exists() && !p.join("pwned2").exists(), "{}", p.display());
+            assert!(
+                !p.join("pwned").exists() && !p.join("pwned2").exists(),
+                "{}",
+                p.display()
+            );
         }
         assert!(!script.exists(), "the script deletes itself");
         // A NUL cannot travel in argv: dropped, not the prompt cut there.
@@ -1108,7 +1153,11 @@ mod tests {
         assert!(long.chars().count() > 4000);
         let t = read_back(long);
         assert_eq!(t.role, Some(Role::Pm));
-        assert!(t.latest_prompt().is_some_and(|p| p.starts_with('审')), "{:?}", t.latest_prompt());
+        assert!(
+            t.latest_prompt().is_some_and(|p| p.starts_with('审')),
+            "{:?}",
+            t.latest_prompt()
+        );
     }
 
     #[test]
@@ -1125,7 +1174,11 @@ mod tests {
         let (mut out, mut i) = (Vec::new(), 0);
         while i < b.len() {
             let hex = |c: u8| char::from(c).to_digit(16);
-            match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            match (
+                b[i],
+                b.get(i + 1).copied().and_then(hex),
+                b.get(i + 2).copied().and_then(hex),
+            ) {
                 (b'%', Some(h), Some(l)) => {
                     out.push((h * 16 + l) as u8);
                     i += 3;
@@ -1155,7 +1208,10 @@ mod tests {
             .find(|&i| {
                 b[i] == b'&'
                     && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic)
-                    && b[i + 2..].iter().find(|c| !(c.is_ascii_alphanumeric() || **c == b'_' || **c == b'-')) == Some(&b'=')
+                    && b[i + 2..]
+                        .iter()
+                        .find(|c| !(c.is_ascii_alphanumeric() || **c == b'_' || **c == b'-'))
+                        == Some(&b'=')
             })
             .unwrap_or(b.len());
         let raw = rest[..end].replace('+', " ");
@@ -1177,8 +1233,16 @@ mod tests {
                     let prompt = crate::roles::cursor_prompt(post.role, "");
                     let link = app_link(dir, &prompt)
                         .unwrap_or_else(|e| panic!("{} ({lang:?}) refused: {e}", post.id));
-                    assert!(link.starts_with("cursor://anysphere.cursor-deeplink/prompt?"), "{link}");
-                    assert_eq!(cursor_param(&link, "text").as_deref(), Some(prompt.as_str()), "{}", post.id);
+                    assert!(
+                        link.starts_with("cursor://anysphere.cursor-deeplink/prompt?"),
+                        "{link}"
+                    );
+                    assert_eq!(
+                        cursor_param(&link, "text").as_deref(),
+                        Some(prompt.as_str()),
+                        "{}",
+                        post.id
+                    );
                     assert_eq!(cursor_param(&link, "workspace").as_deref(), Some("shop"));
                 }
             });
@@ -1218,7 +1282,13 @@ mod tests {
         let long = "字".repeat(4000);
         assert!(app_link(dir, &long).unwrap_err().contains("10000"));
         // What looks close but is not refused by Cursor goes through.
-        for ok in ["a & b", "100% sure", ".environment", "dump\ntoken", "tab\tand\r\nlines"] {
+        for ok in [
+            "a & b",
+            "100% sure",
+            ".environment",
+            "dump\ntoken",
+            "tab\tand\r\nlines",
+        ] {
             assert!(app_link(dir, ok).is_ok(), "{ok:?}");
         }
     }
@@ -1243,15 +1313,30 @@ mod tests {
     #[test]
     fn only_the_folders_own_window_in_front_takes_the_link() {
         let t = titles;
-        assert!(target_in_front(&t(&[Some("shop"), Some("Cursor Agents")]), "shop"));
+        assert!(target_in_front(
+            &t(&[Some("shop"), Some("Cursor Agents")]),
+            "shop"
+        ));
         assert!(target_in_front(&t(&[Some("main.rs — shop")]), "shop"));
         // An open file named like the folder is not the folder's window.
         assert!(!target_in_front(&t(&[Some("shop — blog")]), "shop"));
-        assert!(!target_in_front(&t(&[Some("Cursor Agents"), Some("shop")]), "shop"));
-        assert!(!target_in_front(&t(&[Some("Cursor Agents — shop")]), "shop"));
-        assert!(!target_in_front(&t(&[Some("Cursor Agents (2)")]), "Cursor Agents (2)"));
+        assert!(!target_in_front(
+            &t(&[Some("Cursor Agents"), Some("shop")]),
+            "shop"
+        ));
+        assert!(!target_in_front(
+            &t(&[Some("Cursor Agents — shop")]),
+            "shop"
+        ));
+        assert!(!target_in_front(
+            &t(&[Some("Cursor Agents (2)")]),
+            "Cursor Agents (2)"
+        ));
         assert!(!target_in_front(&t(&[Some("blog"), Some("shop")]), "shop"));
-        assert!(!target_in_front(&t(&[None, Some("shop")]), "shop"), "a window still loading is in front");
+        assert!(
+            !target_in_front(&t(&[None, Some("shop")]), "shop"),
+            "a window still loading is in front"
+        );
         assert!(!target_in_front(&t(&[]), "shop"));
         assert!(!target_in_front(&t(&[Some("shop-api")]), "shop"));
     }
@@ -1281,7 +1366,11 @@ mod tests {
         let mut w = waiting(t0);
         assert_eq!(step(&mut w, &shop, "shop", at(0)), Step::Wait);
         assert_eq!(step(&mut w, &shop, "shop", at(200)), Step::Wait);
-        assert_eq!(step(&mut w, &shop, "shop", at(2100)), Step::Wait, "2 s from the second look, not the first");
+        assert_eq!(
+            step(&mut w, &shop, "shop", at(2100)),
+            Step::Wait,
+            "2 s from the second look, not the first"
+        );
         assert_eq!(step(&mut w, &shop, "shop", at(2200)), Step::Send);
 
         // The Agents window taking the front restarts the clock.

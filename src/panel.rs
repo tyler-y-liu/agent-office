@@ -238,7 +238,12 @@ impl Group {
 /// first, whole, rather than the last count being cut mid-word ("3 Worki").
 fn header_spans(roots: &[Group], waiting: usize, room: usize) -> Vec<Span<'static>> {
     let full = header_spans_of(roots, waiting, true);
-    if full.iter().map(|s| crate::text::cells(&s.content) as usize).sum::<usize>() <= room {
+    if full
+        .iter()
+        .map(|s| crate::text::cells(&s.content) as usize)
+        .sum::<usize>()
+        <= room
+    {
         return full;
     }
     header_spans_of(roots, waiting, false)
@@ -259,7 +264,11 @@ fn header_spans_of(roots: &[Group], waiting: usize, all: bool) -> Vec<Span<'stat
             bold(TEXT),
         ));
     }
-    let rest: &[Group] = if all { &[Group::Working, Group::Idle] } else { &[] };
+    let rest: &[Group] = if all {
+        &[Group::Working, Group::Idle]
+    } else {
+        &[]
+    };
     for g in needs.into_iter().chain(rest.iter().copied()) {
         let n = count(g);
         if n == 0 {
@@ -462,7 +471,12 @@ pub fn fold(
             shown.extend_from_slice(tree);
         } else {
             folded.insert(root, n);
-            shown.extend(tree.iter().zip(&hidden).filter(|(_, h)| !**h).map(|(r, _)| *r));
+            shown.extend(
+                tree.iter()
+                    .zip(&hidden)
+                    .filter(|(_, h)| !**h)
+                    .map(|(r, _)| *r),
+            );
         }
         start = end;
     }
@@ -607,20 +621,24 @@ fn doing(
 ) -> Option<(String, Color)> {
     match &slot.state {
         ActivityState::Running { .. }
-            if view.is_some_and(|v| v.role == Some(crate::roles::Role::Pm) && !v.todos.is_empty()) =>
+            if view
+                .is_some_and(|v| v.role == Some(crate::roles::Role::Pm) && !v.todos.is_empty()) =>
         {
             view.map(|v| (plan_line(&v.todos), TEXT))
         }
         // Its detail is pixtuoid's English "Delegating", saying again what
         // the chip's 分派中 says.
         ActivityState::Running {
-            item: Some(ToolUse {
-                kind: ToolKind::Task,
-                ..
-            }),
+            item:
+                Some(ToolUse {
+                    kind: ToolKind::Task,
+                    ..
+                }),
         } => delegated.map(|d| (one_line(d), TEXT)),
         ActivityState::Running {
-            item: Some(ToolUse { detail: Some(d), .. }),
+            item: Some(ToolUse {
+                detail: Some(d), ..
+            }),
         } if &**d == ON_BACKGROUND => view
             .and_then(|v| v.recent_tools.last())
             .map(|tool| (one_line(tool), TEXT)),
@@ -1110,7 +1128,11 @@ fn empty_lines(state: &PanelState, width: u16) -> Vec<Line<'static>> {
             .into_iter()
             .enumerate()
             .map(|(i, part)| {
-                let lead = if i == 0 { format!("{mark} ") } else { "  ".to_owned() };
+                let lead = if i == 0 {
+                    format!("{mark} ")
+                } else {
+                    "  ".to_owned()
+                };
                 Line::from(vec![
                     Span::styled(lead, Style::default().fg(if done { WORK } else { DIM })),
                     Span::styled(part, Style::default().fg(color)),
@@ -1118,15 +1140,26 @@ fn empty_lines(state: &PanelState, width: u16) -> Vec<Line<'static>> {
             })
             .collect::<Vec<_>>()
     };
-    let dim = |t: &str| vec![Line::from(Span::styled(t.to_owned(), Style::default().fg(DIM)))];
+    let dim = |t: &str| {
+        vec![Line::from(Span::styled(
+            t.to_owned(),
+            Style::default().fg(DIM),
+        ))]
+    };
     let gap = || vec![Line::default()];
     [
-        dim(crate::i18n::t("还没有 agent 会话在运行", "No agent sessions running yet")),
+        dim(crate::i18n::t(
+            "还没有 agent 会话在运行",
+            "No agent sessions running yet",
+        )),
         gap(),
         step(
             state.hooks,
-            crate::i18n::t("接上 hooks：agent-office connect", "Connect hooks: agent-office connect")
-                .to_owned(),
+            crate::i18n::t(
+                "接上 hooks：agent-office connect",
+                "Connect hooks: agent-office connect",
+            )
+            .to_owned(),
             crate::i18n::t("hooks 已接上", "Hooks connected"),
         ),
         step(
@@ -1490,9 +1523,7 @@ fn bar_labels(width: u16) -> Option<Vec<Vec<(crate::roles::Role, &'static str)>>
         .map(|p| (p.role, p.role.name()))
         .collect();
     let span = |row: &[(crate::roles::Role, &'static str)]| {
-        row.iter()
-            .map(|(_, text)| bar_cells(text) + 1)
-            .sum::<u16>()
+        row.iter().map(|(_, text)| bar_cells(text) + 1).sum::<u16>()
     };
     // Nine posts split 8/1 would read as one post that lost its neighbours,
     // so the split is the one that leaves the fuller row shortest.
@@ -1514,7 +1545,10 @@ fn bar_labels(width: u16) -> Option<Vec<Vec<(crate::roles::Role, &'static str)>>
 /// The hosts are a list, not "this one and the other": adding Cursor to
 /// [`crate::roles::Backend::ALL`] puts a third chip here with no new layout,
 /// which a `⇄` that names one alternative could never do.
-#[expect(clippy::too_many_arguments, reason = "one role bar's layout and drawing state")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one role bar's layout and drawing state"
+)]
 fn role_bar(
     x: u16,
     y: u16,
@@ -1767,8 +1801,16 @@ mod tests {
             .map(|c| c.symbol())
             .filter(|s| *s != " ")
             .collect();
-        assert!(text.contains("2个子代理已做完"), "the fold says how many it hides: {text}");
-        assert!(!drawn.rows.iter().any(|(_, id)| *id == subs[1] || *id == subs[2]));
+        assert!(
+            text.contains("2个子代理已做完"),
+            "the fold says how many it hides: {text}"
+        );
+        assert!(
+            !drawn
+                .rows
+                .iter()
+                .any(|(_, id)| *id == subs[1] || *id == subs[2])
+        );
         let next = step(&shown, Some(a), 1);
         assert_eq!(next, Some(subs[0]), "folded cards are stepped over");
 
@@ -1778,7 +1820,10 @@ mod tests {
         assert_eq!(shown, o, "expanding the root shows every subagent");
         assert!(folded.is_empty());
         let (shown, _) = fold(&o, &scene, &views, now, &seen, Some(subs[1]), false);
-        assert_eq!(shown, o, "with one of its subagents selected the tree stays open");
+        assert_eq!(
+            shown, o,
+            "with one of its subagents selected the tree stays open"
+        );
     }
 
     /// More sessions than fit must be reachable by the wheel, not only by
@@ -1855,16 +1900,29 @@ mod tests {
         let mut scene = SceneState::uniform(8);
         let mut r = Reducer::new();
         let ids: Vec<AgentId> = (0..8)
-            .map(|i| start(&mut scene, &mut r, &format!("s{i}"), None, t0 + Duration::from_secs(i)))
+            .map(|i| {
+                start(
+                    &mut scene,
+                    &mut r,
+                    &format!("s{i}"),
+                    None,
+                    t0 + Duration::from_secs(i),
+                )
+            })
             .collect();
         let views = TaskViews::default();
         let area = Rect::new(0, 0, 40, 12);
         let mut state = PanelState::default();
         let mut buf = Buffer::empty(area);
         let drawn = render(&mut buf, area, &scene, &views, &HashMap::new(), &mut state);
-        let row = |buf: &Buffer, y: u16| (0..area.width).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        let row = |buf: &Buffer, y: u16| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        };
         let last = row(&buf, area.height - 1);
-        let shown: std::collections::HashSet<AgentId> = drawn.rows.iter().map(|(_, id)| *id).collect();
+        let shown: std::collections::HashSet<AgentId> =
+            drawn.rows.iter().map(|(_, id)| *id).collect();
         let below = ids.len() - shown.len();
         assert!(below > 0, "the test needs more cards than the panel holds");
         assert!(last.contains(&format!("+{below} ▼")), "{last:?}");
@@ -2246,14 +2304,27 @@ mod tests {
             s.state_started_at = now - Duration::from_secs(ago);
         };
         let ask = || ActivityState::RequiresAction { reason: None };
-        set(&mut scene, parent, ActivityState::Running { item: None }, 300);
+        set(
+            &mut scene,
+            parent,
+            ActivityState::Running { item: None },
+            300,
+        );
         set(&mut scene, child, ask(), 40);
         set(&mut scene, root, ask(), 90);
         let views = TaskViews::default();
         let seen = HashMap::new();
-        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(root), "the older prompt");
+        assert_eq!(
+            next_waiting(&scene, &views, now, &seen),
+            Some(root),
+            "the older prompt"
+        );
         set(&mut scene, root, ask(), 30);
-        assert_eq!(next_waiting(&scene, &views, now, &seen), Some(child), "the sub waited longer");
+        assert_eq!(
+            next_waiting(&scene, &views, now, &seen),
+            Some(child),
+            "the sub waited longer"
+        );
         let ran = TaskView {
             prompt: Some("修登录页".into()),
             ..TaskView::default()
@@ -2356,7 +2427,12 @@ mod tests {
             ..TaskView::default()
         };
         let lines = card(slot, 1, Some(&explore), &look, 40);
-        assert!(lines[0].spans.iter().any(|s| s.content.contains("Explore agent-office")));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("Explore agent-office"))
+        );
     }
 
     /// A finished session waits in the pantry, under 做完待看, until you open
@@ -2392,9 +2468,17 @@ mod tests {
         );
         // Unread, it is in your office under 做完待看: its chip says done, not
         // idle, which read as nothing to look at.
-        assert!(status(&slot, Some(&view), false, now).0.starts_with("✓ 做完 "));
+        assert!(
+            status(&slot, Some(&view), false, now)
+                .0
+                .starts_with("✓ 做完 ")
+        );
         let later = now + Duration::from_secs(20 * 60);
-        assert!(status(&slot, Some(&view), false, later).0.starts_with("· 空闲 "));
+        assert!(
+            status(&slot, Some(&view), false, later)
+                .0
+                .starts_with("· 空闲 ")
+        );
         let while_working = HashMap::from([(a, now - Duration::from_secs(120))]);
         assert_eq!(
             group(&while_working),
@@ -2510,12 +2594,26 @@ mod tests {
         );
         assert!(matches!(
             &scene.agents[&p].state,
-            ActivityState::Running { item: Some(ToolUse { kind: ToolKind::Task, .. }) }
+            ActivityState::Running {
+                item: Some(ToolUse {
+                    kind: ToolKind::Task,
+                    ..
+                })
+            }
         ));
         let mut views = HashMap::new();
-        assert_eq!(delegated(&scene, &std::sync::Arc::new(views.clone()), p), None);
+        assert_eq!(
+            delegated(&scene, &std::sync::Arc::new(views.clone()), p),
+            None
+        );
         assert_eq!(doing(&scene.agents[&p], None, None), None);
-        let kid = start(&mut scene, &mut r, "kid", Some(p), t0 + Duration::from_secs(1));
+        let kid = start(
+            &mut scene,
+            &mut r,
+            "kid",
+            Some(p),
+            t0 + Duration::from_secs(1),
+        );
         scene.agents.get_mut(&kid).unwrap().state = ActivityState::Running { item: None };
         views.insert(
             kid,
@@ -2559,7 +2657,10 @@ mod tests {
         // Opened, it is no longer waiting: the task shows again.
         assert_eq!(head_wait(slot, Some(&asked), true, 40), None);
         let tool = TaskView {
-            recent_tools: vec!["Bash: ls".into(), "Edit: /repo/src/very/deep/login.rs".into()],
+            recent_tools: vec![
+                "Bash: ls".into(),
+                "Edit: /repo/src/very/deep/login.rs".into(),
+            ],
             ..TaskView::default()
         };
         slot.state = ActivityState::RequiresAction {
@@ -2608,7 +2709,12 @@ mod tests {
         let text = |st: &PanelState| {
             empty_lines(st, 200)
                 .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -2658,7 +2764,10 @@ mod tests {
             wrap_words("Connect hooks: agent-office connect", 20),
             vec!["Connect hooks:", "agent-office connect"]
         );
-        assert_eq!(wrap_words("一二三四五六七", 6), vec!["一二三", "四五六", "七"]);
+        assert_eq!(
+            wrap_words("一二三四五六七", 6),
+            vec!["一二三", "四五六", "七"]
+        );
     }
 
     #[test]
@@ -2698,7 +2807,11 @@ mod tests {
         }
         let roster: Vec<_> = crate::roles::ROSTER.iter().map(|p| p.role).collect();
         assert_eq!(
-            drawn.roles.iter().map(|(_, _, _, r)| *r).collect::<Vec<_>>(),
+            drawn
+                .roles
+                .iter()
+                .map(|(_, _, _, r)| *r)
+                .collect::<Vec<_>>(),
             roster
         );
         for &(row, col, w, role) in &drawn.roles {
@@ -2720,7 +2833,11 @@ mod tests {
         // Every host is one click away on the host row, and no chip reaches
         // into the posts below it.
         assert_eq!(
-            drawn.hosts.iter().map(|(_, _, _, host)| *host).collect::<Vec<_>>(),
+            drawn
+                .hosts
+                .iter()
+                .map(|(_, _, _, host)| *host)
+                .collect::<Vec<_>>(),
             crate::roles::Backend::ALL.to_vec()
         );
         for &(row, col, w, host) in &drawn.hosts {
@@ -2769,7 +2886,13 @@ mod tests {
         let mut scene = SceneState::uniform(8);
         let mut r = Reducer::new();
         for i in 0..8 {
-            start(&mut scene, &mut r, &format!("b{i}"), None, t0 + Duration::from_secs(i));
+            start(
+                &mut scene,
+                &mut r,
+                &format!("b{i}"),
+                None,
+                t0 + Duration::from_secs(i),
+            );
         }
         let views = TaskViews::default();
         let area = Rect::new(0, 0, 46, 16);
@@ -2793,9 +2916,16 @@ mod tests {
         let bar_top = drawn.roles.iter().map(|(y, _, _, _)| *y).min().unwrap();
         let bar_bottom = drawn.roles.iter().map(|(y, _, _, _)| *y).max().unwrap();
         assert_eq!(bar_top, area.height - 2, "the host line sits right above");
-        assert_eq!(bar_bottom, area.height - 1, "and the chip rows end the panel");
+        assert_eq!(
+            bar_bottom,
+            area.height - 1,
+            "and the chip rows end the panel"
+        );
         let card_rows = drawn.rows.iter().map(|(y, _)| *y).max().unwrap();
-        assert!(card_rows < bar_top - 1, "cards stop above the bar's host line");
+        assert!(
+            card_rows < bar_top - 1,
+            "cards stop above the bar's host line"
+        );
     }
 
     /// The host chips are the only way to switch, so a long repository name

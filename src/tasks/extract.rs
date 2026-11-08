@@ -425,8 +425,7 @@ impl Transcript {
             _ => return,
         };
         if let Some((task, call)) = background_completion(v, &text) {
-            self.background
-                .retain(|(t, c)| !(t == &task && c == &call));
+            self.background.retain(|(t, c)| !(t == &task && c == &call));
             self.outstanding.retain(|(o, _)| o != &call);
             return;
         }
@@ -1457,7 +1456,10 @@ mod tests {
             .to_string(),
         );
         assert!(!t.has_background_work());
-        assert!(t.outstanding.is_empty(), "a failed background task is over too");
+        assert!(
+            t.outstanding.is_empty(),
+            "a failed background task is over too"
+        );
     }
 
     /// Errors in a row are what an agent going round in circles looks like;
@@ -1706,7 +1708,9 @@ mod tests {
     #[test]
     fn a_real_task_after_the_marker_ends_the_wait() {
         let mut t = Transcript::default();
-        t.feed(&user(json!("[office:ux] 角色：设计\n\n任务：还没定，先问我要做什么。")));
+        t.feed(&user(json!(
+            "[office:ux] 角色：设计\n\n任务：还没定，先问我要做什么。"
+        )));
         assert!(t.needs_task, "an empty dispatch waits for its task");
         // Claude Code's note of the same prompt keeps it waiting.
         t.feed(&json!({"type":"last-prompt","lastPrompt":"[office:ux]\n任务：还没定，先问我要做什么。"}).to_string());

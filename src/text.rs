@@ -157,7 +157,9 @@ mod tests {
         let shown = evs
             .iter()
             .find_map(|e| match e {
-                AgentEvent::ToolUseStart { detail: Some(d), .. } => Some(d.display().to_owned()),
+                AgentEvent::ToolUseStart {
+                    detail: Some(d), ..
+                } => Some(d.display().to_owned()),
                 _ => None,
             })
             .expect("a tool call");

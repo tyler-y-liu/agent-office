@@ -38,8 +38,8 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::core::{Action, Core, Floors};
-use crate::roles::Role;
 use crate::panel;
+use crate::roles::Role;
 use crate::text::truncate_cells;
 use font::{Canvas, LINE_H, rgb};
 use vector::Faces;
@@ -274,10 +274,7 @@ fn update_agent_click(
     }
 }
 
-fn take_due_poke(
-    pending_poke: &mut Option<(AgentId, Instant)>,
-    now: Instant,
-) -> Option<AgentId> {
+fn take_due_poke(pending_poke: &mut Option<(AgentId, Instant)>, now: Instant) -> Option<AgentId> {
     let &(id, at) = pending_poke.as_ref()?;
     if now.saturating_duration_since(at) < DOUBLE_CLICK {
         return None;
@@ -2170,8 +2167,8 @@ fn place_tags(
         // were, over a name piled on the next row's heads.
         if spot.is_none() && !t.full {
             let short = short_name(&t.name);
-            let cut = Faces::cells(&t.name).saturating_sub(Faces::cells(&short))
-                * faces.cell_w(name_px);
+            let cut =
+                Faces::cells(&t.name).saturating_sub(Faces::cells(&short)) * faces.cell_w(name_px);
             let (cx, w) = (t.badge.x + i64::from(t.badge.w / 2), t.badge.w - cut);
             t.badge = Area {
                 x: inside(cx - i64::from(w / 2), w),
@@ -2571,7 +2568,10 @@ fn picker_heading(plan: &crate::core::DispatchPlan) -> (String, String) {
             "Hand on from {} to ({host}):",
             r.name
         ),
-        None => crate::tr!("派活到 {repo}（{host}）：", "Dispatch into {repo} ({host}):"),
+        None => crate::tr!(
+            "派活到 {repo}（{host}）：",
+            "Dispatch into {repo} ({host}):"
+        ),
     };
     let sub = match &plan.relay {
         Some(_) => crate::tr!(
@@ -2623,7 +2623,12 @@ fn paint_picker(
             } else {
                 ""
             };
-            (k, r, format!("{} {}{what}", r.chip(), r.name()), suggested.contains(&r))
+            (
+                k,
+                r,
+                format!("{} {}{what}", r.chip(), r.name()),
+                suggested.contains(&r),
+            )
         })
         .collect();
     let chip_cells = crate::roles::ROSTER
@@ -2635,7 +2640,9 @@ fn paint_picker(
     let widest = rows
         .iter()
         .map(|(_, r, t, s)| {
-            2 + chip_cells - Faces::cells(r.chip()) + Faces::cells(t) + if *s { Faces::cells(tag) } else { 0 }
+            2 + chip_cells - Faces::cells(r.chip())
+                + Faces::cells(t)
+                + if *s { Faces::cells(tag) } else { 0 }
         })
         .chain([Faces::cells(&head), Faces::cells(&sub)])
         .max()
@@ -2649,7 +2656,14 @@ fn paint_picker(
     let ascent = i64::from(faces.ascent(px));
     let top = |i: usize| y + i64::from(pad) + i64::try_from(i).unwrap_or(0) * i64::from(line_h);
     faces.draw(canvas, x + i64::from(pad), top(0) + ascent, &head, TASK, px);
-    faces.draw(canvas, x + i64::from(pad), top(1) + ascent, &sub, PICKER_DIM, px);
+    faces.draw(
+        canvas,
+        x + i64::from(pad),
+        top(1) + ascent,
+        &sub,
+        PICKER_DIM,
+        px,
+    );
     for (i, (key, role, text, picked)) in rows.iter().enumerate() {
         let (tx, ty) = (x + i64::from(pad), top(i + 2));
         if *picked {
@@ -2660,8 +2674,21 @@ fn paint_picker(
         // The role's ink on a dark chip, as on the badges and cards.
         let glyph = role.chip();
         let chip_w = Faces::cells(glyph) * cell;
-        canvas.fill(chip_x - 1, ty, chip_w + 2, px + px / 6, to_u32(crate::roles::CHIP_BG));
-        faces.draw(canvas, chip_x, ty + ascent, glyph, to_u32(role.post().ink), px);
+        canvas.fill(
+            chip_x - 1,
+            ty,
+            chip_w + 2,
+            px + px / 6,
+            to_u32(crate::roles::CHIP_BG),
+        );
+        faces.draw(
+            canvas,
+            chip_x,
+            ty + ascent,
+            glyph,
+            to_u32(role.post().ink),
+            px,
+        );
         let rest = &text[glyph.len()..];
         // Every name starts in one column, whichever chip is widest.
         let rest_x = chip_x + i64::from(chip_cells * cell);
@@ -2784,7 +2811,12 @@ fn stuck_mark_w(faces: &mut Faces, name_px: u32, pad: u32) -> u32 {
 /// art pixels a ring round it shrank to its head.
 fn figure_box(t: &Tag, scale: u16) -> (i64, i64, i64, i64) {
     let (w, h) = figure_size(scale);
-    (t.badge.x + i64::from(t.badge.w / 2), t.figure_top + h / 2, w * 3 / 4, h / 2)
+    (
+        t.badge.x + i64::from(t.badge.w / 2),
+        t.figure_top + h / 2,
+        w * 3 / 4,
+        h / 2,
+    )
 }
 
 /// A figure's width and height in window pixels, `scale` of them a layout
@@ -3048,10 +3080,7 @@ mod tests {
         let original = 0x0080_8080;
         let mut day = Canvas::new(40, 40, original);
         paint_night_lights(&mut day, stage, &[], false, &[]);
-        assert!(
-            day.px.iter().all(|&p| p == original),
-            "day stays unchanged"
-        );
+        assert!(day.px.iter().all(|&p| p == original), "day stays unchanged");
 
         let mut night = Canvas::new(40, 40, original);
         paint_night_lights(&mut night, stage, &[], true, &[]);
@@ -3060,23 +3089,13 @@ mod tests {
         assert_ne!(at(20, 30), original, "an empty floor still goes dark");
     }
 
-    type TestClickState = (
-        Option<(AgentId, Instant, bool)>,
-        Option<(AgentId, Instant)>,
-    );
+    type TestClickState = (Option<(AgentId, Instant, bool)>, Option<(AgentId, Instant)>);
 
     fn first_idle_click(id: AgentId, at: Instant) -> TestClickState {
         let mut last_click = None;
         let mut pending_poke = None;
         assert_eq!(
-            update_agent_click(
-                &mut last_click,
-                &mut pending_poke,
-                id,
-                at,
-                false,
-                true,
-            ),
+            update_agent_click(&mut last_click, &mut pending_poke, id, at, false, true,),
             None,
             "the first click selects rather than opens"
         );
@@ -3178,7 +3197,10 @@ mod tests {
             "a possible second click still gets the full window"
         );
         assert!(pending_poke.is_some());
-        assert_eq!(take_due_poke(&mut pending_poke, start + DOUBLE_CLICK), Some(a));
+        assert_eq!(
+            take_due_poke(&mut pending_poke, start + DOUBLE_CLICK),
+            Some(a)
+        );
     }
 
     /// A box round each unread done card read as the card being selected,
@@ -3306,7 +3328,11 @@ mod tests {
         // tier there is no spot, and the caller cuts the name short.
         let column: Vec<Area> = (0..=BADGE_TIERS).map(|k| area(0, 100 - step * k)).collect();
         assert_eq!(at(area(5, 100), &column), None, "no higher than its tiers");
-        assert_eq!(at(area(0, 5), &[area(0, 5)]), None, "never off the window's top");
+        assert_eq!(
+            at(area(0, 5), &[area(0, 5)]),
+            None,
+            "never off the window's top"
+        );
     }
 
     /// A stuck badge wears its mark to its right; a neighbour sitting just
@@ -3443,7 +3469,13 @@ mod tests {
             }
         }
         let whole = |t: &Tag| {
-            t.name == badges.iter().find(|b| b.agent == t.agent).unwrap().name.text()
+            t.name
+                == badges
+                    .iter()
+                    .find(|b| b.agent == t.agent)
+                    .unwrap()
+                    .name
+                    .text()
         };
         let sel = tags.iter().find(|t| t.agent == selected).unwrap();
         assert!(whole(sel), "the selected one reads whole: {}", sel.name);
@@ -3453,8 +3485,16 @@ mod tests {
         );
         for t in tags.iter().filter(|t| !whole(t)) {
             let n = badges.iter().position(|b| b.agent == t.agent).unwrap();
-            assert!(t.name.ends_with(&format!("\u{b7}{n}")), "{} keeps its number", t.name);
-            assert!(crate::text::cells(&t.name) <= SHORT_NAME_CELLS, "{}", t.name);
+            assert!(
+                t.name.ends_with(&format!("\u{b7}{n}")),
+                "{} keeps its number",
+                t.name
+            );
+            assert!(
+                crate::text::cells(&t.name) <= SHORT_NAME_CELLS,
+                "{}",
+                t.name
+            );
         }
     }
 
@@ -3512,8 +3552,15 @@ mod tests {
             .collect();
         let bottom = *column.last().expect("the ring passes under the figure");
         assert!(bottom >= cy + half_h, "round the whole body, not its head");
-        assert!(at(cx + half_w + scale as i64 / 2, cy) == SELECTED_INK, "and beside it");
-        assert_eq!(at(t.badge.x - 1, t.badge.y), SELECTED_INK, "the badge framed");
+        assert!(
+            at(cx + half_w + scale as i64 / 2, cy) == SELECTED_INK,
+            "and beside it"
+        );
+        assert_eq!(
+            at(t.badge.x - 1, t.badge.y),
+            SELECTED_INK,
+            "the badge framed"
+        );
     }
 
     /// A back-turned sitter's figure is drawn under its desk's monitor, and
@@ -3983,7 +4030,17 @@ mod tests {
             dim: pixtuoid_scene::look::Dim::NONE,
         };
         let place = |faces: &mut Faces, roles: &HashMap<AgentId, Role>| {
-            place_tags(faces, text, (1, 4, 400), &HashMap::new(), roles, &[], 2.0, &[], &[])
+            place_tags(
+                faces,
+                text,
+                (1, 4, 400),
+                &HashMap::new(),
+                roles,
+                &[],
+                2.0,
+                &[],
+                &[],
+            )
         };
         let plain = place(&mut faces, &HashMap::new());
         let roles: HashMap<AgentId, Role> = [(id(0), Role::Frontend), (id(1), Role::Qa)].into();
@@ -3992,7 +4049,10 @@ mod tests {
             assert_eq!(w.role, roles.get(&w.agent).copied());
             assert!(w.badge.w > p.badge.w, "the chip widens the badge");
         }
-        assert!(!worn[0].badge.meets(&worn[1].badge), "neighbours step clear");
+        assert!(
+            !worn[0].badge.meets(&worn[1].badge),
+            "neighbours step clear"
+        );
     }
 
     /// Quitting takes two presses of `q` so a stray one does not close the
@@ -4060,7 +4120,7 @@ mod tests {
     /// never land in DSH.
     #[test]
     fn the_picker_names_the_host_a_pick_would_open() {
-        use crate::i18n::{with, Lang};
+        use crate::i18n::{Lang, with};
         with(Lang::Zh, || {
             let (head, sub) = picker_heading(&plan_into(crate::roles::Backend::Dsh));
             assert!(head.contains("agent-office"), "{head}");
@@ -4076,7 +4136,7 @@ mod tests {
     /// a hint that leads to an error note is worse than no hint.
     #[test]
     fn the_switch_hint_appears_only_when_the_other_host_can_take_it() {
-        use crate::i18n::{with, Lang};
+        use crate::i18n::{Lang, with};
         with(Lang::Zh, || {
             let mut plan = plan_into(crate::roles::Backend::Claude);
             plan.switch_to = Some(crate::roles::Backend::Dsh);
@@ -4097,7 +4157,7 @@ mod tests {
     /// opens there and that the user still has to write and send it.
     #[test]
     fn the_picker_names_the_next_host_and_says_where_cursor_opens() {
-        use crate::i18n::{with, Lang};
+        use crate::i18n::{Lang, with};
         use crate::roles::Backend;
         let mut plan = plan_into(Backend::Claude);
         plan.switch_to = Some(Backend::Cursor);
@@ -4111,12 +4171,18 @@ mod tests {
         with(Lang::Zh, || {
             let (head, sub) = picker_heading(&cursor);
             assert!(head.contains("（Cursor）"), "{head}");
-            assert!(sub.starts_with("在 Cursor 开一个新会话，确认后写任务发送"), "{sub}");
+            assert!(
+                sub.starts_with("在 Cursor 开一个新会话，确认后写任务发送"),
+                "{sub}"
+            );
             assert!(sub.contains("h 换成 Claude Code"), "{sub}");
         });
         with(Lang::En, || {
             let (_, sub) = picker_heading(&cursor);
-            assert!(sub.starts_with("a new chat in Cursor; confirm it, write the task and send"), "{sub}");
+            assert!(
+                sub.starts_with("a new chat in Cursor; confirm it, write the task and send"),
+                "{sub}"
+            );
             assert!(sub.contains("h switches to Claude Code"), "{sub}");
         });
     }

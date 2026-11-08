@@ -612,7 +612,10 @@ async fn run(
             .iter()
             .map(|(id, e)| {
                 let long = stuck_limits().quiet_long_call;
-                (*id, view(e, quiet_counts(&scene, *id, SystemTime::now(), long), now))
+                (
+                    *id,
+                    view(e, quiet_counts(&scene, *id, SystemTime::now(), long), now),
+                )
             })
             .collect();
         views_tx.send_if_modified(|cur| {
@@ -1071,7 +1074,10 @@ mod tests {
         // relabel the composition that actually runs.
         e.transcript.agent_type = Some("office-architect".into());
         let v = view(&e, true, Instant::now());
-        assert_eq!((v.role, v.agent_type.as_deref()), (Some(Role::Architect), Some("office-architect")));
+        assert_eq!(
+            (v.role, v.agent_type.as_deref()),
+            (Some(Role::Architect), Some("office-architect"))
+        );
         e.transcript.agent_type = Some("standard".into());
         assert_eq!(view(&e, true, Instant::now()).role, Some(Role::Ux));
     }
@@ -1610,7 +1616,12 @@ mod tests {
         e.grew_at = Instant::now() - Duration::from_secs(25 * 60);
         e.transcript.outstanding = vec![("t".into(), "Agent".into())];
         let long = StuckLimits::DEFAULT.quiet_long_call;
-        view(&e, quiet_counts(&scene, parent_id, t0, long), Instant::now()).stuck
+        view(
+            &e,
+            quiet_counts(&scene, parent_id, t0, long),
+            Instant::now(),
+        )
+        .stuck
     }
 
     /// A subagent waiting on your approval leaves its parent Running with no
@@ -1621,7 +1632,10 @@ mod tests {
     fn a_parent_whose_subagent_waits_on_you_is_not_stuck() {
         let waiting = ActivityState::RequiresAction { reason: None };
         let t0 = SystemTime::now();
-        assert_eq!(parent_stuck_behind(waiting.clone(), Duration::ZERO, t0), None);
+        assert_eq!(
+            parent_stuck_behind(waiting.clone(), Duration::ZERO, t0),
+            None
+        );
         assert_eq!(
             parent_stuck_behind(waiting, Duration::from_secs(40 * 60), t0),
             None,

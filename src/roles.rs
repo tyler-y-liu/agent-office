@@ -271,7 +271,10 @@ pub fn parse_marker(text: &str) -> Option<(Role, &str)> {
 /// Chinese, then English.
 const TASK_HEADS: [&str; 2] = ["任务：", "Task: "];
 /// What a prompt dispatched without a task says in its place.
-const NO_TASKS: [&str; 2] = ["还没定，先问我要做什么。", "Not set yet: ask me what to do first."];
+const NO_TASKS: [&str; 2] = [
+    "还没定，先问我要做什么。",
+    "Not set yet: ask me what to do first.",
+];
 
 fn task_head() -> &'static str {
     crate::i18n::t(TASK_HEADS[0], TASK_HEADS[1])
@@ -557,7 +560,8 @@ fn take_backend<'a>(args: &'a [&'a str]) -> Result<(Backend, Vec<&'a str>)> {
         };
         if let Some(id) = id {
             anyhow::ensure!(!seen, "--agent 只能给一个");
-            backend = Backend::of_id(id).with_context(|| format!("不认识 agent {id}：可选 claude、dsh、cursor"))?;
+            backend = Backend::of_id(id)
+                .with_context(|| format!("不认识 agent {id}：可选 claude、dsh、cursor"))?;
             seen = true;
         } else {
             rest.push(arg);
@@ -605,7 +609,9 @@ pub fn cli(args: &[&str]) -> Result<()> {
             let out = remove(&dir, backend, rest.contains(&"--force"))?;
             report(&dir, "删除", &out);
         }
-        _ => anyhow::bail!("用法：agent-office roles [install|remove] [--force] [--agent claude|dsh|cursor]"),
+        _ => anyhow::bail!(
+            "用法：agent-office roles [install|remove] [--force] [--agent claude|dsh|cursor]"
+        ),
     }
     Ok(())
 }
@@ -830,8 +836,7 @@ fn roster_ids() -> String {
     ROSTER.iter().map(|p| p.id).collect::<Vec<_>>().join("、")
 }
 
-const DISPATCH_USAGE: &str =
-    "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh|cursor] [--dir <目录>] [--terminal] [任务…]";
+const DISPATCH_USAGE: &str = "用法：agent-office dispatch (--role <角色> | --auto) [--agent claude|dsh|cursor] [--dir <目录>] [--terminal] [任务…]";
 
 /// `dispatch`'s arguments: a role or `--auto` (the PM), and the words left
 /// over are the task.
@@ -846,9 +851,8 @@ pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
         match a {
             "--role" => {
                 let id = it.next().context(DISPATCH_USAGE)?;
-                let r = Role::of_id(id).with_context(|| {
-                    format!("没有 {id} 这个角色，可选：{}", roster_ids())
-                })?;
+                let r = Role::of_id(id)
+                    .with_context(|| format!("没有 {id} 这个角色，可选：{}", roster_ids()))?;
                 anyhow::ensure!(role.is_none(), "--role 和 --auto 只能选一个");
                 role = Some(r);
             }
@@ -877,10 +881,13 @@ pub fn parse_dispatch(args: &[&str]) -> Result<Dispatch> {
 pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String> {
     if backend == Backend::Dsh {
         if terminal {
-            return Some(crate::i18n::t(
-                "DSH 派活通过正在运行的 Host 创建会话，不支持 --terminal；去掉它再试",
-                "DSH dispatch creates a session through a running Host; omit --terminal",
-            ).into());
+            return Some(
+                crate::i18n::t(
+                    "DSH 派活通过正在运行的 Host 创建会话，不支持 --terminal；去掉它再试",
+                    "DSH dispatch creates a session through a running Host; omit --terminal",
+                )
+                .into(),
+            );
         }
         return host_missing(Backend::Dsh, false);
     }
@@ -909,16 +916,13 @@ pub fn not_ready(backend: Backend, role: Role, terminal: bool) -> Option<String>
     } else {
         Vec::new()
     };
-    needed
-        .into_iter()
-        .any(missing)
-        .then(|| {
-            crate::i18n::t(
-                "角色还没装：先运行 agent-office roles install",
-                "roles not installed: run agent-office roles install first",
-            )
-            .to_owned()
-        })
+    needed.into_iter().any(missing).then(|| {
+        crate::i18n::t(
+            "角色还没装：先运行 agent-office roles install",
+            "roles not installed: run agent-office roles install first",
+        )
+        .to_owned()
+    })
 }
 
 /// Why a Cursor dispatch as `role` cannot start, given the roles installed
@@ -965,15 +969,18 @@ pub fn host_missing(host: Backend, with_task: bool) -> Option<String> {
             with_task,
         ),
         Backend::Claude => {
-            let installed = agents_dir(Backend::Claude).and_then(|dir| status(&dir, Backend::Claude)).is_ok_and(|rows| {
-                rows.iter()
-                    .any(|(_, s)| !matches!(s, State::Missing | State::Foreign))
-            });
+            let installed = agents_dir(Backend::Claude)
+                .and_then(|dir| status(&dir, Backend::Claude))
+                .is_ok_and(|rows| {
+                    rows.iter()
+                        .any(|(_, s)| !matches!(s, State::Missing | State::Foreign))
+                });
             (!installed).then(|| {
                 crate::i18n::t(
                     "Claude 角色还没装：先运行 agent-office roles install",
                     "Claude roles are not installed: run agent-office roles install",
-                ).into()
+                )
+                .into()
             })
         }
     }
@@ -986,10 +993,13 @@ pub fn host_missing(host: Backend, with_task: bool) -> Option<String> {
 /// through the same hooks.
 pub(crate) fn cursor_missing(app: bool, cli: bool, hooks: bool, with_task: bool) -> Option<String> {
     if !app && !cli {
-        return Some(crate::i18n::t(
-            "找不到 Cursor：先装好 Cursor app 或 Cursor CLI（cursor-agent）",
-            "Cursor not found: install the Cursor app or the Cursor CLI (cursor-agent) first",
-        ).into());
+        return Some(
+            crate::i18n::t(
+                "找不到 Cursor：先装好 Cursor app 或 Cursor CLI（cursor-agent）",
+                "Cursor not found: install the Cursor app or the Cursor CLI (cursor-agent) first",
+            )
+            .into(),
+        );
     }
     if with_task && !cli {
         return Some(crate::i18n::t(
@@ -1001,7 +1011,8 @@ pub(crate) fn cursor_missing(app: bool, cli: bool, hooks: bool, with_task: bool)
         crate::i18n::t(
             "Cursor hooks 还没接好：先运行 agent-office connect cursor",
             "Cursor hooks are not connected: run agent-office connect cursor",
-        ).into()
+        )
+        .into()
     })
 }
 
@@ -1037,9 +1048,10 @@ fn host_var() -> Option<String> {
 
 /// The repository a session opened in, as the panel and the note name it.
 fn repo_name(dir: &Path) -> String {
-    let name = dir
-        .file_name()
-        .map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let name = dir.file_name().map_or_else(
+        || dir.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     crate::text::truncate_cells(&name, 16)
 }
 
@@ -1054,7 +1066,11 @@ fn short_id(id: &str) -> &str {
 /// brings the brief, so the prompt carries only the marker and the task.
 pub fn terminal_args(role: Role, task: &str) -> Vec<String> {
     let post = role.post();
-    let name = format!("{}·{}", post.glyph, crate::text::truncate_cells(task.trim(), 24));
+    let name = format!(
+        "{}·{}",
+        post.glyph,
+        crate::text::truncate_cells(task.trim(), 24)
+    );
     vec![
         "--agent".into(),
         role.agent_name(),
@@ -1084,7 +1100,13 @@ fn claude_bin() -> Option<PathBuf> {
 
 /// Start a session as `role` on `task` in `dir`: in the selected host. DSH
 /// creates through its running Host; Claude opens its desktop app or terminal.
-pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: bool) -> Result<String> {
+pub fn dispatch(
+    backend: Backend,
+    role: Role,
+    dir: &Path,
+    task: &str,
+    terminal: bool,
+) -> Result<String> {
     folder_ready(dir)?;
     if let Some(why) = not_ready(backend, role, terminal) {
         anyhow::bail!(why);
@@ -1125,13 +1147,15 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
                 "已在 DeepSeek Harness 创建并提交「{}」（{repo} · {id}）",
                 "created and submitted a {} relay in DeepSeek Harness ({repo} · {id})",
                 role.name(),
-            ).to_owned()
+            )
+            .to_owned()
         } else {
             crate::tr!(
                 "已在 DeepSeek Harness 建好「{}」空白会话（{repo} · {id}）",
                 "created a blank {} session in DeepSeek Harness ({repo} · {id})",
                 role.name(),
-            ).to_owned()
+            )
+            .to_owned()
         });
     }
     if backend == Backend::Cursor {
@@ -1184,7 +1208,10 @@ pub fn dispatch(backend: Backend, role: Role, dir: &Path, task: &str, terminal: 
             )
         };
         return Ok(match why_not_app {
-            Some(why) => crate::tr!("{done}；{why}，改在 Terminal 开", "{done}; {why}, so in Terminal"),
+            Some(why) => crate::tr!(
+                "{done}；{why}，改在 Terminal 开",
+                "{done}; {why}, so in Terminal"
+            ),
             None => done,
         });
     }
@@ -1229,7 +1256,11 @@ fn cursor_route(
         .to_owned()
     };
     if !task.trim().is_empty() {
-        return if cli { Ok(CursorRoute::Terminal(None)) } else { Err(no_cli()) };
+        return if cli {
+            Ok(CursorRoute::Terminal(None))
+        } else {
+            Err(no_cli())
+        };
     }
     let why = if app {
         match link() {
@@ -1289,7 +1320,10 @@ pub fn dispatch_cli(args: &[&str]) -> Result<()> {
             .with_context(|| format!("没有 {} 这个目录", p.display()))?,
         None => repo_root(&std::env::current_dir()?),
     };
-    println!("{}", dispatch(d.backend, d.role, &dir, &d.task, d.terminal)?);
+    println!(
+        "{}",
+        dispatch(d.backend, d.role, &dir, &d.task, d.terminal)?
+    );
     Ok(())
 }
 
@@ -1308,7 +1342,7 @@ mod tests {
     /// office's detection and a PM's `subagent_type` use `office-<id>`: a
     /// template named otherwise would install a role nobody can reach or
     /// recognise.
-    use crate::i18n::{with, Lang};
+    use crate::i18n::{Lang, with};
 
     const LANGS: [Lang; 2] = [Lang::Zh, Lang::En];
 
@@ -1323,7 +1357,11 @@ mod tests {
                     assert!(t.contains(&name), "{} {lang:?}", post.id);
                     assert!(t.contains("\ndescription: "), "{} {lang:?}", post.id);
                     assert_eq!(
-                        state_of(post, Backend::Claude, Some(&rendered(post, Backend::Claude))),
+                        state_of(
+                            post,
+                            Backend::Claude,
+                            Some(&rendered(post, Backend::Claude))
+                        ),
                         State::Ours { current: true },
                         "{} {lang:?}",
                         post.id
@@ -1361,7 +1399,11 @@ mod tests {
             // The last thing a role writes is what the PM and the next
             // post read: every role says how to write it.
             assert!(post.template.contains("\n## 交回格式\n"), "{}", post.id);
-            assert!(post.template_en.contains("\n## Hand-back format\n"), "{}", post.id);
+            assert!(
+                post.template_en.contains("\n## Hand-back format\n"),
+                "{}",
+                post.id
+            );
         }
     }
 
@@ -1369,7 +1411,10 @@ mod tests {
     /// and not the checklist, and short enough not to eat the prompt's room.
     #[test]
     fn a_card_is_the_brief_without_frontmatter_or_checklist() {
-        for (lang, opening) in [(Lang::Zh, "你是这间办公室的"), (Lang::En, "You are the office's")] {
+        for (lang, opening) in [
+            (Lang::Zh, "你是这间办公室的"),
+            (Lang::En, "You are the office's"),
+        ] {
             with(lang, || {
                 for post in ROSTER {
                     let c = card(post.role);
@@ -1399,11 +1444,19 @@ mod tests {
         let dir = temp_dir("lang");
         with(Lang::Zh, || install(&dir, Backend::Claude, false).unwrap());
         let ux = path_of(&dir, Role::Ux.post());
-        std::fs::write(&ux, rendered(Role::Ux.post(), Backend::Claude).replace("设计师", "画师")).unwrap();
+        std::fs::write(
+            &ux,
+            rendered(Role::Ux.post(), Backend::Claude).replace("设计师", "画师"),
+        )
+        .unwrap();
         with(Lang::En, || {
             let pm = Role::Pm.post();
             assert_eq!(
-                state_of(pm, Backend::Claude, read(&path_of(&dir, pm)).unwrap().as_deref()),
+                state_of(
+                    pm,
+                    Backend::Claude,
+                    read(&path_of(&dir, pm)).unwrap().as_deref()
+                ),
                 State::OtherLang
             );
             let out = install(&dir, Backend::Claude, false).unwrap();
@@ -1430,7 +1483,10 @@ mod tests {
         assert!(en.contains("You are the office's backend engineer"));
         with(Lang::Zh, || {
             let (role, rest) = parse_marker(&en).unwrap();
-            assert_eq!((role, task_of(rest)), (Role::Backend, Some("add a /health endpoint")));
+            assert_eq!(
+                (role, task_of(rest)),
+                (Role::Backend, Some("add a /health endpoint"))
+            );
             let (_, rest) = parse_marker(&en_blank).unwrap();
             assert_eq!(task_of(rest), None);
         });
@@ -1440,7 +1496,9 @@ mod tests {
             assert_eq!(task_of(rest), Some("跑测试"));
         });
         // A relayed Chinese reply inside an English task is part of the task.
-        let mixed = with(Lang::En, || prompt(Role::Qa, "check it\n任务：上一棒的原话", true));
+        let mixed = with(Lang::En, || {
+            prompt(Role::Qa, "check it\n任务：上一棒的原话", true)
+        });
         let (_, rest) = parse_marker(&mixed).unwrap();
         assert_eq!(task_of(rest), Some("check it\n任务：上一棒的原话"));
     }
@@ -1458,10 +1516,20 @@ mod tests {
                 Path::new("/work/api"),
             )
         });
-        for part in ["\"api\"", "fix login", "tried twice", "same test failed 5 times", "/work/api", "git diff"] {
+        for part in [
+            "\"api\"",
+            "fix login",
+            "tried twice",
+            "same test failed 5 times",
+            "/work/api",
+            "git diff",
+        ] {
             assert!(task.contains(part), "{part} missing from {task}");
         }
-        assert!(!task.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{task}");
+        assert!(
+            !task.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "{task}"
+        );
     }
 
     #[test]
@@ -1552,18 +1620,30 @@ mod tests {
         let dir = temp_dir("appended");
         install(&dir, Backend::Claude, false).unwrap();
         let qa = path_of(&dir, Role::Qa.post());
-        let appended = format!("{}\n## 我自己加的\n- 先跑 make lint\n", rendered(Role::Qa.post(), Backend::Claude));
+        let appended = format!(
+            "{}\n## 我自己加的\n- 先跑 make lint\n",
+            rendered(Role::Qa.post(), Backend::Claude)
+        );
         std::fs::write(&qa, &appended).unwrap();
-        assert_eq!(state_of(Role::Qa.post(), Backend::Claude, Some(&appended)), State::Edited);
+        assert_eq!(
+            state_of(Role::Qa.post(), Backend::Claude, Some(&appended)),
+            State::Edited
+        );
         let out = install(&dir, Backend::Claude, false).unwrap();
-        assert_eq!((out.written.len(), out.kept_edited.clone()), (0, vec!["qa"]));
+        assert_eq!(
+            (out.written.len(), out.kept_edited.clone()),
+            (0, vec!["qa"])
+        );
         assert_eq!(std::fs::read_to_string(&qa).unwrap(), appended);
         let out = remove(&dir, Backend::Claude, false).unwrap();
         assert_eq!(out.kept_edited, ["qa"]);
         assert_eq!(std::fs::read_to_string(&qa).unwrap(), appended);
         // Whitespace after the mark is no edit.
         let spaced = format!("{}\n\n", rendered(Role::Qa.post(), Backend::Claude));
-        assert_eq!(state_of(Role::Qa.post(), Backend::Claude, Some(&spaced)), State::Ours { current: false });
+        assert_eq!(
+            state_of(Role::Qa.post(), Backend::Claude, Some(&spaced)),
+            State::Ours { current: false }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1600,7 +1680,11 @@ mod tests {
         let qa = path_of(&dir, Role::Qa.post());
         std::fs::write(&qa, "my own qa agent").unwrap();
         let ux = path_of(&dir, Role::Ux.post());
-        std::fs::write(&ux, rendered(Role::Ux.post(), Backend::Claude).replace("设计师", "画师")).unwrap();
+        std::fs::write(
+            &ux,
+            rendered(Role::Ux.post(), Backend::Claude).replace("设计师", "画师"),
+        )
+        .unwrap();
         let out = remove(&dir, Backend::Claude, false).unwrap();
         assert_eq!(out.kept_foreign, ["qa"]);
         assert_eq!(out.kept_edited, ["ux"]);
@@ -1622,7 +1706,11 @@ mod tests {
         fn lum(c: Rgb) -> f64 {
             let f = |v: u8| {
                 let x = f64::from(v) / 255.0;
-                if x <= 0.039_28 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+                if x <= 0.039_28 {
+                    x / 12.92
+                } else {
+                    ((x + 0.055) / 1.055).powf(2.4)
+                }
             };
             0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
         }
@@ -1651,15 +1739,24 @@ mod tests {
 
     #[test]
     fn relay_suggests_the_next_post() {
-        assert_eq!(next_posts(After::Done, None), vec![Role::Qa, Role::Reviewer]);
-        assert_eq!(next_posts(After::Done, Some(Role::Qa)), vec![Role::Reviewer]);
+        assert_eq!(
+            next_posts(After::Done, None),
+            vec![Role::Qa, Role::Reviewer]
+        );
+        assert_eq!(
+            next_posts(After::Done, Some(Role::Qa)),
+            vec![Role::Reviewer]
+        );
         assert_eq!(
             next_posts(After::Stuck, Some(Role::Backend)),
             vec![Role::Backend, Role::Architect]
         );
         assert_eq!(next_posts(After::Stuck, None), vec![Role::Architect]);
         // A stuck PM needs a design look, not a second PM.
-        assert_eq!(next_posts(After::Stuck, Some(Role::Pm)), vec![Role::Architect]);
+        assert_eq!(
+            next_posts(After::Stuck, Some(Role::Pm)),
+            vec![Role::Architect]
+        );
     }
 
     /// A relay must start the next post on the work, not on a question:
@@ -1676,25 +1773,49 @@ mod tests {
             None,
             dir,
         );
-        for part in ["docs-site", "审一下安装文档的改动", "两处命令写错", "/work/shop-app"] {
+        for part in [
+            "docs-site",
+            "审一下安装文档的改动",
+            "两处命令写错",
+            "/work/shop-app",
+        ] {
             assert!(task.contains(part), "{part} missing from {task}");
         }
-        let stuck = relay_task("api", After::Stuck, None, None, Some("同一个测试连失败 5 次"), dir);
+        let stuck = relay_task(
+            "api",
+            After::Stuck,
+            None,
+            None,
+            Some("同一个测试连失败 5 次"),
+            dir,
+        );
         assert!(stuck.contains("同一个测试连失败 5 次"));
         // A hand-back ends on what was not done and the risks: a long
         // reply keeps its end, and says that its middle was cut.
         let reply = format!("开头{}没做的：压测；风险：迁移不可逆", "中".repeat(5000));
         let task = relay_task("api", After::Done, None, Some(&reply), None, dir);
-        assert!(task.contains("开头") && task.contains("风险：迁移不可逆"), "{task}");
+        assert!(
+            task.contains("开头") && task.contains("风险：迁移不可逆"),
+            "{task}"
+        );
         assert!(task.contains("中间省略"), "{task}");
         assert!(task.chars().count() < 2300);
-        let en = with(Lang::En, || relay_task("api", After::Done, None, Some(&reply), None, dir));
-        assert!(en.contains("characters cut") && en.contains("风险：迁移不可逆"), "{en}");
+        let en = with(Lang::En, || {
+            relay_task("api", After::Done, None, Some(&reply), None, dir)
+        });
+        assert!(
+            en.contains("characters cut") && en.contains("风险：迁移不可逆"),
+            "{en}"
+        );
         // A pasted prompt of any length still makes a link.
         let long = "长".repeat(20_000);
         let task = relay_task("api", After::Done, Some(&long), Some(&long), None, dir);
         for post in ROSTER {
-            assert!(desktop_link(dir, &prompt(post.role, &task, true)).is_ok(), "{}", post.id);
+            assert!(
+                desktop_link(dir, &prompt(post.role, &task, true)).is_ok(),
+                "{}",
+                post.id
+            );
         }
         // Read back, the relay is a task, so the new session is no empty dispatch.
         let p = prompt(Role::Qa, &task, true);
@@ -1742,7 +1863,11 @@ mod tests {
         }
         let blank = prompt(Role::Qa, "  ", true);
         let (role, rest) = parse_marker(&blank).unwrap();
-        assert_eq!((role, task_of(rest)), (Role::Qa, None), "no task is no task");
+        assert_eq!(
+            (role, task_of(rest)),
+            (Role::Qa, None),
+            "no task is no task"
+        );
     }
 
     #[test]
@@ -1761,14 +1886,25 @@ mod tests {
         let auto = parse_dispatch(&["--auto", "--terminal", "做个功能"]).unwrap();
         assert_eq!((auto.role, auto.terminal), (Role::Pm, true));
         let dsh = parse_dispatch(&["--role", "reviewer", "--agent", "dsh", "审查"]).unwrap();
-        assert_eq!((dsh.role, dsh.backend, dsh.task.as_str()), (Role::Reviewer, Backend::Dsh, "审查"));
+        assert_eq!(
+            (dsh.role, dsh.backend, dsh.task.as_str()),
+            (Role::Reviewer, Backend::Dsh, "审查")
+        );
         assert!(parse_dispatch(&["--role", "qa", "--agent"]).is_err());
         assert!(parse_dispatch(&["--role", "qa", "--agent", "other"]).is_err());
         let literal = parse_dispatch(&["--role", "qa", "--", "--agent", "dsh"]).unwrap();
-        assert_eq!((literal.backend, literal.task.as_str()), (Backend::Claude, "--agent dsh"));
+        assert_eq!(
+            (literal.backend, literal.task.as_str()),
+            (Backend::Claude, "--agent dsh")
+        );
         assert!(parse_dispatch(&["--role", "qa", "--auto"]).is_err());
-        let unknown = parse_dispatch(&["--role", "tester"]).unwrap_err().to_string();
-        assert!(unknown.contains("qa") && unknown.contains("frontend"), "{unknown}");
+        let unknown = parse_dispatch(&["--role", "tester"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unknown.contains("qa") && unknown.contains("frontend"),
+            "{unknown}"
+        );
         assert!(parse_dispatch(&["做个功能"]).is_err(), "no role, no guess");
     }
 
@@ -1782,7 +1918,10 @@ mod tests {
         assert_eq!(args[2], "-n");
         assert!(args[3].starts_with("审·"));
         let p = args.last().unwrap();
-        assert_eq!(parse_marker(p).map(|(r, rest)| (r, task_of(rest))), Some((Role::Reviewer, Some("审一下登录改动"))));
+        assert_eq!(
+            parse_marker(p).map(|(r, rest)| (r, task_of(rest))),
+            Some((Role::Reviewer, Some("审一下登录改动")))
+        );
         assert!(!p.contains(card(Role::Reviewer)));
     }
 
@@ -1803,7 +1942,20 @@ mod tests {
             assert!(ok, "git {args:?}");
         };
         git(&main, &["init", "-q"]);
-        git(&main, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        );
         let wt = root.join("wt");
         git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
         let main = main.canonicalize().unwrap();
@@ -1823,11 +1975,20 @@ mod tests {
     fn a_configured_host_is_used_only_when_it_can_take_the_dispatch() {
         let none = |_| false;
         let only_dsh = |h| h == Backend::Dsh;
-        assert_eq!(host_with(Backend::Claude, Some("dsh"), only_dsh), Backend::Dsh);
+        assert_eq!(
+            host_with(Backend::Claude, Some("dsh"), only_dsh),
+            Backend::Dsh
+        );
         assert_eq!(host_with(Backend::Dsh, Some("dsh"), only_dsh), Backend::Dsh);
         // Named but not set up: the worker's own host is still tried.
-        assert_eq!(host_with(Backend::Claude, Some("dsh"), none), Backend::Claude);
-        assert_eq!(host_with(Backend::Claude, Some("claude"), none), Backend::Claude);
+        assert_eq!(
+            host_with(Backend::Claude, Some("dsh"), none),
+            Backend::Claude
+        );
+        assert_eq!(
+            host_with(Backend::Claude, Some("claude"), none),
+            Backend::Claude
+        );
     }
 
     /// Follow-the-worker stays the default, and a value nobody meant to type
@@ -1836,7 +1997,14 @@ mod tests {
     #[test]
     fn following_the_worker_is_the_default_and_unknown_names_change_nothing() {
         let any = |_| true;
-        for var in [None, Some(""), Some("  "), Some("follow"), Some("auto"), Some("deepseek")] {
+        for var in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("follow"),
+            Some("auto"),
+            Some("deepseek"),
+        ] {
             assert_eq!(
                 host_with(Backend::Dsh, var, any),
                 Backend::Dsh,
@@ -1858,7 +2026,11 @@ mod tests {
             let (host, rest) = take_backend(&args).unwrap();
             assert_eq!((host, rest), (Backend::Cursor, vec!["install"]), "{name}");
             let flag = format!("--agent={name}");
-            assert_eq!(take_backend(&[flag.as_str()]).unwrap().0, Backend::Cursor, "{name}");
+            assert_eq!(
+                take_backend(&[flag.as_str()]).unwrap().0,
+                Backend::Cursor,
+                "{name}"
+            );
         }
         let d = parse_dispatch(&["--role", "qa", "--agent", "cursor", "跑测试"]).unwrap();
         assert_eq!((d.backend, d.task.as_str()), (Backend::Cursor, "跑测试"));
@@ -1894,13 +2066,19 @@ mod tests {
         // "Task" alone proves nothing: the template already names TaskCreate.
         for (template, tool) in [(pm.template, "Task 工具"), (pm.template_en, "Task tool")] {
             let t = cursor_template(pm, template);
-            assert!(!t.contains("Agent 工具") && !t.contains("Agent tool"), "{t}");
+            assert!(
+                !t.contains("Agent 工具") && !t.contains("Agent tool"),
+                "{t}"
+            );
             assert!(t.contains(tool) && t.contains("subagent_type"), "{t}");
         }
         // The other roles' briefs come through word for word.
         let qa = Role::Qa.post();
         let t = cursor_template(qa, qa.template);
-        assert_eq!(&t[frontmatter_end(&t)..], &qa.template[frontmatter_end(qa.template)..]);
+        assert_eq!(
+            &t[frontmatter_end(&t)..],
+            &qa.template[frontmatter_end(qa.template)..]
+        );
     }
 
     /// What a dispatched Cursor PM actually reads is the prompt, not the
@@ -1912,7 +2090,10 @@ mod tests {
         for (lang, tool) in [(Lang::Zh, "Task 工具"), (Lang::En, "Task tool")] {
             with(lang, || {
                 let p = cursor_prompt(Role::Pm, "x");
-                assert!(!p.contains("Agent 工具") && !p.contains("Agent tool"), "{p}");
+                assert!(
+                    !p.contains("Agent 工具") && !p.contains("Agent tool"),
+                    "{p}"
+                );
                 assert!(p.contains(tool) && p.contains("subagent_type"), "{p}");
                 // Still read back as the PM on its task.
                 let (role, rest) = parse_marker(&p).unwrap();
@@ -1935,10 +2116,16 @@ mod tests {
                     let src = post.template();
                     let t = cursor_template(post, src);
                     let meta = &t[..frontmatter_end(&t)];
-                    let desc = src.lines().find(|l| l.starts_with("description: ")).unwrap();
+                    let desc = src
+                        .lines()
+                        .find(|l| l.starts_with("description: "))
+                        .unwrap();
                     assert_eq!(
                         meta,
-                        format!("---\nname: office-{}\n{desc}\nmodel: inherit\n---\n", post.id),
+                        format!(
+                            "---\nname: office-{}\n{desc}\nmodel: inherit\n---\n",
+                            post.id
+                        ),
                         "{} {lang:?}",
                         post.id
                     );
@@ -1964,20 +2151,33 @@ mod tests {
         let pm = std::fs::read_to_string(path_of(&dir, Role::Pm.post())).unwrap();
         assert!(pm.contains("Task") && !pm.contains("\ntools:"), "{pm}");
         for (post, state) in status(&dir, Backend::Cursor).unwrap() {
-            let want = if post.role == Role::Qa { State::Foreign } else { State::Ours { current: true } };
+            let want = if post.role == Role::Qa {
+                State::Foreign
+            } else {
+                State::Ours { current: true }
+            };
             assert_eq!(state, want, "{}", post.id);
         }
         // Read as Claude's, a Cursor file is not current: the two hosts'
         // files are told apart, not upgraded into each other.
         let rv = path_of(&dir, Role::Reviewer.post());
-        let as_claude = state_of(Role::Reviewer.post(), Backend::Claude, read(&rv).unwrap().as_deref());
+        let as_claude = state_of(
+            Role::Reviewer.post(),
+            Backend::Claude,
+            read(&rv).unwrap().as_deref(),
+        );
         assert_eq!(as_claude, State::Ours { current: false });
 
         let ux = path_of(&dir, Role::Ux.post());
-        let edited = std::fs::read_to_string(&ux).unwrap().replace("model: inherit", "model: gpt-5");
+        let edited = std::fs::read_to_string(&ux)
+            .unwrap()
+            .replace("model: inherit", "model: gpt-5");
         std::fs::write(&ux, &edited).unwrap();
         let out = install(&dir, Backend::Cursor, false).unwrap();
-        assert_eq!((out.written.len(), out.kept_edited.clone()), (0, vec!["ux"]));
+        assert_eq!(
+            (out.written.len(), out.kept_edited.clone()),
+            (0, vec!["ux"])
+        );
         assert_eq!(std::fs::read_to_string(&ux).unwrap(), edited);
 
         let out = remove(&dir, Backend::Cursor, false).unwrap();
@@ -1994,12 +2194,21 @@ mod tests {
     /// the prompt and must not be stopped for roles it never calls.
     #[test]
     fn only_a_cursor_pm_needs_the_cursor_roles() {
-        let all: Vec<_> = ROSTER.iter().map(|p| (p, State::Ours { current: true })).collect();
+        let all: Vec<_> = ROSTER
+            .iter()
+            .map(|p| (p, State::Ours { current: true }))
+            .collect();
         let mut one_short = all.clone();
         one_short[0].1 = State::Missing;
         let blocked = with(Lang::En, || cursor_roles_missing(Role::Pm, &one_short)).unwrap();
-        assert!(blocked.contains("roles install --agent cursor"), "{blocked}");
-        assert!(cursor_roles_missing(Role::Pm, &[]).is_some(), "unreadable counts as missing");
+        assert!(
+            blocked.contains("roles install --agent cursor"),
+            "{blocked}"
+        );
+        assert!(
+            cursor_roles_missing(Role::Pm, &[]).is_some(),
+            "unreadable counts as missing"
+        );
         assert_eq!(cursor_roles_missing(Role::Pm, &all), None);
         for post in ROSTER.iter().filter(|p| p.role != Role::Pm) {
             assert_eq!(cursor_roles_missing(post.role, &[]), None, "{}", post.id);
@@ -2011,14 +2220,20 @@ mod tests {
     /// apart by the id's first block, not by its whole uuid.
     #[test]
     fn a_note_names_the_repository_and_a_recognisable_id() {
-        assert_eq!(short_id("session-4a1aa69d-1343-4ceb-8662-716256890ad3"), "4a1aa69d");
+        assert_eq!(
+            short_id("session-4a1aa69d-1343-4ceb-8662-716256890ad3"),
+            "4a1aa69d"
+        );
         assert_eq!(short_id("plain-id"), "plain");
         assert_eq!(
             repo_name(Path::new("/Users/x/code/work/toolhub-studio")),
             "toolhub-studio"
         );
         let long = repo_name(Path::new("/a/a-very-long-repository-name-here"));
-        assert!(long.ends_with('…'), "a long name is cut, not printed whole: {long}");
+        assert!(
+            long.ends_with('…'),
+            "a long name is cut, not printed whole: {long}"
+        );
     }
 
     /// Only `cursor-agent` runs a task as given, so every relay must reach
@@ -2029,9 +2244,15 @@ mod tests {
     fn a_cursor_task_goes_to_the_terminal_and_a_fresh_one_to_the_app() {
         use crate::i18n::{Lang, with};
         let no_link = || -> Result<String, String> { panic!("a task never asks for an app link") };
-        assert_eq!(cursor_route("run the tests", true, true, no_link), Ok(CursorRoute::Terminal(None)));
+        assert_eq!(
+            cursor_route("run the tests", true, true, no_link),
+            Ok(CursorRoute::Terminal(None))
+        );
         let link = || Ok("cursor://x".to_owned());
-        assert_eq!(cursor_route("  ", true, true, link), Ok(CursorRoute::App("cursor://x".into())));
+        assert_eq!(
+            cursor_route("  ", true, true, link),
+            Ok(CursorRoute::App("cursor://x".into()))
+        );
         let refused = || Err("too long".to_owned());
         assert_eq!(
             cursor_route("", true, true, refused),
@@ -2057,18 +2278,26 @@ mod tests {
         assert_eq!(cursor_missing(false, true, true, false), None);
         assert_eq!(cursor_missing(false, true, true, true), None);
         assert!(cursor_missing(false, false, true, false).is_some());
-        assert!(cursor_missing(true, true, false, false).unwrap().contains("connect cursor"));
+        assert!(
+            cursor_missing(true, true, false, false)
+                .unwrap()
+                .contains("connect cursor")
+        );
         with(Lang::Zh, || {
             let why = cursor_missing(true, false, true, true).expect("a task needs the CLI");
             assert!(why.contains("需要 cursor-agent"), "{why}");
         });
         with(Lang::Zh, || {
-            let unused = || -> Result<String, String> { panic!("a task never asks for an app link") };
+            let unused =
+                || -> Result<String, String> { panic!("a task never asks for an app link") };
             let err = cursor_route("跑测试", true, false, unused).unwrap_err();
             assert!(err.contains("需要 cursor-agent"), "{err}");
             let refused = || Err("太长".to_owned());
             let err = cursor_route("", true, false, refused).unwrap_err();
-            assert!(err.starts_with("太长") && err.contains("cursor-agent"), "{err}");
+            assert!(
+                err.starts_with("太长") && err.contains("cursor-agent"),
+                "{err}"
+            );
         });
     }
 }

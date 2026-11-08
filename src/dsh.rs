@@ -300,7 +300,10 @@ fn without_plugin(text: &str, wanted: &str) -> String {
     if let Some((prefix, _)) = flow_parts(text) {
         return prefix.to_owned();
     }
-    items(text).into_iter().filter(|i| !is_plugin(i, wanted)).collect()
+    items(text)
+        .into_iter()
+        .filter(|i| !is_plugin(i, wanted))
+        .collect()
 }
 
 /// What disconnect leaves: dsh's plugin manager refuses a patch that is not
@@ -586,18 +589,28 @@ mod tests {
     #[test]
     fn a_plugin_without_the_turn_start_is_not_connected() {
         assert!(forwards_turn_start(TEMPLATE));
-        assert!(!forwards_turn_start(&TEMPLATE.replace("\"turn_start\"", "\"x\"")));
+        assert!(!forwards_turn_start(
+            &TEMPLATE.replace("\"turn_start\"", "\"x\"")
+        ));
         // Nor one from before dispatch: accepting work it cannot receive
         // would only time out in the spool.
         assert!(supports_dispatch(TEMPLATE));
-        assert!(!supports_dispatch(&TEMPLATE.replace("sessionController.create", "sessionController.nope")));
+        assert!(!supports_dispatch(
+            &TEMPLATE.replace("sessionController.create", "sessionController.nope")
+        ));
         // Nor one that creates by cwd alone: its Sessions join no Workspace.
-        assert!(!supports_dispatch(&TEMPLATE.replace("workspaceId: workspace.id", "cwd: request.cwd")));
+        assert!(!supports_dispatch(
+            &TEMPLATE.replace("workspaceId: workspace.id", "cwd: request.cwd")
+        ));
         // Nor one without the jump route: a click would raise the window and
         // leave the Session it named unopened.
         assert!(supports_jump(TEMPLATE));
-        assert!(!supports_jump(&TEMPLATE.replace("const JUMP = ", "const JUMP_PATH = ")));
-        assert!(!supports_jump(&TEMPLATE.replace("connection.fetch.register", "connection.rpc.handle")));
+        assert!(!supports_jump(
+            &TEMPLATE.replace("const JUMP = ", "const JUMP_PATH = ")
+        ));
+        assert!(!supports_jump(
+            &TEMPLATE.replace("connection.fetch.register", "connection.rpc.handle")
+        ));
     }
 
     /// A click's Session is left for one Host only: a desktop app and a
@@ -636,12 +649,19 @@ mod tests {
         page.join().unwrap();
 
         std::fs::write(&path, b"ours").unwrap();
-        assert!(!wait_taken(&path, b"ours", Duration::from_millis(60)), "no page");
+        assert!(
+            !wait_taken(&path, b"ours", Duration::from_millis(60)),
+            "no page"
+        );
         assert!(!path.exists(), "an untaken click is dropped");
 
         std::fs::write(&path, b"newer").unwrap();
         assert!(!wait_taken(&path, b"ours", Duration::from_millis(60)));
-        assert_eq!(std::fs::read(&path).unwrap(), b"newer", "a newer click stays");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"newer",
+            "a newer click stays"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -831,7 +851,8 @@ mod tests {
     /// sequence flow-style, and ordinary block rows and comments stay intact.
     #[test]
     fn comments_and_plain_values_are_not_flow_sequences() {
-        let block = "# [ a comment, not a sequence ]\n- insert:\n    - id: pixtuoid\n      name: /p.mjs\n";
+        let block =
+            "# [ a comment, not a sequence ]\n- insert:\n    - id: pixtuoid\n      name: /p.mjs\n";
         assert!(!is_flow("value: [ { id: x } ]\n"));
         let once = with_ours(block, Path::new("/x.mjs")).unwrap();
         assert!(once.starts_with(block));

@@ -366,7 +366,8 @@ mod tests {
     /// would silently stop firing; they must point at the stable `opt` link.
     #[test]
     fn brew_cellar_path_maps_to_opt_link() {
-        let cellar = std::path::Path::new("/opt/homebrew/Cellar/agent-office/0.1.0/bin/agent-office");
+        let cellar =
+            std::path::Path::new("/opt/homebrew/Cellar/agent-office/0.1.0/bin/agent-office");
         assert_eq!(
             brew_opt_path(cellar).unwrap(),
             std::path::Path::new("/opt/homebrew/opt/agent-office/bin/agent-office")
