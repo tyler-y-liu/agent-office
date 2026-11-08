@@ -22,7 +22,7 @@ With several agent sessions running at once, it's hard to keep track of which on
 ## What you get
 
 - **One-line summaries**: reads each session's latest prompt, todos and recent actions, and summarizes them in one short line through an OpenAI-compatible API you configure. When a turn ends it summarizes the result too: what got done, where it got stuck, or what it is asking you.
-- **Seats by state**: working sessions sit at their desks; sessions waiting for approval, asking you a question or finished with a result you have not read queue in your office; ones you have read rest in the pantry; stuck ones stay at their desk in a red ring with a "⚠" by their name tag.
+- **Seats by state**: working sessions sit at their desks; sessions waiting for approval, asking you a question or finished with a result you have not read queue in your office; ones you have read rest in the pantry; stuck ones stay at their desk in a red ring with a "⚠" by their name tag. A turn that ended with work still open is neither: a plan with an item in progress keeps its session at its desk as working, and one that stopped short of finishing — a Cursor turn you aborted, or one that errored — rests as idle. Neither queues in your office to be read.
 - **Stuck detection**: 3 failures in a row, or no new activity for 5 minutes while working (20 minutes while a shell command is running; a session waiting on its own subagent isn't timed), marks a session as possibly stuck.
 - **Notifications**: when the window is in the background and a session starts waiting for you, you get a system notification. The Dock badge always shows how many are waiting.
 - **Jump back**: double-click a worker or card to open that session in the Claude desktop app, or bring forward the terminal it runs in.
@@ -107,7 +107,7 @@ A row of four-person desks runs under the north windows, with a corridor in the 
 
 The rooftop appears only when the office is at least 200 columns wide. Without a rooftop they go to the window sofa; at lunch or in a typhoon the rooftop closes and resting ones are all in the pantry. When the desks fill up, a new floor opens; switch with `[` and `]`.
 
-A Claude Code session whose background command is still running stays at its desk, in the working group, until that command reports back — even if its turn has already ended.
+A Claude Code session whose background command is still running stays at its desk, in the working group, until that command reports back — even if its turn has already ended. So does one whose todo list still has an item in progress: its card says `… on its plan`, and it holds that seat for an hour at most, so a host that died mid-plan does not keep a desk forever. A turn that ended without a result to read — a Cursor turn you aborted, one that errored — leaves the session idle rather than queued.
 
 ### Keys
 

@@ -1,6 +1,6 @@
 [package]
 name = "agent-office"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 # The floor README.md/README.zh-CN.md promise; `ci.yml`'s msrv job pins to this.
 rust-version = "1.95"
