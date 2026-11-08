@@ -237,17 +237,52 @@ fn unasked(line: String, reply: &str) -> String {
         let n = reply.chars().count();
         reply.chars().skip(n.saturating_sub(ASK_TAIL)).collect()
     };
-    // A full-width mark is prose; a plain `?` mid-reply is as often code
-    // (`foo()?`) or a URL, so only the ending's counts.
+    // A full-width mark reports a question — but one in quotes is prose, the
+    // question a reply says it already traced or answered. A plain `?`
+    // mid-reply is as often code (`foo()?`) or a URL, so only the ending's
+    // counts.
     let lower = tail.to_lowercase();
-    let asks = reply.contains('？')
+    let asks = unquoted(reply).contains('？')
         || tail.contains('?')
-        || ASKS_YOU.iter().any(|p| tail.contains(p))
-        || ASKS_YOU_EN.iter().any(|p| lower.contains(p));
+        || handed_over(&tail, &ASKS_YOU)
+        || handed_over(&lower, &ASKS_YOU_EN);
     match crate::i18n::strip_ask(&line) {
         Some(rest) if !asks => rest.trim().to_owned(),
         _ => line,
     }
+}
+
+/// `text` with every quoted span dropped: what a reply quotes is something
+/// already said, not the mark of it asking you.
+fn unquoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut quoted = 0usize;
+    for c in text.chars() {
+        match c {
+            '「' | '『' | '“' | '‘' => quoted += 1,
+            '」' | '』' | '”' | '’' => quoted = quoted.saturating_sub(1),
+            _ if quoted == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether `text` hands you a decision anywhere: one of `words` in a place
+/// that is not a RECOUNT of the one you made.
+fn handed_over(text: &str, words: &[&str]) -> bool {
+    words
+        .iter()
+        .any(|w| text.match_indices(w).any(|(at, _)| !recount(&text[..at])))
+}
+
+/// Whether the words before a hand-off turn it into a recount of a decision
+/// already made — 「按你决定的方案」, 「方案已拍板」, "as you decided" — which
+/// closes a turn that waits on nothing.
+fn recount(before: &str) -> bool {
+    const RECOUNT: [&str; 7] = ["按", "照", "依", "听", "已", "as", "per"];
+    let before = before.trim_end();
+    RECOUNT.iter().any(|m| before.ends_with(m))
 }
 
 /// How far from a reply's end [`ASKS_YOU`] is looked for: a hand-off closes
