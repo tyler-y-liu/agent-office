@@ -73,7 +73,18 @@ pub fn open_agent(scene: &SceneState, id: AgentId) -> Result<&'static str, Strin
             asked = crate::dsh::request_jump(&slot.session_id, pid).ok();
             pid
         }
-        // Cursor's hook stamps the CLI's pid on its events.
+        // Cursor's hook stamps the CLI's pid on its events. A chat the app
+        // runs is opened in its Agents window, which raising the app alone
+        // would not pick.
+        crate::pipeline::CURSOR_SOURCE => {
+            let pid = stamped_pid(slot, pixtuoid_core::source::pid_start_marker)?;
+            if exe_path(pid).is_some_and(|exe| crate::cursor::run_by_app(&exe)) {
+                return open_url_checked(&crate::cursor::agent_link(&slot.session_id)).map(|()| {
+                    crate::i18n::t("已在 Cursor 打开这个会话", "opened this chat in Cursor")
+                });
+            }
+            pid
+        }
         _ => stamped_pid(slot, pixtuoid_core::source::pid_start_marker)?,
     };
     if !cfg!(target_os = "macos") {
@@ -448,6 +459,17 @@ pub fn ps_row(pid: i32) -> Option<(i32, String)> {
         .output()
         .ok()?;
     parse_ps_row(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `pid`'s executable as `ps` reports it, directory included.
+fn exe_path(pid: i32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let exe = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!exe.is_empty()).then_some(exe)
 }
 
 fn parse_ps_row(line: &str) -> Option<(i32, String)> {

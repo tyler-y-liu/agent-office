@@ -394,6 +394,35 @@ fn is_folder_window(title: &str, name: &str) -> bool {
         && title.rsplit(" — ").next() == Some(name)
 }
 
+// Cursor 3.29.9 runs the app's own agents in its extension host (`ps` shows
+// it retitled, "Cursor Helper (Plugin): extension-host …", no path) with a
+// worker CLI it keeps under its globalStorage. A `cursor-agent` started from
+// a terminal, Cursor's own included, is another install that runs its hooks
+// itself, and its chats are unknown to the Agents window ("We can't find
+// this agent").
+const APP_WORKER: &str = "/anysphere.cursor-agent-worker/";
+const APP_HELPER: &str = "Cursor Helper";
+
+/// Whether the process that ran a Cursor hook, `exe` as `ps` names it, is
+/// the Cursor app's, so its chat is in the Agents window rather than in a
+/// terminal.
+pub fn run_by_app(exe: &str) -> bool {
+    exe.contains(APP_WORKER)
+        || exe
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with(APP_HELPER))
+}
+
+/// The link that shows chat `id` in Cursor's Agents window: activating the
+/// app alone brings back whichever window was last used, often an editor.
+pub fn agent_link(id: &str) -> String {
+    format!(
+        "cursor://anysphere.cursor-deeplink/agent?id={}",
+        crate::roles::encode(id)
+    )
+}
+
 /// Whether a prompt link sent now would land in `name`'s window, given
 /// Cursor's on-screen window titles front first (`None`: no title yet).
 /// Cursor 3.29.9 hands a deeplink to its focused window, else its last
@@ -986,6 +1015,36 @@ fn rfc3339(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the app's own agents go to the Agents window: a terminal
+    /// `cursor-agent` chat sent there is "not found" and the click lands
+    /// nowhere, while the terminal jump would have found it.
+    #[test]
+    fn only_the_apps_own_agents_open_in_the_agents_window() {
+        let home = "/Users/u";
+        let app = format!(
+            "{home}/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/bin/cursor-agent"
+        );
+        assert!(run_by_app(&app));
+        assert!(run_by_app(
+            "Cursor Helper (Plugin): extension-host agent-office [2-6]"
+        ));
+        assert!(run_by_app(
+            "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)"
+        ));
+        let cli =
+            format!("{home}/.local/share/cursor-agent/versions/2026.11.05-86047df/cursor-agent");
+        assert!(!run_by_app(&cli));
+        assert!(!run_by_app("/opt/homebrew/bin/cursor-agent"));
+        assert_eq!(
+            agent_link("a6843c42-8a57-4cee-8f30-ea04ab2e9738"),
+            "cursor://anysphere.cursor-deeplink/agent?id=a6843c42-8a57-4cee-8f30-ea04ab2e9738"
+        );
+        assert!(
+            agent_link("x&y=1").ends_with("?id=x%26y%3D1"),
+            "an id cannot add a parameter"
+        );
+    }
 
     /// The user's own hooks, their `version` and every other key must come
     /// through untouched, and reconnecting must not stack a second copy.
