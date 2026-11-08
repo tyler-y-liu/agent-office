@@ -410,6 +410,28 @@ pub(crate) fn hook_identity(
     )
 }
 
+/// agent-office: the `notification_type`s CC sends for events that want
+/// nothing from you — a login finishing, a background session finishing, an
+/// elicitation already answered, a quota wait that resumes on its own. Read as
+/// prompts, each stood a finished session in your office under 「等你确认」.
+/// A type not listed here still asks: an unknown prompt is likelier than one
+/// the office may hide.
+const NOTICES_ASKING_NOTHING: [&str; 5] = [
+    "auth_success",
+    "elicitation_complete",
+    "elicitation_response",
+    "agent_completed",
+    "quota_auto_resume_fired",
+];
+
+/// agent-office: whether a `Notification` tells you something finished rather
+/// than that something wants you ([`NOTICES_ASKING_NOTHING`]).
+fn asks_nothing_of_you(obj: &serde_json::Map<String, Value>) -> bool {
+    obj.get("notification_type")
+        .and_then(|s| s.as_str())
+        .is_some_and(|kind| NOTICES_ASKING_NOTHING.contains(&kind))
+}
+
 /// agent-office: whether a `Notification` is CC's idle nudge. Its
 /// `notification_type` names it; a CC too old to send one is told by the
 /// nudge's own message.
@@ -561,10 +583,11 @@ pub(crate) fn shared_hook_arms(
             evs.extend(hook_effort(agent_id, obj));
             Ok(evs)
         }
-        // agent-office: CC's 60s idle nudge is the turn already over, not a
-        // prompt: as a RequiresAction it lined every finished session up at
-        // your office. Its identity still proves the session alive.
-        "Notification" if is_idle_nudge(obj) => {
+        // agent-office: CC's 60s idle nudge and the notices that only report
+        // something finished are the turn already over, not a prompt: as a
+        // RequiresAction they lined finished sessions up at your office. Their
+        // identity still proves the session alive.
+        "Notification" if is_idle_nudge(obj) || asks_nothing_of_you(obj) => {
             Ok(vec![hook_identity(agent_id, source, &session_id, obj)])
         }
         "Notification" => {
