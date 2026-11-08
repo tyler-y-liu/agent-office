@@ -51,9 +51,12 @@ The side panel groups everyone the same way: waiting → stuck → done, unread 
 
 ```bash
 brew install tyler-y-liu/tap/agent-office
-agent-office connect      # adds hooks to ~/.claude/settings.json (backs it up first); applies to new Claude sessions
+agent-office connect          # adds hooks to ~/.claude/settings.json (backs it up first); applies to new Claude sessions
+agent-office roles install    # nine roles, so `p` can hand work out; --agent dsh / --agent cursor install theirs
 agent-office
 ```
+
+The office opens without the roles; they are what [`p`](#roles) dispatches, and a dispatch without them stops with a hint to run this.
 
 Other ways in:
 

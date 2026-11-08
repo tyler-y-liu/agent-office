@@ -51,9 +51,12 @@
 
 ```bash
 brew install tyler-y-liu/tap/agent-office
-agent-office connect      # 往 ~/.claude/settings.json 加 hooks（会先备份），新开的 Claude 会话生效
+agent-office connect          # 往 ~/.claude/settings.json 加 hooks（会先备份），新开的 Claude 会话生效
+agent-office roles install    # 九个角色，按 p 才能派活；DSH 加 --agent dsh，Cursor 加 --agent cursor
 agent-office
 ```
+
+不装角色办公室照样能开，角色是给 [按 `p` 派活](#角色) 用的；没装就派活，会提示先跑这条。
 
 其他方式：
 

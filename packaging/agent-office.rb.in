@@ -19,6 +19,9 @@ class AgentOffice < Formula
     <<~EOS
       Hook it into Claude Code (applies to sessions started afterwards):
         agent-office connect
+      To hand work out from the office with p, install the roles too
+      (--agent dsh / --agent cursor for those hosts):
+        agent-office roles install
       Then start the office:
         agent-office
     EOS
