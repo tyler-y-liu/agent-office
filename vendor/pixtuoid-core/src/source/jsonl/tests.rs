@@ -2741,6 +2741,7 @@ async fn oversized_attach_re_emits_a_turns_start_before_its_dispatch() {
     let end = AgentEvent::TurnEnd {
         agent_id: id,
         turn: Some(crate::state::TurnKey::Id("t2".into())),
+        aborted: false,
     };
     r.apply(&mut scene, end, t0, Transport::Jsonl);
     assert_eq!(

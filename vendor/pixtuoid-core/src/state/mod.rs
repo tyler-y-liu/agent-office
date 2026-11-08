@@ -367,10 +367,32 @@ pub struct AgentSlot {
     /// while its directory is unknown. Derived, so not serialized.
     #[serde(skip)]
     pub repo_hue: Option<u8>,
+    /// agent-office: when the turn that left it idle stopped without
+    /// finishing — Cursor's `aborted` / `error` `stop` — or `None` when the
+    /// turn did finish. Read through [`AgentSlot::aborted_idle`]: an idle
+    /// stretch that ran out of work has no result to show you, and one that
+    /// finished has one. Fresh state (a new turn, a prompt) drops it on its
+    /// own: the idle stretch it dates is over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_aborted_at: Option<SystemTime>,
 }
 
 fn u64_is_zero(v: &u64) -> bool {
     *v == 0
+}
+
+impl AgentSlot {
+    /// agent-office: idle as of a turn that stopped without finishing
+    /// ([`Self::turn_aborted_at`]). Nothing came of it, so the office must not
+    /// hand it to you as a result to read — which is what the same idle state
+    /// means after a finished turn. Only the idle stretch the stamp dates
+    /// counts: any later state change moves `state_started_at` past it.
+    pub fn aborted_idle(&self) -> bool {
+        matches!(self.state, ActivityState::Idle)
+            && self
+                .turn_aborted_at
+                .is_some_and(|at| at >= self.state_started_at)
+    }
 }
 
 /// A RAW effort string + WHEN it was last observed — the freshness the scene
@@ -1062,6 +1084,7 @@ mod tests {
             tokens_used: 0,
             last_usage: None,
             repo_hue: None,
+            turn_aborted_at: None,
         }
     }
 

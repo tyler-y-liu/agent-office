@@ -186,12 +186,15 @@ impl Group {
             ActivityState::RequiresAction { .. } => Self::Waiting,
             ActivityState::Running { .. } => Self::Working,
             // The office's own threshold, so the card and the figure agree.
+            // agent-office: a turn that stopped without finishing has nothing
+            // to read, so it rests as an idle session does.
             ActivityState::Idle
                 if now
                     .duration_since(slot.state_started_at)
                     .unwrap_or_default()
                     .as_millis()
-                    < u128::from(pixtuoid_scene::waiting::DONE_WAITS_MS) =>
+                    < u128::from(pixtuoid_scene::waiting::DONE_WAITS_MS)
+                    && !slot.aborted_idle() =>
             {
                 Self::Done
             }

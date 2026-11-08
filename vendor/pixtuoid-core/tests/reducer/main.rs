@@ -133,6 +133,7 @@ fn turn_end(r: &mut Reducer, scene: &mut SceneState, id: AgentId, at: SystemTime
         AgentEvent::TurnEnd {
             agent_id: id,
             turn: None,
+            aborted: false,
         },
         at,
         tp,

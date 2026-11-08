@@ -1243,6 +1243,7 @@ mod turn_property {
                 Ev::End(k) => AgentEvent::TurnEnd {
                     agent_id: id(),
                     turn: k.map(TurnKey::Seq),
+                    aborted: false,
                 },
                 Ev::Tool(c) => AgentEvent::ToolUseStart {
                     agent_id: id(),

@@ -470,7 +470,11 @@ mod tests {
     fn a_turns_end_ends_the_agents_work() {
         let evs = decode(json!({"type": "turn_end", "sessionId": SID}));
         assert!(
-            matches!(&evs[..], [AgentEvent::Identity { .. }, AgentEvent::TurnEnd { turn: None, agent_id }]
+            matches!(&evs[..], [AgentEvent::Identity { .. }, AgentEvent::TurnEnd {
+                turn: None,
+                agent_id,
+                ..
+            }]
                 if *agent_id == id()),
             "{evs:?}"
         );

@@ -1048,7 +1048,7 @@ pub(crate) fn unclosed_turns(events: &[AgentEvent]) -> Vec<String> {
         })
         .filter(|(agent, key)| {
             !events.iter().any(|e| {
-                matches!(e, AgentEvent::TurnEnd { agent_id, turn: Some(k) }
+                matches!(e, AgentEvent::TurnEnd { agent_id, turn: Some(k), .. }
                     if agent_id == *agent && k == *key)
             })
         })

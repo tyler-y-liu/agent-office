@@ -289,6 +289,7 @@ mod tests {
             tokens_used: 0,
             last_usage: None,
             repo_hue: None,
+            turn_aborted_at: None,
         }
     }
 

@@ -66,7 +66,8 @@ pub fn need(slot: &AgentSlot, now: SystemTime) -> Option<Need> {
         ActivityState::RequiresAction { .. } if waits_on_reply(slot) => Some(Need::Reply),
         ActivityState::RequiresAction { .. } => Some(Need::Approval),
         ActivityState::Idle
-            if crate::anim::elapsed_ms(now, slot.state_started_at) < DONE_WAITS_MS =>
+            if crate::anim::elapsed_ms(now, slot.state_started_at) < DONE_WAITS_MS
+                && !slot.aborted_idle() =>
         {
             Some(Need::Read)
         }

@@ -1728,6 +1728,7 @@ fn keyed_turn_end(id: AgentId, k: &str) -> AgentEvent {
     AgentEvent::TurnEnd {
         agent_id: id,
         turn: Some(turn(k)),
+        aborted: false,
     }
 }
 
@@ -1941,6 +1942,7 @@ fn the_end_of_a_turn_whose_start_went_unseen_ends_what_the_turn_left() {
     let end = |id, k| AgentEvent::TurnEnd {
         agent_id: id,
         turn: Some(TurnKey::Seq(k)),
+        aborted: false,
     };
     let opencode = |r: &mut Reducer, scene: &mut SceneState| {
         let id = AgentId::from_parts("opencode", "ses_p");

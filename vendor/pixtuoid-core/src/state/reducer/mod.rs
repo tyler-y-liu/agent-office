@@ -415,8 +415,12 @@ impl Reducer {
             AgentEvent::TurnStart { agent_id, turn } => {
                 self.apply_turn_start(scene, agent_id, turn, from, now);
             }
-            AgentEvent::TurnEnd { agent_id, turn } => {
-                self.apply_turn_end(scene, agent_id, turn, from, now);
+            AgentEvent::TurnEnd {
+                agent_id,
+                turn,
+                aborted,
+            } => {
+                self.apply_turn_end(scene, agent_id, turn, aborted, from, now);
             }
             AgentEvent::UserActionRequest {
                 agent_id,
@@ -807,6 +811,7 @@ impl Reducer {
         scene: &mut SceneState,
         agent_id: AgentId,
         turn: Option<TurnKey>,
+        aborted: bool,
         from: Transport,
         now: SystemTime,
     ) {
@@ -841,6 +846,12 @@ impl Reducer {
             && !cc
             && self.corr.item_started_on.get(&agent_id) == Some(&Transport::Hook);
         self.end_item(scene, agent_id, resolved, applies && !lags_the_hooks, now);
+        // agent-office: a turn that stopped without finishing leaves nothing
+        // to read, and the office says so from the slot alone. Stamped after
+        // the settle, so it dates the idle stretch it produced.
+        if applies && let Some(slot) = scene.agents.get_mut(&agent_id) {
+            slot.turn_aborted_at = aborted.then_some(now);
+        }
     }
 
     /// Settle the slot when its request was answered or the call it shows
@@ -1409,6 +1420,7 @@ impl Reducer {
                 last_usage: None,
                 // agent-office: dealt after the event (`assign_repo_hues`).
                 repo_hue: None,
+                turn_aborted_at: None,
             },
         );
         true

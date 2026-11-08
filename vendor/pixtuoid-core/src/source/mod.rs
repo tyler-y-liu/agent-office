@@ -146,6 +146,11 @@ pub enum AgentEvent {
         /// end names none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn: Option<TurnKey>,
+        /// agent-office: the turn stopped without finishing — Cursor's `stop`
+        /// reporting `aborted` or `error`. Nothing came of it, so the office
+        /// has no result to hand you ([`AgentSlot::aborted_idle`]).
+        #[serde(default)]
+        aborted: bool,
     },
     /// The agent is blocked on a permission/input prompt — the slot goes RequiresAction.
     UserActionRequest {
@@ -339,6 +344,18 @@ impl AgentEvent {
         AgentEvent::TurnEnd {
             agent_id,
             turn: None,
+            aborted: false,
+        }
+    }
+
+    /// agent-office: a turn end whose wire says the work stopped without
+    /// finishing (Cursor's `aborted` / `error` `stop`), so the slot reads as
+    /// idle rather than as a result to read.
+    pub(crate) fn aborted_turn_end(agent_id: AgentId) -> Self {
+        AgentEvent::TurnEnd {
+            agent_id,
+            turn: None,
+            aborted: true,
         }
     }
 
@@ -347,6 +364,7 @@ impl AgentEvent {
         AgentEvent::TurnEnd {
             agent_id,
             turn: Some(turn),
+            aborted: false,
         }
     }
 
