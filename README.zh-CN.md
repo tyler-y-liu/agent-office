@@ -13,7 +13,7 @@
 
 *夜间办公室，由演示会话驱动。*
 
-**目录：** [安装](#安装) · [其他 agent](#其他-agent) · [办公室](#办公室) · [按键](#按键) · [角色](#角色) · [配置](#配置) · [隐私](#隐私) · [开发](#开发)
+**目录：** [安装配置](#安装配置) · [办公室](#办公室) · [按键](#按键) · [角色](#角色) · [配置](#配置) · [隐私](#隐私) · [开发](#开发)
 
 ## 为什么做这个
 
@@ -41,22 +41,21 @@
 
 侧栏也照这个顺序分组：等你 → 卡住 → 做完待看 → 干活 → 闲着。界面有简体中文和英文两种，默认跟随 macOS 的系统语言；在窗口里按 `l` 切换（下次启动也是这种语言），也可以用 `AGENT_OFFICE_LANG` 指定。
 
-## 环境要求
+## 安装配置
+
+按顺序走四步就能用起来，后两步看你要不要。
+
+### 环境要求
 
 - macOS（目前只在 macOS 上用过）
 - Rust 1.95 或更新（只有从源码编译才需要）
 - 可选：一个 OpenAI 兼容的 chat completions 接口，用来生成摘要。不配也能用，任务栏会显示原始指令。
 
-## 安装
+### 安装
 
 ```bash
 brew install tyler-y-liu/tap/agent-office
-agent-office connect          # 往 ~/.claude/settings.json 加 hooks（会先备份），新开的 Claude 会话生效
-agent-office roles install    # 九个角色，按 p 才能派活；DSH 加 --agent dsh，Cursor 加 --agent cursor
-agent-office
 ```
-
-不装角色办公室照样能开，角色是给 [按 `p` 派活](#角色) 用的；没装就派活，会提示先跑这条。
 
 其他方式：
 
@@ -66,7 +65,39 @@ cargo install --git https://github.com/tyler-y-liu/agent-office
 
 每个 [release](https://github.com/tyler-y-liu/agent-office/releases) 也附了 universal 二进制（Apple Silicon 和 Intel 通用）。二进制内嵌了 OFL 授权的 Fusion Pixel 字体，所以第三方许可随包附带：压缩包里是 `licenses/`，用 Homebrew 装完在 `$(brew --prefix)/share/agent-office/THIRD-PARTY-NOTICES.md`。
 
-### 开启摘要
+### 接入各个 agent
+
+Claude Code 要单独跑一步：
+
+```bash
+agent-office connect      # 往 ~/.claude/settings.json 加 hooks（会先备份），只对新开的会话生效
+```
+
+其余三个，用哪个接哪个：
+
+| Agent | 接入 | 说明 |
+|---|---|---|
+| Codex | 不用接入也能看到会话；要看「等你确认」跑 `agent-office connect codex` | 读 `$CODEX_HOME/sessions`（默认 `~/.codex/sessions`）。`connect` 会在 `~/.config/agent-office/codex-plugin` 放一个插件，用 `codex plugin` 装上，需要 `codex` 在 PATH 上 |
+| Cursor（`cursor-agent`） | `agent-office connect cursor` | 往 Cursor 配置目录（默认 `~/.cursor`）的 `hooks.json` 加 hooks（会先备份）。Cursor 的会话记录里没有工具调用，所以 hook 在 `~/.config/agent-office/cursor/transcripts/` 另记一份任务日志 |
+| DeepSeek Harness（dsh） | `agent-office connect dsh` | 往 `$DSH_HOME`（默认 `~/.dsh`）写插件并挂进 `cordis.patch.yml`，之后重启 DSH。插件在 `$DSH_HOME/agent-office/transcripts/` 记任务日志 |
+
+接入后新开的会话才生效。不接 hooks 也能用，只靠会话记录，但看不到「等你确认」。`agent-office disconnect [codex|cursor|dsh]` 卸掉对应的接入，日志保留。
+
+hooks 指向 `connect` 时程序所在的位置，所以把程序移动或重装到别处后要重新 `connect`；Homebrew 升级路径不变，不用重接，见 [更新](#更新)。
+
+任务日志只记你的指令、它的回复、todo 和每次工具调用的路径或命令，不含文件内容和工具输出。30 天没更新的日志会自动删除。
+
+### 装角色（可选）
+
+```bash
+agent-office roles install                  # 九个角色，给 Claude Code
+agent-office roles install --agent dsh      # 同一套装成 DeepSeek Harness 的 presets（要先 connect dsh，再重启 DSH）
+agent-office roles install --agent cursor   # 同一套装成 Cursor agents
+```
+
+不装角色办公室照样能开。角色是给 [按 `p` 派活](#角色) 用的；没装就派活，会提示先跑这条。
+
+### 开启摘要（可选）
 
 在 `~/.config/agent-office/env` 里写上（或者设成同名环境变量）：
 
@@ -76,27 +107,38 @@ AGENT_OFFICE_API_KEY=sk-...
 AGENT_OFFICE_MODEL=your-model
 ```
 
-请求发到 `<base>/v1/chat/completions`；base 里已经带版本段（`/v1`、`/api/v3`、`/v1beta/openai` 等）时发到 `<base>/chat/completions`。挑一个回得快、不带长推理的模型。
+请求发到 `<base>/v1/chat/completions`；base 里已经带版本段（`/v1`、`/api/v3`、`/v1beta/openai` 等）时发到 `<base>/chat/completions`。挑一个回得快、不带长推理的模型。完全不想要摘要就设 `AGENT_OFFICE_SUMMARY=off`，会话内容不出本机。
 
-有问题先跑 `agent-office doctor`，它会检查会话目录、各 agent 的 hooks、socket 和卡点门槛，并试调一次摘要接口。
+### 确认装好了
 
-不接 hooks 也能用，只靠会话记录，但看不到「等你确认」。
+```bash
+agent-office                 # 开窗口，压在其他窗口上面（`t` 切换置顶，`q` 按两次退出）
+agent-office doctor          # 会话目录、各 agent 的 hooks、socket、卡点门槛，并试调一次摘要接口
+agent-office --version       # 你实际装的是哪一版
+```
 
-### 其他 agent
+macOS 的权限是第一次用到时才问，不在安装期：
 
-| Agent | 接入 | 说明 |
-|---|---|---|
-| Codex | 不用接入就能看到；要看「等你确认」再 `agent-office connect codex` | 读 `$CODEX_HOME/sessions`（默认 `~/.codex/sessions`）。`connect` 会在 `~/.config/agent-office/codex-plugin` 放一个插件，用 `codex plugin` 装上，需要 `codex` 在 PATH 上 |
-| Cursor（`cursor-agent`） | `agent-office connect cursor` | 往 Cursor 配置目录（默认 `~/.cursor`）的 `hooks.json` 加 hooks（会先备份）。Cursor 的会话记录里没有工具调用，所以 hook 在 `~/.config/agent-office/cursor/transcripts/` 另记一份任务日志 |
-| DeepSeek Harness（dsh） | `agent-office connect dsh` | 往 `$DSH_HOME`（默认 `~/.dsh`）写插件并挂进 `cordis.patch.yml`。插件在 `$DSH_HOME/agent-office/transcripts/` 记任务日志 |
+| 权限 | 什么时候要 |
+|---|---|
+| 屏幕录制 | 往 Cursor 的 Agents 窗口派活，agent-office 靠窗口标题确认窗口在最前 |
+| 自动化（Terminal、iTerm2） | 跳回会话所在的标签页 |
+| 通知 | 「有会话在等你」的系统通知——它在通知中心里显示成「脚本编辑器」 |
 
-任务日志只记你的指令、它的回复、todo 和每次工具调用的路径或命令，不含文件内容和工具输出。30 天没更新的日志会自动删除。
+### 更新
 
-接入后新开的会话才生效。`agent-office disconnect [codex|cursor|dsh]` 卸掉对应的接入，日志保留。hooks 指向 `connect` 时程序所在的位置，移动或重装到别处后要重新 `connect`。
+```bash
+brew update && brew upgrade agent-office          # Homebrew
+cargo install --git https://github.com/tyler-y-liu/agent-office --force    # 从源码装
+```
 
-## 使用
+Homebrew 要先 `brew update`：brew 读的是本机那份 tap 克隆，光 `brew upgrade` 可能还看到上一版。源码装的那条，`--force` 才是覆盖已装二进制的开关，不加会被告知已经装过。
 
-### 办公室
+Homebrew 升级不用重接 hooks：`connect` 记的是 `opt` 那个软链，跟着升级走，不是 `brew upgrade` 会删掉的带版本 `Cellar` 目录。自己搬过位置的 tarball 才需要重新 `connect`。
+
+升完把窗口退出（按两次 `q`）再启动，正在跑的窗口还是旧程序。
+
+## 办公室
 
 北面窗下是一排四人长桌，中间一条走廊，南边从西到东是会议室 A、会议室 B（窗口够宽时还有会议室 C）、茶水间、你的办公室。窗口够宽时西端还有一块天台。点门牌会弹出这块区域的说明。
 
@@ -112,7 +154,7 @@ AGENT_OFFICE_MODEL=your-model
 
 Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它也留在工位、算在「干活」里，直到命令回报结果。todo 清单里还有正在做的项也一样：卡片上写「… 待办未完」，最多占到一小时，免得半路死掉的 host 一直占着工位。这一轮要是没产出结果就结束了（Cursor 里按 Esc 打断、或报错），会话就当闲着，不排队让你看。
 
-### 按键
+## 按键
 
 | 按键 | 作用 |
 |---|---|
@@ -134,9 +176,9 @@ Claude Code 的后台命令还没跑完时，即使这一轮已经结束，它�
 
 `agent-office --shot out.png` 跑 20 秒后把画面存成 PNG 并退出。
 
-### 角色
+## 角色
 
-`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`agent-office roles install --agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用；同时要先跑 `agent-office connect dsh`，再重启 DSH。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活。`agent-office roles install --agent cursor` 把同一套角色装成 Cursor agents（`~/.cursor/agents/office-*.md`，认 `CURSOR_CONFIG_DIR`），新开的 `cursor-agent` 才看得到，项目里 `.cursor/agents/` 下的同名文件会盖过这里的；Cursor 里的 PM 用 Task 工具派活。派给 Cursor 要先装好 Cursor app 或 Cursor CLI（`cursor-agent`），并跑 `agent-office connect cursor`；hooks 对 app 里的会话和 `cursor-agent` 都生效。
+`agent-office roles install` 把九个角色装成 Claude Code agents（`~/.claude/agents/office-*.md`）：产品、设计、架构、前端、后端、测试、运维、审查，以及负责给其他角色分工的 PM。`--agent dsh` 把同一套角色装成 DeepSeek Harness Agent Presets，也可以直接在 DSH 的 preset 选择器里选用（要先跑 `agent-office connect dsh`，再重启 DSH）。`--agent cursor` 把同一套角色装成 Cursor agents（`~/.cursor/agents/office-*.md`，认 `CURSOR_CONFIG_DIR`），新开的 `cursor-agent` 才看得到，项目里 `.cursor/agents/` 下的同名文件会盖过这里的。角色会话的名牌和卡片会带角色徽章，PM 的 todo 会作为分工计划显示在卡片和会议室白板上。DSH 里的 PM 用 `subagent` 和 `agent_preset` 派活；Cursor 里的 PM 用 Task 工具。派给 Cursor 要先装好 Cursor app 或 Cursor CLI（`cursor-agent`），并跑 `agent-office connect cursor`；hooks 对 app 里的会话和 `cursor-agent` 都生效。
 
 按 `p`，再按数字选角色。派到哪个宿主跟随你发起时选中的小人，没选中时跟随最近活动的小人；按 `h` 在 Claude Code、DeepSeek Harness、Cursor 三个宿主间轮换，跳过没装好的，`AGENT_OFFICE_DISPATCH_HOST` 改的是打开时的默认值。Claude 会在桌面 app 里开好新会话、预填指令，等你确认发送：
 
@@ -187,6 +229,7 @@ Cursor 派活把角色说明放在 prompt 里（Cursor 没有以 agent 身份开
 - 跳转：Claude 桌面 app 里的会话直接打开；终端里的会话把终端切到前台，iTerm2 和 Terminal.app 还会切到对应标签页（第一次 macOS 会问是否允许控制该终端）。其他终端到不了具体标签页。
 - tmux 里的会话会切到它的窗格，但只认默认 socket（`-L` / `-S` 起的找不到）。
 - 系统通知走 `osascript`，通知中心里显示为「脚本编辑器」，点通知不会跳到会话；点 Dock 图标或窗口回去。
+- 不会开机自启，也不会自己检查新版本：想常驻得自己加成登录项，升级照 [更新](#更新) 那三条路走。
 - 可以和 pixtuoid 同时运行，各用各的 socket 和 hooks。
 
 </details>

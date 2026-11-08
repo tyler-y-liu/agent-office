@@ -13,7 +13,7 @@ English | [简体中文](README.zh-CN.md)
 
 *A night shift in the office, driven by demo sessions.*
 
-**Jump to:** [Install](#install) · [Agents](#other-agents) · [The office](#the-office) · [Keys](#keys) · [Roles](#roles) · [Configuration](#configuration) · [Privacy](#privacy) · [Development](#development)
+**Jump to:** [Setup](#setup) · [The office](#the-office) · [Keys](#keys) · [Roles](#roles) · [Configuration](#configuration) · [Privacy](#privacy) · [Development](#development)
 
 ## Why this exists
 
@@ -41,22 +41,19 @@ With several agent sessions running at once, it's hard to keep track of which on
 
 The side panel groups everyone the same way: waiting → stuck → done, unread → working → idle. The UI comes in English and Simplified Chinese, following your macOS language; press `l` in the window to switch (saved for the next start), or set `AGENT_OFFICE_LANG`.
 
-## Requirements
+## Setup
+
+### Requirements
 
 - macOS (the only platform it has been used on)
 - Rust 1.95 or newer, only when building from source
 - Optional: an OpenAI-compatible chat completions endpoint for summaries. Without one it still works, and the panel shows each session's raw prompt.
 
-## Install
+### Install
 
 ```bash
 brew install tyler-y-liu/tap/agent-office
-agent-office connect          # adds hooks to ~/.claude/settings.json (backs it up first); applies to new Claude sessions
-agent-office roles install    # nine roles, so `p` can hand work out; --agent dsh / --agent cursor install theirs
-agent-office
 ```
-
-The office opens without the roles; they are what [`p`](#roles) dispatches, and a dispatch without them stops with a hint to run this.
 
 Other ways in:
 
@@ -66,7 +63,39 @@ cargo install --git https://github.com/tyler-y-liu/agent-office
 
 Each [release](https://github.com/tyler-y-liu/agent-office/releases) also has a universal binary for Apple Silicon and Intel. The binary embeds the OFL-licensed Fusion Pixel font, so the third-party notices ship with it: `licenses/` inside the tarball, or `$(brew --prefix)/share/agent-office/THIRD-PARTY-NOTICES.md` after Homebrew.
 
-### Turn on summaries
+### Connect your agents
+
+Claude Code needs a step of its own:
+
+```bash
+agent-office connect      # hooks into ~/.claude/settings.json (backs it up first); new sessions only
+```
+
+The other three, each only if you run that agent:
+
+| Agent | Setup | Notes |
+|---|---|---|
+| Codex | `agent-office connect codex` to see approval waits; sessions show up without it | Reads `$CODEX_HOME/sessions` (default `~/.codex/sessions`). `connect` puts a plugin in `~/.config/agent-office/codex-plugin` and installs it with `codex plugin`; needs `codex` on PATH |
+| Cursor (`cursor-agent`) | `agent-office connect cursor` | Adds hooks to `hooks.json` in the Cursor config directory (default `~/.cursor`; backs it up first). Cursor's own transcripts have no tool calls, so the hook keeps a task log in `~/.config/agent-office/cursor/transcripts/` |
+| DeepSeek Harness (dsh) | `agent-office connect dsh` | Writes a plugin to `$DSH_HOME` (default `~/.dsh`) and adds it to `cordis.patch.yml`; restart DSH. The plugin keeps a task log in `$DSH_HOME/agent-office/transcripts/` |
+
+Setup applies to sessions started afterwards. Without hooks it still works, from session transcripts alone, but then it can't tell when a session is waiting for your approval. `agent-office disconnect [codex|cursor|dsh]` removes a setup and keeps the logs.
+
+Hooks point at wherever the binary was when you ran `connect`, so run `connect` again after moving or reinstalling it somewhere else — a Homebrew upgrade keeps the same path, see [Update](#update).
+
+Task logs hold only your prompts, the agent's replies, todos, and the path or command of each tool call. They contain no file contents or tool output. A log untouched for 30 days is deleted.
+
+### Install the roles (optional)
+
+```bash
+agent-office roles install                  # nine roles for Claude Code
+agent-office roles install --agent dsh      # the same roles as DeepSeek Harness presets (needs connect dsh, then restart DSH)
+agent-office roles install --agent cursor   # the same roles as Cursor agents
+```
+
+The office opens without them. They are what [`p`](#roles) dispatches: a dispatch without them stops with a hint to run this.
+
+### Turn on summaries (optional)
 
 Put these in `~/.config/agent-office/env` (or set them as environment variables):
 
@@ -76,27 +105,39 @@ AGENT_OFFICE_API_KEY=sk-...
 AGENT_OFFICE_MODEL=your-model
 ```
 
-Requests go to `<base>/v1/chat/completions`, or to `<base>/chat/completions` when the base already names an API version (`/v1`, `/api/v3`, `/v1beta/openai`, ...). Pick a fast model without long reasoning.
+Requests go to `<base>/v1/chat/completions`, or to `<base>/chat/completions` when the base already names an API version (`/v1`, `/api/v3`, `/v1beta/openai`, ...). Pick a fast model without long reasoning. For no summaries at all, `AGENT_OFFICE_SUMMARY=off` keeps every session's content on your machine.
 
-If something looks wrong, run `agent-office doctor`. It checks the session directories, the hooks for each agent, the socket and the stuck thresholds, and makes one test call to the summary endpoint.
+### Check it works
 
-It also works without hooks, from session transcripts alone, but then it can't tell when a session is waiting for your approval.
+```bash
+agent-office                 # the window, always on top of the others (`t` toggles that, `q` twice quits)
+agent-office doctor          # session directories, each agent's hooks, the socket, the stuck
+                             # thresholds and one test call to the summary endpoint
+agent-office --version       # what you actually have installed
+```
 
-### Other agents
+macOS asks for permissions the first time something needs them, not at install time:
 
-| Agent | Setup | Notes |
-|---|---|---|
-| Codex | Shows up without setup; run `agent-office connect codex` to see approval waits | Reads `$CODEX_HOME/sessions` (default `~/.codex/sessions`). `connect` puts a plugin in `~/.config/agent-office/codex-plugin` and installs it with `codex plugin`; needs `codex` on PATH |
-| Cursor (`cursor-agent`) | `agent-office connect cursor` | Adds hooks to `hooks.json` in the Cursor config directory (default `~/.cursor`; backs it up first). Cursor's own transcripts have no tool calls, so the hook keeps a task log in `~/.config/agent-office/cursor/transcripts/` |
-| DeepSeek Harness (dsh) | `agent-office connect dsh` | Writes a plugin to `$DSH_HOME` (default `~/.dsh`) and adds it to `cordis.patch.yml`. The plugin keeps a task log in `$DSH_HOME/agent-office/transcripts/` |
+| Permission | Needed for |
+|---|---|
+| Screen Recording | Dispatching to Cursor's Agents window, which agent-office confirms by window title |
+| Automation (Terminal, iTerm2) | Jumping to a session's tab |
+| Notifications | The "waiting for you" notification — it arrives as "Script Editor" |
 
-Task logs hold only your prompts, the agent's replies, todos, and the path or command of each tool call. They contain no file contents or tool output. A log untouched for 30 days is deleted.
+### Update
 
-Setup applies to sessions started afterwards. `agent-office disconnect [codex|cursor|dsh]` removes it and keeps the logs. Hooks point at wherever the binary was when you ran `connect`, so run `connect` again after moving or reinstalling it.
+```bash
+brew update && brew upgrade agent-office          # Homebrew
+cargo install --git https://github.com/tyler-y-liu/agent-office --force    # from source
+```
 
-## Usage
+`brew update` first: brew reads its own clone of the tap, and `brew upgrade` alone can still see the previous release there. With `cargo install`, `--force` is what replaces an existing binary — without it, cargo says the package is already installed.
 
-### The office
+Hooks keep working through a Homebrew upgrade: `connect` records the `opt` link, which follows the upgrade, rather than the versioned `Cellar` directory that `brew upgrade` deletes. A tarball you moved yourself is the case that needs `connect` again.
+
+Then quit the window (`q` twice) and start it again — the running window is the old build.
+
+## The office
 
 A row of four-person desks runs under the north windows, with a corridor in the middle. Along the south side, west to east: meeting room A, meeting room B (and C when the window is wide enough), the pantry, and your office. A wide window adds a rooftop terrace at the west end. Click a door sign to see what that area is for.
 
@@ -112,7 +153,7 @@ The rooftop appears only when the office is at least 200 columns wide. Without a
 
 A Claude Code session whose background command is still running stays at its desk, in the working group, until that command reports back — even if its turn has already ended. So does one whose todo list still has an item in progress: its card says `… on its plan`, and it holds that seat for an hour at most, so a host that died mid-plan does not keep a desk forever. A turn that ended without a result to read — a Cursor turn you aborted, one that errored — leaves the session idle rather than queued.
 
-### Keys
+## Keys
 
 | Key | Action |
 |---|---|
@@ -134,9 +175,9 @@ Click a card or worker to select it; scroll the panel with the mouse wheel. Afte
 
 `agent-office --shot out.png` runs for 20 seconds, saves the frame as a PNG and exits.
 
-### Roles
+## Roles
 
-`agent-office roles install` installs nine roles as Claude Code agents (`~/.claude/agents/office-*.md`): product, UX, architect, frontend, backend, QA, devops, reviewer and a PM that splits work among the others. `agent-office roles install --agent dsh` installs the same roles as DeepSeek Harness Agent Presets, which you can also choose directly in DSH's preset picker. Run `agent-office connect dsh` as well, then restart DSH. A session started in a role wears its chip on its badge and card; a PM's todo list shows as its plan on its card and on the meeting room's whiteboard. In DSH, the PM delegates with `subagent` and `agent_preset`. `agent-office roles install --agent cursor` installs them as Cursor agents (`~/.cursor/agents/office-*.md`, honouring `CURSOR_CONFIG_DIR`); new `cursor-agent` runs see them, and a file of the same name in a project's `.cursor/agents/` overrides one here. In Cursor, the PM delegates with the Task tool. Dispatching to Cursor needs the Cursor app or the Cursor CLI (`cursor-agent`), plus `agent-office connect cursor`; the hooks cover chats in the app and `cursor-agent` runs alike.
+`agent-office roles install` installs nine roles as Claude Code agents (`~/.claude/agents/office-*.md`): product, UX, architect, frontend, backend, QA, devops, reviewer and a PM that splits work among the others. `--agent dsh` installs them as DeepSeek Harness Agent Presets, which you can also choose directly in DSH's preset picker (run `agent-office connect dsh` as well, then restart DSH). `--agent cursor` installs them as Cursor agents (`~/.cursor/agents/office-*.md`, honouring `CURSOR_CONFIG_DIR`); new `cursor-agent` runs see them, and a file of the same name in a project's `.cursor/agents/` overrides one here. A session started in a role wears its chip on its badge and card; a PM's todo list shows as its plan on its card and on the meeting room's whiteboard. In DSH, the PM delegates with `subagent` and `agent_preset`; in Cursor, with the Task tool. Dispatching to Cursor needs the Cursor app or the Cursor CLI (`cursor-agent`), plus `agent-office connect cursor`; the hooks cover chats in the app and `cursor-agent` runs alike.
 
 Press `p` to dispatch one. A digit picks the role; the host follows the worker you started from (or the latest one when none is selected), and `h` cycles it through Claude Code, DeepSeek Harness and Cursor, skipping any that is not set up — `AGENT_OFFICE_DISPATCH_HOST` sets where it opens. In Claude, the desktop app opens a new session with the prompt filled in, for you to send:
 
@@ -187,6 +228,7 @@ Daily stats are stored locally in `~/.config/agent-office/stats.json`.
 - Jumping: sessions in the Claude desktop app open directly. For sessions in a terminal, the terminal comes to the front; iTerm2 and Terminal.app also switch to the right tab (macOS asks once for permission to control the terminal). Other terminals can't be taken to a specific tab.
 - Sessions in tmux switch to their pane, but only on tmux's default socket (sessions started with `-L` / `-S` can't be found).
 - Notifications go through `osascript`, so they appear as "Script Editor" in Notification Center and clicking one doesn't jump to the session; use the Dock icon or the window.
+- It doesn't start at login, and it never checks for a newer release: installing it as a login item and running [Update](#update) are both up to you.
 - It can run alongside pixtuoid; each uses its own socket and hooks.
 
 </details>
