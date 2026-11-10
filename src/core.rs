@@ -1211,7 +1211,7 @@ impl Core {
             Some(host) if ready(host) => host,
             _ => {
                 // A worker whose host cannot take a dispatch (Cursor hooks
-                // with neither the app nor cursor-agent) still gets one:
+                // without the Cursor app) still gets one:
                 // from the first host that can, not none at all.
                 let following = if ready(following) {
                     following
@@ -1865,18 +1865,17 @@ mod tests {
             ),
             "created and submitted a QA relay (shop · abc123)"
         );
-        // Cursor's note says where the terminal opened and whether it
-        // submitted: the generic Claude wording would tell the user to send
-        // a prompt that is already running.
+        // Cursor's note says which repository to pick in the Agents window:
+        // the generic Claude wording would leave the user guessing.
+        let cursor = "prefilled a QA chat in Cursor's Agents window: click Create Chat, pick shop as the repository, add the task and send";
         assert_eq!(
             dispatch_success(
                 crate::roles::Backend::Cursor,
                 crate::roles::Role::Qa,
                 false,
-                "opened a Cursor QA session in Terminal; it asks you what to do first (shop)"
-                    .into(),
+                cursor.into(),
             ),
-            "opened a Cursor QA session in Terminal; it asks you what to do first (shop)"
+            cursor
         );
     }
 
@@ -2136,15 +2135,19 @@ mod tests {
         );
     }
 
-    /// Cursor's hooks also report the IDE's sessions, so a Cursor worker
-    /// can be on a machine without the cursor-agent CLI. Its `p` must still
+    /// Cursor's hooks also report cursor-agent's sessions, so a Cursor
+    /// worker can be on a machine without the Cursor app. Its `p` must still
     /// dispatch (through the first host that can), the bar must stay, and
     /// `h` must really move off that host rather than be swallowed.
     #[test]
     fn a_worker_whose_host_is_not_ready_dispatches_through_one_that_is() {
         use crate::roles::Backend;
+        // Only the CLI: Cursor is not ready, since dispatch opens only the app.
         fn cursor_missing(h: Backend) -> Option<String> {
-            (h == Backend::Cursor).then(|| "找不到 cursor-agent".to_owned())
+            match h {
+                Backend::Cursor => crate::roles::cursor_missing(false, true, true),
+                _ => None,
+            }
         }
         let (scene, _) = one_worker(pipeline::CURSOR_SOURCE);
         let mut core = core_with_scene(scene);
