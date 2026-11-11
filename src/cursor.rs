@@ -4,7 +4,9 @@
 //! keeps a per-session task log the task reader tails: Cursor's own
 //! transcript has the conversation but not the tool calls.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -541,6 +543,239 @@ mod front {
 pub fn transcripts_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join(".config/agent-office/cursor/transcripts"))
+}
+
+/// Cursor's on-disk projects, where a subagent's transcript lives under
+/// `agent-transcripts/<parent>/subagents/<id>.jsonl`.
+fn projects_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cursor/projects"))
+}
+
+/// How long a subagent index stays. A child that appears just after a walk
+/// waits this out; an ended turn is re-read from the file on each sweep.
+const SUBAGENT_INDEX_FOR: Duration = Duration::from_secs(2);
+
+/// Parent session id and transcript path for one Cursor subagent.
+#[derive(Clone)]
+struct SubagentFile {
+    parent_session: String,
+    path: PathBuf,
+}
+
+/// Subagent transcripts last seen on disk. Rebuilt when it goes stale or a
+/// live session is not in it yet: hooks often run before Cursor has written
+/// the nested path, so the child is seated as its own root.
+pub struct SubagentIndex {
+    at: Option<Instant>,
+    files: HashMap<String, SubagentFile>,
+}
+
+impl Default for SubagentIndex {
+    fn default() -> Self {
+        Self {
+            at: None,
+            files: HashMap::new(),
+        }
+    }
+}
+
+impl SubagentIndex {
+    /// Link each Cursor subagent the index can see, and walk out one whose
+    /// transcript has already ended. A lost `stop` otherwise leaves it
+    /// Running, and five quiet minutes put it in 卡住 with nothing to answer.
+    pub fn seat(
+        &mut self,
+        reducer: &mut pixtuoid_core::Reducer,
+        scene: &mut pixtuoid_core::SceneState,
+        now: SystemTime,
+    ) {
+        let Some(root) = projects_dir() else {
+            return;
+        };
+        self.seat_under(reducer, scene, &root, now);
+    }
+
+    fn seat_under(
+        &mut self,
+        reducer: &mut pixtuoid_core::Reducer,
+        scene: &mut pixtuoid_core::SceneState,
+        projects: &Path,
+        now: SystemTime,
+    ) {
+        if !scene.agents.values().any(needs_subagent_seat) {
+            return;
+        }
+        // A root session is never in this index, so "missing" cannot be the
+        // refresh: it would walk the projects tree on every sweep. A child
+        // that appears just after a walk waits out the interval.
+        if self.at.is_none_or(|t| t.elapsed() >= SUBAGENT_INDEX_FOR) {
+            self.files = index_subagents(projects);
+            self.at = Some(Instant::now());
+        }
+        apply_seats(reducer, scene, &self.files, now);
+    }
+}
+
+fn needs_subagent_seat(slot: &pixtuoid_core::AgentSlot) -> bool {
+    slot.exiting_at.is_none()
+        && slot.source.as_ref() == CURSOR_SOURCE
+        && (slot.parent_id.is_none()
+            || matches!(
+                slot.state,
+                pixtuoid_core::state::ActivityState::Running { .. }
+            ))
+}
+
+/// Every `<parent>/subagents/<id>.jsonl` under `projects`. A newer file wins
+/// when the same id was written twice.
+fn index_subagents(projects: &Path) -> HashMap<String, SubagentFile> {
+    let mut out = HashMap::new();
+    let Ok(projects) = std::fs::read_dir(projects) else {
+        return out;
+    };
+    for project in projects.flatten() {
+        let Ok(parents) = std::fs::read_dir(project.path().join("agent-transcripts")) else {
+            continue;
+        };
+        for parent in parents.flatten() {
+            let Ok(kind) = parent.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let Ok(parent_session) = parent.file_name().into_string() else {
+                continue;
+            };
+            let Ok(kids) = std::fs::read_dir(parent.path().join("subagents")) else {
+                continue;
+            };
+            for kid in kids.flatten() {
+                let path = kid.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let newer = out
+                    .get(id)
+                    .is_none_or(|have: &SubagentFile| mtime(&path) > mtime(&have.path));
+                if newer {
+                    out.insert(
+                        id.to_string(),
+                        SubagentFile {
+                            parent_session: parent_session.clone(),
+                            path,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+fn mtime(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+/// `Some(aborted)` when `path`'s last record is `turn_ended`.
+fn turn_ended(path: &Path) -> Option<bool> {
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut file = std::io::BufReader::new(file);
+    let start = len.saturating_sub(8192);
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start)).ok()?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text).ok()?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    if start > 0 {
+        // The first line is a record cut in half by the seek.
+        lines.next();
+    }
+    let last = lines.last()?;
+    let v: Value = serde_json::from_str(last).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("turn_ended") {
+        return None;
+    }
+    let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+    Some(matches!(
+        status,
+        "error" | "aborted" | "cancelled" | "canceled" | "failure"
+    ))
+}
+
+fn apply_seats(
+    reducer: &mut pixtuoid_core::Reducer,
+    scene: &mut pixtuoid_core::SceneState,
+    files: &HashMap<String, SubagentFile>,
+    now: SystemTime,
+) {
+    use pixtuoid_core::{AgentEvent, AgentId, Transport};
+
+    let due: Vec<(AgentId, String, PathBuf, bool)> = scene
+        .agents
+        .values()
+        .filter(|slot| needs_subagent_seat(slot))
+        .filter_map(|slot| {
+            let file = files.get(slot.session_id.as_ref())?;
+            Some((
+                slot.agent_id,
+                file.parent_session.clone(),
+                file.path.clone(),
+                slot.parent_id.is_none(),
+            ))
+        })
+        .collect();
+    for (id, parent_session, path, unlinked) in due {
+        if unlinked {
+            let cwd = scene
+                .agents
+                .get(&id)
+                .map(|s| s.cwd.as_ref().to_path_buf())
+                .unwrap_or_default();
+            let session_id = scene
+                .agents
+                .get(&id)
+                .map(|s| s.session_id.to_string())
+                .unwrap_or_default();
+            reducer.apply(
+                scene,
+                AgentEvent::SessionStart {
+                    agent_id: id,
+                    source: CURSOR_SOURCE.to_string(),
+                    session_id,
+                    cwd,
+                    parent_id: Some(AgentId::from_parts(CURSOR_SOURCE, &parent_session)),
+                },
+                now,
+                Transport::Hook,
+            );
+        }
+        let Some(aborted) = turn_ended(&path) else {
+            continue;
+        };
+        if scene
+            .agents
+            .get(&id)
+            .is_some_and(|s| s.exiting_at.is_some())
+        {
+            continue;
+        }
+        reducer.apply(
+            scene,
+            AgentEvent::TurnEnd {
+                agent_id: id,
+                turn: None,
+                aborted,
+            },
+            now,
+            Transport::Hook,
+        );
+    }
 }
 
 fn is_ours(command: &str) -> bool {
@@ -1205,5 +1440,120 @@ mod tests {
         assert_eq!(step(&mut w, &shop, at(0)), Step::Wait);
         assert_eq!(step(&mut w, &shop, at(9900)), Step::Wait);
         assert_eq!(step(&mut w, &shop, at(10_000)), Step::Timeout);
+    }
+
+    /// A subagent hook often runs before Cursor has a nested transcript path,
+    /// and its `stop` may never arrive. The office then seats it as a root
+    /// that is still "working", and five quiet minutes put it in 卡住 with
+    /// no prompt to answer. The transcript on disk is the parent and the end.
+    #[test]
+    fn a_subagent_whose_stop_never_arrived_nests_then_leaves_when_its_transcript_ends() {
+        use pixtuoid_core::source::decoder::{SOURCE_STAMP, decode_hook_payload};
+        use pixtuoid_core::state::ActivityState;
+        use pixtuoid_core::{AgentId, Reducer, SceneState, Transport};
+        use serde_json::json;
+        use std::sync::Arc;
+        use std::time::SystemTime;
+
+        let root = std::env::temp_dir().join(format!("ao-cu-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let parent_sid = "parent-sess";
+        let child_sid = "child-sess";
+        let other_sid = "root-sess";
+        let transcript = root
+            .join("proj")
+            .join("agent-transcripts")
+            .join(parent_sid)
+            .join("subagents")
+            .join(format!("{child_sid}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            "{\"role\":\"assistant\",\"message\":{\"content\":[]}}\n",
+        )
+        .unwrap();
+
+        let parent = AgentId::from_parts(CURSOR_SOURCE, parent_sid);
+        let child = AgentId::from_parts(CURSOR_SOURCE, child_sid);
+        let other = AgentId::from_parts(CURSOR_SOURCE, other_sid);
+        let mut scene = SceneState::uniform(8);
+        let mut reducer = Reducer::new();
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let feed = |reducer: &mut Reducer, scene: &mut SceneState, v: serde_json::Value| {
+            for ev in decode_hook_payload(v).unwrap() {
+                reducer.apply(scene, ev, now, Transport::Hook);
+            }
+        };
+        let hook = |event: &str, sid: &str| {
+            json!({
+                "hook_event_name": event,
+                "session_id": sid,
+                "cwd": "",
+                "workspace_roots": ["/repo/myclaw"],
+                "tool_name": "Read",
+                "tool_use_id": "c1",
+                "tool_input": {"file_path": "/repo/a.rs"},
+                SOURCE_STAMP: CURSOR_SOURCE,
+            })
+        };
+        feed(&mut reducer, &mut scene, hook("sessionStart", parent_sid));
+        feed(&mut reducer, &mut scene, hook("preToolUse", child_sid));
+        feed(&mut reducer, &mut scene, hook("postToolUse", child_sid));
+        feed(&mut reducer, &mut scene, hook("preToolUse", other_sid));
+        assert!(
+            scene.agents[&child].parent_id.is_none(),
+            "no nested path on the hook, so the child is a root"
+        );
+        assert!(matches!(
+            scene.agents[&child].state,
+            ActivityState::Running { .. }
+        ));
+
+        let mut index = SubagentIndex::default();
+        index.seat_under(&mut reducer, &mut scene, &root, now);
+        assert_eq!(scene.agents[&child].parent_id, Some(parent));
+        assert!(scene.agents[&child].exiting_at.is_none());
+        assert!(
+            scene.agents[&other].parent_id.is_none() && scene.agents[&other].exiting_at.is_none(),
+            "a root session is not a subagent file"
+        );
+        let views = Arc::new(std::collections::HashMap::from([(
+            child,
+            crate::tasks::TaskView {
+                stuck: Some(crate::tasks::Stuck::Quiet(12)),
+                ..crate::tasks::TaskView::default()
+            },
+        )]));
+        let order = crate::panel::order(&scene, &views, now, &std::collections::HashMap::new());
+        assert_eq!(
+            order.iter().find(|(id, _)| *id == child).map(|(_, d)| *d),
+            Some(1),
+            "it sits under its parent, not in 卡住 on its own"
+        );
+        assert!(
+            order.iter().filter(|(_, d)| *d == 0).all(|(id, _)| {
+                crate::panel::Group::of(&scene.agents[id], views.get(id), now, false)
+                    != crate::panel::Group::Stuck
+            }),
+            "no root is stuck"
+        );
+
+        std::fs::write(
+            &transcript,
+            "{\"role\":\"assistant\",\"message\":{\"content\":[]}}\n{\"type\":\"turn_ended\",\"status\":\"success\"}\n",
+        )
+        .unwrap();
+        index.seat_under(&mut reducer, &mut scene, &root, now);
+        assert_eq!(
+            scene.agents[&child].exiting_at,
+            Some(now),
+            "turn_ended is the stop that never arrived"
+        );
+        assert!(scene.agents[&parent].exiting_at.is_none());
+        assert!(
+            crate::tasks::stuck_at_work(&scene.agents[&child], views.get(&child)).is_none(),
+            "a child already leaving is not something to handle"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -107,6 +107,9 @@ async fn reducer_task(
     let connected: HashSet<String> = SHOWN_SOURCES.iter().map(|s| s.to_string()).collect();
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A Cursor subagent whose hook omitted the nested transcript, and whose
+    // `stop` never arrived, stays Running until this reads the transcript.
+    let mut subagents = crate::cursor::SubagentIndex::default();
     loop {
         let before = scene.floor_capacities;
         for (i, a) in floor_caps.caps.iter().enumerate() {
@@ -143,6 +146,7 @@ async fn reducer_task(
             }
             _ = sweep.tick() => {
                 let now = SystemTime::now();
+                subagents.seat(&mut reducer, &mut scene, now);
                 // Walks out a slot that slipped the gate with a blank source.
                 reducer.reconcile_connected(&mut scene, &connected, now);
                 reducer.tick(&mut scene, now);
